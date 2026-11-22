@@ -8,10 +8,8 @@ license.workspace = true
 [dependencies]
 ranki-model.workspace = true
 ranki-core.workspace = true
-ranki-storage.workspace = true
 eframe.workspace = true
 egui.workspace = true
-chrono.workspace = true
 
 [lints]
 workspace = true
