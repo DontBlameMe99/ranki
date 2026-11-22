@@ -47,6 +47,12 @@
 
         src = craneLib.cleanCargoSource ./.;
 
+        guiLibs = pkgs.lib.makeLibraryPath [
+          pkgs.wayland
+          pkgs.libxkbcommon
+          pkgs.libglvnd
+        ];
+
         commonArgs = {
           inherit src;
           strictDeps = true;
@@ -59,6 +65,11 @@
           commonArgs
           // {
             inherit cargoArtifacts;
+            nativeBuildInputs = [pkgs.makeWrapper];
+            postFixup = ''
+              wrapProgram $out/bin/${binName} \
+                --prefix LD_LIBRARY_PATH : "${guiLibs}"
+            '';
           }
         );
 
@@ -183,7 +194,10 @@
 
           RUST_BACKTRACE = "1";
 
-          inherit (hooks) shellHook;
+          shellHook = ''
+            ${hooks.shellHook}
+            export LD_LIBRARY_PATH="${guiLibs}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          '';
         };
       }
     );
