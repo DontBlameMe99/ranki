@@ -1,1 +1,654 @@
-//! Anki-compatible SQLite storage. Implemented by the storage worktree.
+//! Anki-compatible SQLite storage for Ranki.
+//!
+//! Collections use Anki's `collection.anki2` tables, so files written here can
+//! be opened by Anki. Existing collections are read as they are; their schema
+//! and collection JSON are never rewritten.
+//!
+//! # Search syntax
+//!
+//! [`Collection::find_cards`] accepts a subset of Anki's search bar:
+//!
+//! - `deck:Name` matches a deck and all of its subdecks.
+//! - `tag:Name` matches a note tag.
+//! - `note:Name` matches a note model name.
+//! - `is:new`, `is:learn`, `is:review`, `is:suspended`, `is:buried`.
+//! - Plain words match note fields. `*` matches any number of characters.
+//! - Quoted text keeps spaces inside one term; terms are combined with AND.
+//!
+//! All values are bound as SQL parameters.
+
+mod anki;
+mod records;
+mod schema;
+mod search;
+
+use std::fmt::Display;
+use std::path::Path;
+use std::path::PathBuf;
+
+pub use ranki_model::StoreError;
+
+use ranki_model::Card;
+use ranki_model::Deck;
+use ranki_model::DeckStats;
+use ranki_model::Id;
+use ranki_model::NewNote;
+use ranki_model::NoteModel;
+use ranki_model::RevLog;
+use ranki_model::ReviewDecision;
+use ranki_model::Store;
+use rusqlite::Connection;
+use rusqlite::OpenFlags;
+use rusqlite::OptionalExtension;
+use rusqlite::Transaction;
+use rusqlite::params;
+use rusqlite::params_from_iter;
+use rusqlite::types::Value as SqlValue;
+use serde_json::Value as Json;
+use serde_json::json;
+
+/// Human-readable summary of the supported [`Store::find_cards`] syntax.
+pub const SEARCH_SYNTAX: &str = "deck:, tag:, note:, is:new/learn/review/suspended/buried, plain field text, * wildcard";
+
+/// An Anki collection backed by a SQLite file.
+pub struct Collection {
+    conn: Connection,
+    path: PathBuf,
+}
+
+impl Collection {
+    /// Creates a new Anki collection at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file already exists or SQLite cannot create
+    /// the schema and the default collection row.
+    pub fn create(path: &Path) -> Result<Self, StoreError> {
+        if path.exists() {
+            return Err(StoreError::InvalidData(format!(
+                "collection already exists: {}",
+                path.display()
+            )));
+        }
+        let mut conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+        )
+        .map_err(backend)?;
+        register_collations(&conn)?;
+        let transaction = conn.transaction().map_err(backend)?;
+        for statement in schema::CREATE_STATEMENTS {
+            transaction.execute(statement, []).map_err(backend)?;
+        }
+        let now_secs = anki::now_secs()?;
+        let col = schema::default_col(now_secs, anki::now_ms()?);
+        let text = |key: &str| -> Result<String, StoreError> {
+            let value =
+                col.get(key).ok_or_else(|| invalid("missing col field"))?;
+            serde_json::to_string(value)
+                .map_err(|error| invalid(error.to_string()))
+        };
+        transaction
+            .execute(
+                "INSERT INTO col (id, crt, mod, scm, ver, dty, usn, ls, conf, models, decks, dconf, \
+                 tags) VALUES (1, ?1, ?2, ?3, ?4, 0, 0, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    col.get("crt").and_then(Json::as_i64).unwrap_or(now_secs),
+                    col.get("mod").and_then(Json::as_i64).unwrap_or_default(),
+                    col.get("scm").and_then(Json::as_i64).unwrap_or_default(),
+                    col.get("ver").and_then(Json::as_i64).unwrap_or_default(),
+                    col.get("ls").and_then(Json::as_i64).unwrap_or_default(),
+                    text("conf")?,
+                    text("models")?,
+                    text("decks")?,
+                    text("dconf")?,
+                    text("tags")?,
+                ],
+            )
+            .map_err(backend)?;
+        transaction.commit().map_err(backend)?;
+        Self::open(path)
+    }
+
+    /// Opens an existing collection for reading and writing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file is missing, locked, or has no `col`
+    /// table.
+    pub fn open(path: &Path) -> Result<Self, StoreError> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .map_err(backend)?;
+        register_collations(&conn)?;
+        if !records::table_exists(&conn, "col")? {
+            return Err(invalid("not an Anki collection"));
+        }
+        Ok(Self {
+            conn,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Returns the collection's file path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Checkpoints the write-ahead log, if the collection uses one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot report or checkpoint the journal.
+    pub fn checkpoint(&self) -> Result<(), StoreError> {
+        let mode: String = self
+            .conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .map_err(backend)?;
+        if mode.eq_ignore_ascii_case("wal") {
+            self.conn
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .map_err(backend)?;
+        }
+        Ok(())
+    }
+
+    /// Checkpoints and closes the collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the checkpoint or the SQLite close fails.
+    pub fn close(self) -> Result<(), StoreError> {
+        self.checkpoint()?;
+        let Self { conn, .. } = self;
+        conn.close().map_err(|(_, error)| backend(error))
+    }
+
+    /// Returns a single review log entry by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be read.
+    pub fn revlog(&self, id: Id) -> Result<Option<RevLog>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT id, cid, usn, ease, ivl, lastIvl, factor, time, type FROM revlog WHERE id = \
+                 ?1",
+                [id],
+                records::revlog_from_row,
+            )
+            .optional()
+            .map_err(backend)
+    }
+
+    fn deck_list(&self) -> Result<Vec<Deck>, StoreError> {
+        let col = records::read_col(&self.conn)?;
+        let decks = records::decks_from_json(&col.decks)?;
+        if decks.is_empty() && records::table_exists(&self.conn, "decks")? {
+            return records::decks_from_tables(&self.conn);
+        }
+        Ok(decks)
+    }
+
+    fn model_list(&self) -> Result<Vec<NoteModel>, StoreError> {
+        let col = records::read_col(&self.conn)?;
+        let models = records::models_from_json(&col.models)?;
+        if models.is_empty() && records::table_exists(&self.conn, "notetypes")?
+        {
+            return records::models_from_tables(&self.conn);
+        }
+        Ok(models)
+    }
+
+    fn deck_subtree(&self, deck_id: Id) -> Result<Vec<Id>, StoreError> {
+        let decks = self.deck_list()?;
+        let Some(root) = decks.iter().find(|deck| deck.id == deck_id) else {
+            return Ok(Vec::new());
+        };
+        let prefix = format!("{}::", root.name);
+        Ok(decks
+            .iter()
+            .filter(|deck| deck.id == deck_id || deck.name.starts_with(&prefix))
+            .map(|deck| deck.id)
+            .collect())
+    }
+
+    fn deck_filter(
+        &self,
+        deck_id: Option<Id>,
+        first_placeholder: i64,
+    ) -> Result<DeckFilter, StoreError> {
+        let Some(id) = deck_id else {
+            return Ok(DeckFilter {
+                clause: String::new(),
+                params: Vec::new(),
+                missing: false,
+            });
+        };
+        let ids = self.deck_subtree(id)?;
+        if ids.is_empty() {
+            return Ok(DeckFilter {
+                clause: String::new(),
+                params: Vec::new(),
+                missing: true,
+            });
+        }
+        Ok(DeckFilter {
+            clause: format!(
+                "c.did IN ({})",
+                placeholders(first_placeholder, ids.len())
+            ),
+            params: ids.into_iter().map(SqlValue::Integer).collect(),
+            missing: false,
+        })
+    }
+}
+
+impl Store for Collection {
+    fn decks(&self) -> Result<Vec<Deck>, StoreError> {
+        self.deck_list()
+    }
+
+    fn create_deck(&mut self, name: &str) -> Result<Deck, StoreError> {
+        let deck_name = name.trim();
+        if deck_name.is_empty()
+            || deck_name.split("::").any(|part| part.trim().is_empty())
+        {
+            return Err(invalid("invalid deck name"));
+        }
+        let decks = self.deck_list()?;
+        if decks.iter().any(|deck| deck.name == deck_name) {
+            return Err(invalid(format!("deck already exists: {deck_name}")));
+        }
+        let col = records::read_col(&self.conn)?;
+        let id = anki::next_id()?;
+        let now_secs = anki::now_secs()?;
+        let now_ms = anki::now_ms()?;
+        let usn = col
+            .usn
+            .checked_add(1)
+            .ok_or_else(|| invalid("usn overflow"))?;
+        let modern = col.decks.trim().is_empty()
+            && records::table_exists(&self.conn, "decks")?;
+        if modern {
+            self.conn
+                .execute(
+                    "INSERT INTO decks (id, name, mtime_secs, usn, common, kind) VALUES (?1, ?2, \
+                     ?3, ?4, ?5, ?6)",
+                    params![
+                        id,
+                        anki::encode_deck_name(deck_name),
+                        now_secs,
+                        usn,
+                        anki::deck_common(usn, now_secs),
+                        Vec::<u8>::new(),
+                    ],
+                )
+                .map_err(backend)?;
+            self.conn
+                .execute(
+                    "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
+                    params![now_ms, now_ms, usn, now_ms],
+                )
+                .map_err(backend)?;
+        } else {
+            let mut value: Json = serde_json::from_str(&col.decks)
+                .map_err(|error| invalid(error.to_string()))?;
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| invalid("decks is not an object"))?;
+            object.insert(
+                id.to_string(),
+                json!({"id": id, "name": deck_name, "usn": usn, "mod": now_secs, "conf": 1, "desc": "", "dyn": 0}),
+            );
+            let decks_json = serde_json::to_string(&value)
+                .map_err(|error| invalid(error.to_string()))?;
+            self.conn
+                .execute(
+                    "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4, decks = ?5 WHERE id = 1",
+                    params![now_ms, now_ms, usn, now_ms, decks_json],
+                )
+                .map_err(backend)?;
+        }
+        Ok(Deck {
+            id,
+            name: deck_name.into(),
+            description: String::new(),
+        })
+    }
+
+    fn models(&self) -> Result<Vec<NoteModel>, StoreError> {
+        self.model_list()
+    }
+
+    fn find_cards(&self, query: &str) -> Result<Vec<Id>, StoreError> {
+        let search =
+            search::build(query, &self.deck_list()?, &self.model_list()?)?;
+        let sql = format!(
+            "SELECT c.id FROM cards c JOIN notes n ON n.id = c.nid WHERE {} ORDER BY c.id",
+            search.clause
+        );
+        let mut statement = self.conn.prepare(&sql).map_err(backend)?;
+        let rows = statement
+            .query_map(params_from_iter(search.params), |row| {
+                row.get::<_, Id>(0)
+            })
+            .map_err(backend)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(backend)?);
+        }
+        Ok(ids)
+    }
+
+    fn due_cards(
+        &self,
+        deck_id: Option<Id>,
+        limit: usize,
+        now_secs: i64,
+    ) -> Result<Vec<Card>, StoreError> {
+        let limit_value =
+            i64::try_from(limit).map_err(|_| invalid("limit too large"))?;
+        if limit_value == 0 {
+            return Ok(Vec::new());
+        }
+        let filter = self.deck_filter(deck_id, 4)?;
+        if filter.missing {
+            return Ok(Vec::new());
+        }
+        let where_clause = if filter.clause.is_empty() {
+            String::new()
+        } else {
+            format!("AND {}", filter.clause)
+        };
+        let now_ms = now_secs
+            .checked_mul(1000)
+            .ok_or_else(|| invalid("timestamp overflow"))?;
+        let today = anki::day_number(now_secs)?;
+        let sql = format!(
+            "SELECT c.id, c.nid, c.did, c.ord, c.mod, c.usn, c.type, c.queue, c.due, c.ivl, \
+             c.factor, c.reps, c.lapses, c.left, c.odue, c.odid, c.flags, c.data FROM cards c \
+             WHERE c.queue IN (0, 1, 2, 3) {where_clause} AND (c.queue = 0 OR (c.queue = 1 AND \
+             c.due <= ?1) OR (c.queue IN (2, 3) AND c.due <= ?2)) ORDER BY CASE c.queue WHEN 1 \
+             THEN 0 WHEN 3 THEN 1 WHEN 2 THEN 2 ELSE 3 END, c.due, c.id LIMIT ?3"
+        );
+        let mut parameters: Vec<SqlValue> = vec![
+            SqlValue::Integer(now_ms),
+            SqlValue::Integer(today),
+            SqlValue::Integer(limit_value),
+        ];
+        parameters.extend(filter.params);
+        let mut statement = self.conn.prepare(&sql).map_err(backend)?;
+        let rows = statement
+            .query_map(params_from_iter(parameters), records::card_from_row)
+            .map_err(backend)?;
+        let mut cards = Vec::new();
+        for row in rows {
+            cards.push(row.map_err(backend)?);
+        }
+        Ok(cards)
+    }
+
+    fn card(&self, id: Id) -> Result<Option<Card>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, lapses, \
+                 left, odue, odid, flags, data FROM cards WHERE id = ?1",
+                [id],
+                records::card_from_row,
+            )
+            .optional()
+            .map_err(backend)
+    }
+
+    fn note(&self, id: Id) -> Result<Option<ranki_model::Note>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data FROM notes \
+                 WHERE id = ?1",
+                [id],
+                records::note_from_row,
+            )
+            .optional()
+            .map_err(backend)
+    }
+
+    fn add_note(&mut self, note: &NewNote) -> Result<Vec<Id>, StoreError> {
+        let model = self
+            .model_list()?
+            .into_iter()
+            .find(|model| model.id == note.model_id)
+            .ok_or_else(|| {
+                StoreError::NotFound(format!("model {}", note.model_id))
+            })?;
+        if note.fields.is_empty() || note.fields.len() != model.fields.len() {
+            return Err(invalid("field count does not match model"));
+        }
+        if !self.deck_subtree(note.deck_id)?.contains(&note.deck_id) {
+            return Err(StoreError::NotFound(format!("deck {}", note.deck_id)));
+        }
+        let id = anki::next_id()?;
+        let guid = anki::guid(id)?;
+        let modified = anki::now_secs()?;
+        let first = note.fields.first().map_or("", String::as_str);
+        let sort_field = anki::sort_field(&note.fields, 0);
+        let checksum = anki::checksum(first);
+        let transaction = self.conn.transaction().map_err(backend)?;
+        let usn = update_col(&transaction, false)?;
+        let next_position = next_position(&transaction)?;
+        transaction
+            .execute(
+                "INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, '')",
+                params![
+                    id,
+                    guid,
+                    note.model_id,
+                    modified,
+                    usn,
+                    anki::encode_tags(&note.tags),
+                    anki::encode_fields(&note.fields),
+                    sort_field,
+                    anki::csum_value(checksum),
+                ],
+            )
+            .map_err(backend)?;
+        let mut cards: Vec<Id> = Vec::with_capacity(model.templates.len());
+        for position in 0..model.templates.len() {
+            let card_id = anki::next_id()?;
+            let ordinal =
+                anki::as_u16(i64::try_from(position).unwrap_or_default())?;
+            let due = next_position.saturating_add(i64::from(ordinal));
+            transaction
+                .execute(
+                    "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, \
+                     reps, lapses, left, odue, odid, flags, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6, \
+                     0, 0, ?7, 0, 0, 0, 0, 0, 0, 0, 0, '')",
+                    params![card_id, id, note.deck_id, ordinal, modified, usn, due],
+                )
+                .map_err(backend)?;
+            cards.push(card_id);
+        }
+        set_next_position(
+            &transaction,
+            next_position
+                .saturating_add(i64::try_from(cards.len()).unwrap_or_default()),
+        )?;
+        transaction.commit().map_err(backend)?;
+        Ok(cards)
+    }
+
+    fn apply_review(
+        &mut self,
+        decision: &ReviewDecision,
+    ) -> Result<(), StoreError> {
+        let transaction = self.conn.transaction().map_err(backend)?;
+        let usn = update_col(&transaction, true)?;
+        let card = &decision.card;
+        let updated = transaction
+            .execute(
+                "UPDATE cards SET did = ?1, mod = ?2, usn = ?3, type = ?4, queue = ?5, due = ?6, \
+                 ivl = ?7, factor = ?8, reps = ?9, lapses = ?10, left = ?11, odue = ?12, odid = \
+                 ?13, flags = ?14, data = ?15 WHERE id = ?16",
+                params![
+                    card.deck_id,
+                    card.modified,
+                    usn,
+                    card.card_type.code(),
+                    card.queue.code(),
+                    card.due,
+                    card.interval,
+                    card.factor,
+                    card.reps,
+                    card.lapses,
+                    card.left,
+                    card.original_due,
+                    card.original_deck_id,
+                    card.flags,
+                    card.data,
+                    card.id,
+                ],
+            )
+            .map_err(backend)?;
+        if updated == 0 {
+            return Err(StoreError::NotFound(format!("card {}", card.id)));
+        }
+        let log = &decision.revlog;
+        transaction
+            .execute(
+                "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type) VALUES \
+                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    log.id,
+                    card.id,
+                    usn,
+                    log.ease.code(),
+                    log.interval,
+                    log.last_interval,
+                    log.factor,
+                    log.time_ms,
+                    log.kind.code(),
+                ],
+            )
+            .map_err(backend)?;
+        transaction.commit().map_err(backend)?;
+        Ok(())
+    }
+
+    fn stats(
+        &self,
+        deck_id: Option<Id>,
+        _now_secs: i64,
+    ) -> Result<DeckStats, StoreError> {
+        let filter = self.deck_filter(deck_id, 1)?;
+        if filter.missing {
+            return Ok(DeckStats::default());
+        }
+        let where_clause = if filter.clause.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", filter.clause)
+        };
+        let sql = format!(
+            "SELECT SUM(CASE WHEN c.queue = 0 THEN 1 ELSE 0 END), \
+             SUM(CASE WHEN c.queue IN (1, 3) THEN 1 ELSE 0 END), \
+             SUM(CASE WHEN c.queue = 2 THEN 1 ELSE 0 END), COUNT(*) FROM cards c {where_clause}"
+        );
+        let mut statement = self.conn.prepare(&sql).map_err(backend)?;
+        let counts: Counts = statement
+            .query_row(params_from_iter(filter.params), |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(backend)?;
+        Ok(DeckStats {
+            new_cards: usize::try_from(counts.0.unwrap_or_default())
+                .unwrap_or_default(),
+            learning_cards: usize::try_from(counts.1.unwrap_or_default())
+                .unwrap_or_default(),
+            review_cards: usize::try_from(counts.2.unwrap_or_default())
+                .unwrap_or_default(),
+            total_cards: usize::try_from(counts.3).unwrap_or_default(),
+        })
+    }
+
+    fn collection_modified(&self) -> Result<i64, StoreError> {
+        Ok(records::read_col(&self.conn)?.modified)
+    }
+}
+
+fn register_collations(conn: &Connection) -> Result<(), StoreError> {
+    conn.create_collation("unicase", |left, right| {
+        left.to_lowercase().cmp(&right.to_lowercase())
+    })
+    .map_err(backend)
+}
+
+pub(crate) fn backend(error: impl Display) -> StoreError {
+    StoreError::Backend(error.to_string())
+}
+
+pub(crate) fn invalid(message: impl Into<String>) -> StoreError {
+    StoreError::InvalidData(message.into())
+}
+
+struct DeckFilter {
+    clause: String,
+    params: Vec<SqlValue>,
+    missing: bool,
+}
+
+type Counts = (Option<i64>, Option<i64>, Option<i64>, i64);
+
+fn placeholders(start: i64, count: usize) -> String {
+    (0..count)
+        .map(|index| {
+            let number =
+                start.saturating_add(i64::try_from(index).unwrap_or_default());
+            format!("?{number}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+fn update_col(conn: &Connection, bump_scm: bool) -> Result<i32, StoreError> {
+    let col = records::read_col(conn)?;
+    let now = anki::now_ms()?;
+    let usn = col
+        .usn
+        .checked_add(1)
+        .ok_or_else(|| invalid("usn overflow"))?;
+    let scm = if bump_scm { now } else { col.scm };
+    conn.execute(
+        "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
+        params![now, scm, usn, now],
+    )
+    .map_err(backend)?;
+    Ok(usn)
+}
+
+fn next_position(conn: &Connection) -> Result<i64, StoreError> {
+    let col = records::read_col(conn)?;
+    let config: Json = serde_json::from_str(&col.conf)
+        .map_err(|error| invalid(error.to_string()))?;
+    Ok(config.get("nextPos").and_then(Json::as_i64).unwrap_or(1))
+}
+
+fn set_next_position(
+    transaction: &Transaction<'_>,
+    position: i64,
+) -> Result<(), StoreError> {
+    let col = records::read_col(transaction)?;
+    let mut config: Json = serde_json::from_str(&col.conf)
+        .map_err(|error| invalid(error.to_string()))?;
+    let object = config
+        .as_object_mut()
+        .ok_or_else(|| invalid("conf is not an object"))?;
+    object.insert("nextPos".into(), json!(position));
+    let config_json = serde_json::to_string(&config)
+        .map_err(|error| invalid(error.to_string()))?;
+    transaction
+        .execute("UPDATE col SET conf = ?1 WHERE id = 1", [config_json])
+        .map(|_| ())
+        .map_err(backend)
+}

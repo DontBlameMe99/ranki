@@ -6,8 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+sha1 = "0.10"
 ranki-model.workspace = true
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["collation"] }
 serde.workspace = true
 serde_json.workspace = true
 

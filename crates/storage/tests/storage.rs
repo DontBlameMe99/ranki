@@ -1,0 +1,487 @@
+#![expect(clippy::expect_used, reason = "test setup panics on failure")]
+//! Integration tests for the Anki-compatible collection store.
+
+use std::fs;
+use std::path::Path;
+use std::path::PathBuf;
+use std::thread::sleep;
+use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
+use ranki_model::CardQueue;
+use ranki_model::CardType;
+use ranki_model::NewNote;
+use ranki_model::Rating;
+use ranki_model::RevLog;
+use ranki_model::RevLogKind;
+use ranki_model::ReviewDecision;
+use ranki_model::Store;
+use ranki_model::StoreError;
+use ranki_storage::Collection;
+use rusqlite::Connection;
+use rusqlite::OpenFlags;
+use serde_json::Value;
+use sha1::Digest;
+use sha1::Sha1;
+use tempfile::TempDir;
+
+fn fixture() -> (TempDir, PathBuf) {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("collection.anki2");
+    Collection::create(&path).expect("create");
+    (directory, path)
+}
+
+fn read_only(path: &Path) -> Connection {
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("read only")
+}
+
+fn now_secs() -> i64 {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock");
+    i64::try_from(elapsed.as_secs()).expect("timestamp")
+}
+
+fn note(fields: &[&str], tags: &[&str]) -> NewNote {
+    NewNote {
+        model_id: 1,
+        deck_id: 1,
+        fields: fields.iter().map(|value| (*value).into()).collect(),
+        tags: tags.iter().map(|value| (*value).into()).collect(),
+    }
+}
+
+#[test]
+fn create_writes_anki_schema_and_default_json() {
+    let (_directory, path) = fixture();
+    let conn = read_only(&path);
+    let tables: Vec<String> = conn
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+        )
+        .expect("prepare")
+        .query_map([], |row| row.get(0))
+        .expect("query")
+        .map(|row| row.expect("row"))
+        .collect();
+    for table in ["cards", "col", "graves", "notes", "revlog"] {
+        assert!(tables.iter().any(|name| name == table), "missing {table}");
+    }
+    let indexes: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+        .expect("prepare")
+        .query_map([], |row| row.get(0))
+        .expect("query")
+        .map(|row| row.expect("row"))
+        .collect();
+    assert!(indexes.contains(&"ix_cards_sched".to_owned()));
+    assert!(indexes.contains(&"idx_graves_pending".to_owned()));
+    let (configuration, models, decks, dconf, tags): (
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT conf, models, decks, dconf, tags FROM col WHERE id = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .expect("col row");
+    for value in [&configuration, &models, &decks, &dconf, &tags] {
+        let parsed: Value = serde_json::from_str(value).expect("valid JSON");
+        assert!(parsed.is_object());
+    }
+    let model_json: Value = serde_json::from_str(&models).expect("models");
+    assert_eq!(model_json["1"]["name"], "Basic");
+    assert_eq!(model_json["1"]["flds"][0]["name"], "Front");
+    assert_eq!(model_json["1"]["tmpls"][0]["qfmt"], "{{Front}}");
+    let deck_json: Value = serde_json::from_str(&decks).expect("decks");
+    assert_eq!(deck_json["1"]["name"], "Default");
+}
+
+#[test]
+fn create_rejects_existing_collection_and_open_rejects_missing_file() {
+    let (_directory, path) = fixture();
+    assert!(matches!(
+        Collection::create(&path),
+        Err(StoreError::InvalidData(_))
+    ));
+    let missing = path.with_file_name("missing.anki2");
+    assert!(matches!(
+        Collection::open(&missing),
+        Err(StoreError::Backend(_))
+    ));
+}
+
+#[test]
+fn add_note_stores_anki_fields_tags_sort_field_and_checksum() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let ids = store
+        .add_note(&note(&["<b>hello</b>", "world"], &["one", "two"]))
+        .expect("add note");
+    let card = store.card(ids[0]).expect("card").expect("card exists");
+    let saved = store
+        .note(card.note_id)
+        .expect("note")
+        .expect("note exists");
+    assert_eq!(saved.fields, ["<b>hello</b>", "world"]);
+    assert_eq!(saved.tags, ["one", "two"]);
+    assert_eq!(saved.sort_field, "hello");
+    let digest = Sha1::digest(b"hello");
+    let unsigned =
+        u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    let expected = if unsigned > 2_147_483_647 {
+        i32::try_from(
+            i64::from(unsigned)
+                .saturating_sub(i64::from(u32::MAX))
+                .saturating_sub(1),
+        )
+        .expect("checksum")
+    } else {
+        i32::try_from(unsigned).expect("checksum")
+    };
+    assert_eq!(saved.checksum, expected);
+    let other_ids = store
+        .add_note(&note(&["other", "world"], &[]))
+        .expect("add");
+    let other_card = store.card(other_ids[0]).expect("card").expect("exists");
+    let other = store
+        .note(other_card.note_id)
+        .expect("note")
+        .expect("exists");
+    assert_ne!(saved.guid, other.guid);
+    assert_eq!(saved.guid.len(), other.guid.len());
+    assert!(saved.guid.is_ascii());
+}
+
+#[test]
+fn add_note_creates_one_card_per_template() {
+    let (_directory, path) = fixture();
+    {
+        let conn = Connection::open(&path).expect("open");
+        let models: String = conn
+            .query_row("SELECT models FROM col WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("models");
+        let mut model_json: Value =
+            serde_json::from_str(&models).expect("parse");
+        let template = model_json["1"]["tmpls"][0].clone();
+        let templates =
+            model_json["1"]["tmpls"].as_array_mut().expect("templates");
+        templates.push(template);
+        conn.execute(
+            "UPDATE col SET models = ?1 WHERE id = 1",
+            [serde_json::to_string(&model_json).expect("serialize")],
+        )
+        .expect("update");
+    }
+    let mut store = Collection::open(&path).expect("open");
+    assert_eq!(store.models().expect("models")[0].templates.len(), 2);
+    let ids = store.add_note(&note(&["front", "back"], &[])).expect("add");
+    assert_eq!(ids.len(), 2);
+    let cards: Vec<_> = ids
+        .iter()
+        .map(|id| store.card(*id).expect("card").expect("exists"))
+        .collect();
+    assert_eq!(cards[0].ordinal, 0);
+    assert_eq!(cards[1].ordinal, 1);
+    assert_eq!(cards[0].note_id, cards[1].note_id);
+    assert_ne!(cards[0].due, cards[1].due);
+}
+
+#[test]
+fn create_deck_builds_hierarchy_and_filters_subdecks() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let parent = store.create_deck("Study").expect("parent");
+    let child = store.create_deck("Study::Languages").expect("child");
+    let names: Vec<_> = store
+        .decks()
+        .expect("decks")
+        .into_iter()
+        .map(|deck| deck.name)
+        .collect();
+    assert!(names.contains(&"Study".to_owned()));
+    assert!(names.contains(&"Study::Languages".to_owned()));
+    let mut new_note = note(&["bonjour", "hello"], &[]);
+    new_note.deck_id = child.id;
+    let ids = store.add_note(&new_note).expect("add");
+    let parent_cards = store
+        .due_cards(Some(parent.id), 10, now_secs())
+        .expect("due");
+    assert!(parent_cards.iter().any(|card| card.id == ids[0]));
+    let stats = store.stats(Some(parent.id), now_secs()).expect("stats");
+    assert_eq!(stats.new_cards, 1);
+    let found = store.find_cards("deck:Study").expect("find");
+    assert!(found.contains(&ids[0]));
+    assert!(store.create_deck("Study").is_err());
+    assert!(store.create_deck("Bad::").is_err());
+}
+
+#[test]
+fn due_cards_respects_queue_and_time_windows() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let today = now.checked_div(86_400).expect("day");
+    let conn = Connection::open(&path).expect("open");
+    let rows = [
+        (10_i64, 0_i64, 7_i64),
+        (11, 1, now.saturating_mul(1000)),
+        (12, 1, now.saturating_mul(1000).saturating_add(60_000)),
+        (13, 2, today),
+        (14, 2, today.saturating_add(1)),
+        (15, 3, today),
+        (16, 3, today.saturating_add(1)),
+    ];
+    for (id, queue, due) in rows {
+        conn.execute(
+            "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, \
+             lapses, left, odue, odid, flags, data) VALUES (?1, 1, 1, 0, 0, 0, 0, ?2, ?3, 0, 0, \
+             0, 0, 0, 0, 0, 0, '')",
+            [id, queue, due],
+        )
+        .expect("insert card");
+    }
+    let store = Collection::open(&path).expect("open");
+    let due_ids: Vec<_> = store
+        .due_cards(None, 50, now)
+        .expect("due")
+        .into_iter()
+        .map(|card| card.id)
+        .collect();
+    assert_eq!(due_ids, [11, 15, 13, 10]);
+    let limited = store.due_cards(None, 2, now).expect("due");
+    assert_eq!(limited.len(), 2);
+    assert_eq!(
+        store.due_cards(None, 0, now).expect("due"),
+        [] as [ranki_model::Card; 0]
+    );
+}
+
+#[test]
+fn find_cards_matches_text_wildcards_and_state() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(&["alpha question", "answer"], &[]))
+        .expect("add");
+    store
+        .add_note(&note(&["beta question", "answer"], &[]))
+        .expect("add");
+    assert_eq!(store.find_cards("alpha").expect("find").len(), 1);
+    assert_eq!(store.find_cards("question").expect("find").len(), 2);
+    assert_eq!(store.find_cards("alpha*").expect("find").len(), 1);
+    assert_eq!(store.find_cards("is:new").expect("find").len(), 2);
+    assert_eq!(store.find_cards("is:review").expect("find"), [] as [i64; 0]);
+    assert!(store.find_cards("is:unknown").is_err());
+    let quoted = store.find_cards("\"alpha question\"").expect("find");
+    assert_eq!(quoted.len(), 1);
+}
+
+#[test]
+fn find_cards_matches_deck_tag_and_model() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let deck = store.create_deck("Languages::French").expect("deck");
+    let mut new_note = note(&["bonjour", "hello"], &["french"]);
+    new_note.deck_id = deck.id;
+    let ids = store.add_note(&new_note).expect("add");
+    assert_eq!(store.find_cards("tag:french").expect("find"), ids);
+    assert_eq!(store.find_cards("note:Basic").expect("find"), ids);
+    assert_eq!(
+        store.find_cards("tag:english").expect("find"),
+        [] as [i64; 0]
+    );
+    assert_eq!(store.find_cards("deck:Languages").expect("find"), ids);
+    assert_eq!(
+        store
+            .find_cards("deck:Languages::French tag:french")
+            .expect("find"),
+        ids
+    );
+}
+
+#[test]
+fn find_cards_does_not_interpret_sql_injection() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(&["secret", "answer"], &["safe"]))
+        .expect("add");
+    for query in [
+        "' OR 1=1 --",
+        "deck:Default' OR 1=1 --",
+        "tag:safe' OR '1'='1",
+    ] {
+        assert!(
+            store.find_cards(query).expect("no injection").is_empty(),
+            "{query}"
+        );
+    }
+    assert_eq!(store.find_cards("secret").expect("normal search").len(), 1);
+    assert_eq!(store.find_cards("").expect("empty query").len(), 1);
+}
+
+#[test]
+fn apply_review_updates_card_log_and_collection_metadata() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let ids = store
+        .add_note(&note(&["review me", "answer"], &[]))
+        .expect("add");
+    let card = store.card(ids[0]).expect("card").expect("exists");
+    let before = store.collection_modified().expect("modified");
+    sleep(Duration::from_millis(5));
+    let mut changed = card.clone();
+    changed.queue = CardQueue::Review;
+    changed.card_type = CardType::Review;
+    changed.due = 42;
+    changed.interval = 4;
+    let decision = ReviewDecision {
+        card: changed,
+        revlog: RevLog {
+            id: 9_000,
+            card_id: card.id,
+            usn: 0,
+            ease: Rating::Good,
+            interval: 4,
+            last_interval: 0,
+            factor: 2500,
+            time_ms: 500,
+            kind: RevLogKind::Review,
+        },
+    };
+    store.apply_review(&decision).expect("apply");
+    let saved = store.card(card.id).expect("card").expect("exists");
+    assert_eq!(saved.queue, CardQueue::Review);
+    assert_eq!(saved.due, 42);
+    let log = store.revlog(9_000).expect("revlog").expect("entry");
+    assert_eq!(log.card_id, card.id);
+    assert_eq!(log.ease, Rating::Good);
+    assert!(store.collection_modified().expect("modified") > before);
+    assert!(store.apply_review(&decision).is_err());
+    assert_eq!(
+        store.revlog(9_000).expect("revlog").expect("entry").ease,
+        Rating::Good
+    );
+}
+
+#[test]
+fn stats_and_collection_modified_track_writes() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let before = store.collection_modified().expect("modified");
+    sleep(Duration::from_millis(5));
+    store.add_note(&note(&["one", "answer"], &[])).expect("add");
+    let stats = store.stats(None, now_secs()).expect("stats");
+    assert_eq!(stats.new_cards, 1);
+    assert_eq!(stats.total_cards, 1);
+    assert!(stats.learning_cards == 0 && stats.review_cards == 0);
+    assert!(store.collection_modified().expect("modified") > before);
+    assert_eq!(
+        store
+            .stats(Some(999), now_secs())
+            .expect("stats")
+            .total_cards,
+        0
+    );
+}
+
+#[test]
+fn checkpoint_and_close_leave_a_readable_collection() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(&["durable", "answer"], &[]))
+        .expect("add");
+    store.checkpoint().expect("checkpoint");
+    assert_eq!(store.path(), path);
+    store.close().expect("close");
+    let reopened = Collection::open(&path).expect("reopen");
+    assert_eq!(reopened.find_cards("durable").expect("find").len(), 1);
+}
+
+#[test]
+fn open_does_not_rewrite_existing_collection_json() {
+    let (_directory, path) = fixture();
+    let conn = Connection::open(&path).expect("open");
+    conn.execute(
+        "UPDATE col SET conf = ?1 WHERE id = 1",
+        ["{\"nextPos\": 77, \"custom\": true}"],
+    )
+    .expect("update");
+    drop(conn);
+    let store = Collection::open(&path).expect("open");
+    store.checkpoint().expect("checkpoint");
+    drop(store);
+    let conn = read_only(&path);
+    let configuration: String = conn
+        .query_row("SELECT conf FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("conf");
+    let parsed: Value = serde_json::from_str(&configuration).expect("JSON");
+    assert_eq!(parsed["nextPos"], 77);
+    assert_eq!(parsed["custom"], true);
+}
+
+#[test]
+fn reads_a_real_anki_collection_without_touching_the_original() {
+    let source =
+        Path::new("/home/user/.local/share/Anki2/main/collection.anki2");
+    if !source.exists() {
+        eprintln!("skipping: real Anki collection not present");
+        return;
+    }
+    let original = fs::read(source).expect("read original");
+    let original_hash = Sha1::digest(&original);
+    let directory = tempfile::tempdir().expect("tempdir");
+    let copy = directory.path().join("collection.anki2");
+    fs::copy(source, &copy).expect("copy");
+    let store = Collection::open(&copy).expect("open copy");
+    let conn = read_only(&copy);
+    let tables: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .expect("prepare")
+        .query_map([], |row| row.get(0))
+        .expect("query")
+        .map(|row| row.expect("row"))
+        .collect();
+    for table in ["cards", "col", "graves", "notes", "revlog"] {
+        assert!(tables.iter().any(|name| name == table), "missing {table}");
+    }
+    let decks = store.decks().expect("decks");
+    assert!(decks.len() > 1);
+    assert!(decks.iter().any(|deck| deck.name == "Default"));
+    assert!(decks.iter().any(|deck| deck.name.contains("::")));
+    let first_card: i64 = conn
+        .query_row("SELECT id FROM cards ORDER BY id LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .expect("card id");
+    assert!(store.card(first_card).expect("card").is_some());
+    assert!(store.models().expect("models").len() > 1);
+    assert_ne!(
+        store.due_cards(None, 5, now_secs()).expect("due"),
+        [] as [ranki_model::Card; 0]
+    );
+    drop(conn);
+    drop(store);
+    assert_eq!(
+        Sha1::digest(fs::read(source).expect("read again")),
+        original_hash
+    );
+}
