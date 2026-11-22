@@ -38,6 +38,7 @@ pub enum CardType {
 }
 
 impl CardType {
+    #[must_use]
     pub const fn code(self) -> i64 {
         match self {
             Self::New => 0,
@@ -48,6 +49,7 @@ impl CardType {
     }
 
     /// Unknown values are treated as new, matching Anki's tolerant readers.
+    #[must_use]
     pub const fn from_code(code: i64) -> Self {
         match code {
             1 => Self::Learning,
@@ -70,6 +72,7 @@ pub enum CardQueue {
 }
 
 impl CardQueue {
+    #[must_use]
     pub const fn code(self) -> i64 {
         match self {
             Self::New => 0,
@@ -83,6 +86,7 @@ impl CardQueue {
     }
 
     /// Unknown values are treated as suspended so they are never shown by accident.
+    #[must_use]
     pub const fn from_code(code: i64) -> Self {
         match code {
             0 => Self::New,
@@ -95,8 +99,12 @@ impl CardQueue {
         }
     }
 
+    #[must_use]
     pub const fn is_due(self) -> bool {
-        matches!(self, Self::New | Self::Learning | Self::Review | Self::DayLearning)
+        matches!(
+            self,
+            Self::New | Self::Learning | Self::Review | Self::DayLearning
+        )
     }
 }
 
@@ -133,6 +141,7 @@ pub enum Rating {
 }
 
 impl Rating {
+    #[must_use]
     pub const fn code(self) -> u8 {
         match self {
             Self::Again => 1,
@@ -142,6 +151,7 @@ impl Rating {
         }
     }
 
+    #[must_use]
     pub const fn from_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(Self::Again),
@@ -163,6 +173,7 @@ pub enum RevLogKind {
 }
 
 impl RevLogKind {
+    #[must_use]
     pub const fn code(self) -> u8 {
         match self {
             Self::Learn => 0,
@@ -173,6 +184,7 @@ impl RevLogKind {
         }
     }
 
+    #[must_use]
     pub const fn from_code(code: u8) -> Self {
         match code {
             1 => Self::Review,
@@ -258,15 +270,85 @@ pub enum StoreError {
 
 /// Synchronous collection access. Implementations must be atomic per call.
 pub trait Store {
+    /// Lists all decks in the collection.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
     fn decks(&self) -> Result<Vec<Deck>, StoreError>;
+
+    /// Creates a deck and returns it.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the name is invalid or the write fails.
     fn create_deck(&mut self, name: &str) -> Result<Deck, StoreError>;
+
+    /// Lists note models with their templates.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
     fn models(&self) -> Result<Vec<NoteModel>, StoreError>;
+
+    /// Finds card ids matching an Anki-style search query.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the query is invalid or the search fails.
     fn find_cards(&self, query: &str) -> Result<Vec<Id>, StoreError>;
-    fn due_cards(&self, deck_id: Option<Id>, limit: usize, now_secs: i64) -> Result<Vec<Card>, StoreError>;
+
+    /// Returns cards due in a deck, including subdecks.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the store contract fixes these arguments"
+    )]
+    fn due_cards(
+        &self,
+        deck_id: Option<Id>,
+        limit: usize,
+        now_secs: i64,
+    ) -> Result<Vec<Card>, StoreError>;
+
+    /// Loads one card by id.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
     fn card(&self, id: Id) -> Result<Option<Card>, StoreError>;
+
+    /// Loads one note by id.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
     fn note(&self, id: Id) -> Result<Option<Note>, StoreError>;
+
+    /// Adds a note and its generated cards.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the note is invalid or the write fails.
     fn add_note(&mut self, note: &NewNote) -> Result<Vec<Id>, StoreError>;
-    fn apply_review(&mut self, decision: &ReviewDecision) -> Result<(), StoreError>;
-    fn stats(&self, deck_id: Option<Id>, now_secs: i64) -> Result<DeckStats, StoreError>;
+
+    /// Persists a scheduled review and its log entry atomically.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the card does not exist or the write fails.
+    fn apply_review(
+        &mut self,
+        decision: &ReviewDecision,
+    ) -> Result<(), StoreError>;
+
+    /// Returns card counts for a deck.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
+    fn stats(
+        &self,
+        deck_id: Option<Id>,
+        now_secs: i64,
+    ) -> Result<DeckStats, StoreError>;
+
+    /// Returns the collection modification timestamp in seconds.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
     fn collection_modified(&self) -> Result<i64, StoreError>;
 }
