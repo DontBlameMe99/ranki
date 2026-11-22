@@ -137,6 +137,17 @@ impl Collection {
         &self.path
     }
 
+    /// Returns the collection creation time in Unix seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be read.
+    pub fn collection_created(&self) -> Result<i64, StoreError> {
+        self.conn
+            .query_row("SELECT crt FROM col WHERE id = 1", [], |row| row.get(0))
+            .map_err(backend)
+    }
+
     /// Checkpoints the write-ahead log, if the collection uses one.
     ///
     /// # Errors
@@ -366,7 +377,7 @@ impl Store for Collection {
         let now_ms = now_secs
             .checked_mul(1000)
             .ok_or_else(|| invalid("timestamp overflow"))?;
-        let today = anki::day_number(now_secs)?;
+        let today = anki::day_number(now_secs, self.collection_created()?)?;
         let sql = format!(
             "SELECT c.id, c.nid, c.did, c.ord, c.mod, c.usn, c.type, c.queue, c.due, c.ivl, \
              c.factor, c.reps, c.lapses, c.left, c.odue, c.odid, c.flags, c.data FROM cards c \
@@ -571,6 +582,10 @@ impl Store for Collection {
                 .unwrap_or_default(),
             total_cards: usize::try_from(counts.3).unwrap_or_default(),
         })
+    }
+
+    fn collection_created(&self) -> Result<i64, StoreError> {
+        Self::collection_created(self)
     }
 
     fn collection_modified(&self) -> Result<i64, StoreError> {

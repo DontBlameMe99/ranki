@@ -121,7 +121,11 @@ impl Sm2Scheduler {
         let outcome = ReviewOutcome {
             card_type: CardType::Review,
             queue: CardQueue::Review,
-            due: due_from_days(ctx.now_secs, interval),
+            due: due_from_days(
+                ctx.now_secs,
+                ctx.collection_start_secs,
+                interval,
+            ),
             interval,
             lapses: u32::from(ctx.rating == Rating::Again),
             left: 0,
@@ -150,11 +154,13 @@ impl Scheduler for Sm2Scheduler {
         card: &Card,
         rating: Rating,
         now_secs: i64,
+        collection_start_secs: i64,
     ) -> ReviewDecision {
         let ctx = ReviewContext {
             card,
             rating,
             now_secs,
+            collection_start_secs,
         };
         if !is_schedulable(card) {
             return unchanged(&ctx);

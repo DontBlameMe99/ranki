@@ -678,10 +678,12 @@ impl RankiMcp {
         let card = store.card(input.card_id)?.ok_or_else(|| {
             ToolError::Call(format!("card not found: {}", input.card_id))
         })?;
+        let collection_start_secs = store.collection_created()?;
         let mut decision = FsrsScheduler::default().schedule(
             &card,
             Rating::from(input.rating),
             now,
+            collection_start_secs,
         );
         decision.revlog.time_ms =
             u32::try_from(input.elapsed_ms).unwrap_or(u32::MAX);

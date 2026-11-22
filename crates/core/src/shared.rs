@@ -1,3 +1,6 @@
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::Ordering;
+
 use ranki_model::{
     Card, CardQueue, CardType, Rating, RevLog, RevLogKind, ReviewDecision,
 };
@@ -6,12 +9,15 @@ use crate::{DEFAULT_FACTOR, LEFT_STEP_MARKER, SECONDS_PER_DAY};
 
 const I32_MAX_F32: f32 = 2_147_483_647.0;
 const I32_MIN_F32: f32 = -2_147_483_648.0;
+static LAST_REVLOG_ID: AtomicI64 = AtomicI64::new(0);
+
 const MAX_STEPS: u32 = u32::MAX - LEFT_STEP_MARKER;
 
 pub struct ReviewContext<'card> {
     pub card: &'card Card,
     pub rating: Rating,
     pub now_secs: i64,
+    pub collection_start_secs: i64,
 }
 
 pub struct ReviewOutcome {
@@ -50,8 +56,28 @@ pub const fn is_schedulable(card: &Card) -> bool {
     card.queue.is_due()
 }
 
-pub const fn day_number(now_secs: i64) -> i64 {
-    now_secs.div_euclid(SECONDS_PER_DAY)
+pub const fn day_number(now_secs: i64, collection_start_secs: i64) -> i64 {
+    now_secs
+        .saturating_sub(collection_start_secs)
+        .div_euclid(SECONDS_PER_DAY)
+}
+
+/// Allocates a unique, increasing millisecond id for a review log entry.
+pub fn next_revlog_id(now_secs: i64) -> i64 {
+    let millis = now_secs.saturating_mul(1_000);
+    let next = |old: i64| {
+        if old < 0 {
+            old.checked_add(1)
+                .filter(|candidate| *candidate < 0)
+                .unwrap_or(i64::MIN)
+        } else {
+            old.max(millis).checked_add(1).unwrap_or(i64::MIN)
+        }
+    };
+    let old = LAST_REVLOG_ID
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |old| Some(next(old)))
+        .unwrap_or(i64::MIN);
+    next(old)
 }
 
 pub fn elapsed_days(card: &Card, now_secs: i64) -> u32 {
@@ -59,8 +85,13 @@ pub fn elapsed_days(card: &Card, now_secs: i64) -> u32 {
     u32::try_from(elapsed.div_euclid(SECONDS_PER_DAY)).unwrap_or(u32::MAX)
 }
 
-pub fn due_from_days(now_secs: i64, interval: i32) -> i64 {
-    day_number(now_secs).saturating_add(i64::from(interval))
+pub fn due_from_days(
+    now_secs: i64,
+    collection_start_secs: i64,
+    interval: i32,
+) -> i64 {
+    day_number(now_secs, collection_start_secs)
+        .saturating_add(i64::from(interval))
 }
 
 pub fn due_from_seconds(now_secs: i64, seconds: u32) -> i64 {
@@ -179,7 +210,11 @@ pub fn step_outcome(
         None => ReviewOutcome {
             card_type: CardType::Review,
             queue: CardQueue::Review,
-            due: due_from_days(ctx.now_secs, config.graduation_interval),
+            due: due_from_days(
+                ctx.now_secs,
+                ctx.collection_start_secs,
+                config.graduation_interval,
+            ),
             interval: config.graduation_interval,
             lapses: 0,
             left: 0,
@@ -215,7 +250,7 @@ pub fn finish(
         None => outcome.interval,
     };
     let revlog = RevLog {
-        id: ctx.now_secs.saturating_mul(1_000),
+        id: next_revlog_id(ctx.now_secs),
         card_id: card.id,
         usn: -1,
         ease: ctx.rating,
@@ -232,7 +267,7 @@ pub fn finish(
 pub fn unchanged(ctx: &ReviewContext<'_>) -> ReviewDecision {
     let card = ctx.card.clone();
     let revlog = RevLog {
-        id: ctx.now_secs.saturating_mul(1_000),
+        id: next_revlog_id(ctx.now_secs),
         card_id: card.id,
         usn: -1,
         ease: ctx.rating,

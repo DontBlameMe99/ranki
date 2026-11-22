@@ -170,7 +170,11 @@ impl FsrsScheduler {
         let outcome = ReviewOutcome {
             card_type: CardType::Review,
             queue: CardQueue::Review,
-            due: due_from_days(ctx.now_secs, prepared.graduation),
+            due: due_from_days(
+                ctx.now_secs,
+                ctx.collection_start_secs,
+                prepared.graduation,
+            ),
             interval: prepared.graduation,
             lapses: u32::from(ctx.rating == Rating::Again),
             left: 0,
@@ -199,11 +203,13 @@ impl Scheduler for FsrsScheduler {
         card: &Card,
         rating: Rating,
         now_secs: i64,
+        collection_start_secs: i64,
     ) -> ReviewDecision {
         let ctx = ReviewContext {
             card,
             rating,
             now_secs,
+            collection_start_secs,
         };
         if !is_schedulable(card) {
             return unchanged(&ctx);
@@ -293,7 +299,12 @@ fn forget_stability(memory: Memory, retrievability: f32) -> f32 {
 
 fn same_day_stability(stability: f32, rating: Rating) -> f32 {
     let grade = f32::from(rating.code());
-    let factor = (weight(17) * (grade - 3.0 + weight(18))).exp();
+    let raw_factor = (weight(17) * (grade - 3.0 + weight(18))).exp();
+    let factor = if rating.code() >= 2 {
+        raw_factor.max(1.0)
+    } else {
+        raw_factor
+    };
     (stability * factor).clamp(S_MIN, S_MAX)
 }
 

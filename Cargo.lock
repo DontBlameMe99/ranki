@@ -2347,6 +2347,7 @@ dependencies = [
 name = "ranki-storage"
 version = "0.1.0"
 dependencies = [
+ "ranki-core",
  "ranki-model",
  "rusqlite",
  "serde",

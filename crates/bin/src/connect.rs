@@ -277,7 +277,13 @@ fn add_note(store: &mut Collection, params: &Value) -> Result<Value, RpcError> {
         fields: ordered,
         tags,
     })?;
-    Ok(ids.first().copied().map_or(Value::Null, |id| json!(id)))
+    let Some(card_id) = ids.first().copied() else {
+        return Ok(Value::Null);
+    };
+    let note_id = store
+        .card(card_id)?
+        .map_or(Value::Null, |card| json!(card.note_id));
+    Ok(note_id)
 }
 
 fn note_tags(note: &Value) -> Result<Vec<String>, RpcError> {
@@ -559,6 +565,9 @@ mod tests {
         let (_dir, mut store) = fixture();
         let id = add_card(&mut store);
         assert!(id > 0);
+        let card_id = store.find_cards("").unwrap().first().copied().unwrap();
+        let note_id = store.card(card_id).unwrap().unwrap().note_id;
+        assert_eq!(id, note_id);
         assert_eq!(
             call(&mut store, "findCards", json!({"query": ""}))
                 .as_array()

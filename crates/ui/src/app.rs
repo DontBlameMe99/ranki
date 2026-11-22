@@ -58,6 +58,7 @@ struct ReviewApp {
     revealed: bool,
     scheduler: Box<dyn Scheduler>,
     scheduler_kind: SchedulerKind,
+    collection_start_secs: i64,
     answered: usize,
     session_total: usize,
     error: Option<String>,
@@ -92,6 +93,14 @@ pub fn run(store: Box<dyn Store>, options: Options) -> eframe::Result<()> {
 
 impl ReviewApp {
     fn new(store: Box<dyn Store>, media_dir: Option<PathBuf>) -> Self {
+        let (collection_start_secs, initial_error) = match store
+            .collection_created()
+        {
+            Ok(value) => (value, None),
+            Err(error) => {
+                (0, Some(format!("Could not load collection start: {error}")))
+            }
+        };
         let mut app = Self {
             store,
             media_dir,
@@ -109,9 +118,10 @@ impl ReviewApp {
             revealed: false,
             scheduler: Box::new(FsrsScheduler::new(FsrsPreset::default())),
             scheduler_kind: SchedulerKind::Fsrs,
+            collection_start_secs,
             answered: 0,
             session_total: 0,
-            error: None,
+            error: initial_error,
         };
         app.reload();
         app
@@ -291,7 +301,12 @@ impl ReviewApp {
         let elapsed_ms = self.shown_at.map_or(0, |start| {
             u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX)
         });
-        let mut decision = self.scheduler.schedule(&card, rating, now_secs());
+        let mut decision = self.scheduler.schedule(
+            &card,
+            rating,
+            now_secs(),
+            self.collection_start_secs,
+        );
         decision.revlog.time_ms = elapsed_ms;
         if let Err(error) = self.store.apply_review(&decision) {
             self.set_error("Could not save review", &error);
@@ -623,8 +638,9 @@ fn render_templates(
         &model.fields,
         &note.fields,
     );
-    let answer = card_view::substitute_fields(
+    let answer = card_view::render_answer(
         &template.answer_format,
+        &question,
         &model.fields,
         &note.fields,
     );
@@ -802,6 +818,10 @@ mod tests {
             }
             counts.total_cards = self.cards.len();
             Ok(counts)
+        }
+
+        fn collection_created(&self) -> Result<i64, StoreError> {
+            Ok(0)
         }
 
         fn collection_modified(&self) -> Result<i64, StoreError> {

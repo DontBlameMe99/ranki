@@ -34,9 +34,13 @@ pub fn now_ms() -> Result<i64, StoreError> {
         .map_err(|_| StoreError::Backend("clock overflow".into()))
 }
 
-pub fn day_number(now_secs: i64) -> Result<i64, StoreError> {
+pub fn day_number(
+    now_secs: i64,
+    collection_created: i64,
+) -> Result<i64, StoreError> {
     now_secs
-        .checked_div(DAY_SECS)
+        .checked_sub(collection_created)
+        .map(|elapsed| elapsed.div_euclid(DAY_SECS))
         .ok_or_else(|| StoreError::InvalidData("invalid timestamp".into()))
 }
 

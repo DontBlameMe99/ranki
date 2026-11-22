@@ -9,6 +9,8 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use ranki_core::FsrsScheduler;
+use ranki_core::Scheduler;
 use ranki_model::CardQueue;
 use ranki_model::CardType;
 use ranki_model::NewNote;
@@ -110,6 +112,75 @@ fn create_writes_anki_schema_and_default_json() {
     assert_eq!(model_json["1"]["tmpls"][0]["qfmt"], "{{Front}}");
     let deck_json: Value = serde_json::from_str(&decks).expect("decks");
     assert_eq!(deck_json["1"]["name"], "Default");
+}
+
+#[test]
+fn created_collection_declares_its_legacy_schema_version() {
+    let (_directory, path) = fixture();
+    let conn = read_only(&path);
+    let version: i64 = conn
+        .query_row("SELECT ver FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, 11);
+    let has_modern_tables: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notetypes')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("modern tables");
+    assert!(!has_modern_tables);
+}
+
+#[test]
+fn review_and_day_learning_dues_use_days_since_collection_creation() {
+    let (_directory, path) = fixture();
+    let created = 1_685_412_000_i64;
+    let now = created.saturating_add(86_400 * 2);
+    let today = 2_i64;
+    {
+        let conn = Connection::open(&path).expect("open");
+        conn.execute("UPDATE col SET crt = ?1 WHERE id = 1", [created])
+            .expect("set crt");
+        let rows = [
+            (21_i64, 2_i64, today),
+            (22, 2, today.saturating_add(1)),
+            (23, 3, today),
+            (24, 3, today.saturating_add(1)),
+            (25, 1, now.saturating_mul(1_000)),
+            (26, 1, now.saturating_mul(1_000).saturating_add(1)),
+        ];
+        for (id, queue, due) in rows {
+            conn.execute(
+                "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, \
+                 reps, lapses, left, odue, odid, flags, data) VALUES (?1, 1, 1, 0, 0, 0, ?2, ?3, \
+                 ?4, 1, 0, 0, 0, 0, 0, 0, 0, '')",
+                [id, 2_i64, queue, due],
+            )
+            .expect("insert card");
+        }
+    }
+    let store = Collection::open(&path).expect("open");
+    assert_eq!(store.collection_created().expect("created"), created);
+    let due_ids: Vec<_> = store
+        .due_cards(None, 50, now)
+        .expect("due")
+        .into_iter()
+        .map(|card| card.id)
+        .collect();
+    assert_eq!(due_ids, [25, 23, 21]);
+    assert!(!due_ids.contains(&22));
+    assert!(!due_ids.contains(&24));
+
+    let card = store.card(21).expect("card").expect("exists");
+    let decision = FsrsScheduler::default().schedule(
+        &card,
+        Rating::Good,
+        now,
+        store.collection_created().expect("created"),
+    );
+    let expected = today.saturating_add(i64::from(decision.card.interval));
+    assert_eq!(decision.card.due, expected);
 }
 
 #[test]
@@ -237,8 +308,10 @@ fn create_deck_builds_hierarchy_and_filters_subdecks() {
 fn due_cards_respects_queue_and_time_windows() {
     let (_directory, path) = fixture();
     let now = now_secs();
-    let today = now.checked_div(86_400).expect("day");
+    let today = 0_i64;
     let conn = Connection::open(&path).expect("open");
+    conn.execute("UPDATE col SET crt = ?1 WHERE id = 1", [now])
+        .expect("set crt");
     let rows = [
         (10_i64, 0_i64, 7_i64),
         (11, 1, now.saturating_mul(1000)),
@@ -474,8 +547,21 @@ fn reads_a_real_anki_collection_without_touching_the_original() {
         .expect("card id");
     assert!(store.card(first_card).expect("card").is_some());
     assert!(store.models().expect("models").len() > 1);
+    let due_now = {
+        let crt: i64 = conn
+            .query_row("SELECT crt FROM col WHERE id = 1", [], |row| row.get(0))
+            .expect("crt");
+        let maximum_due: i64 = conn
+            .query_row(
+                "SELECT MAX(due) FROM cards WHERE queue IN (2, 3)",
+                [],
+                |row| row.get(0),
+            )
+            .expect("maximum due");
+        crt.saturating_add(maximum_due.saturating_mul(86_400))
+    };
     assert_ne!(
-        store.due_cards(None, 5, now_secs()).expect("due"),
+        store.due_cards(None, 5, due_now).expect("due"),
         [] as [ranki_model::Card; 0]
     );
     drop(conn);

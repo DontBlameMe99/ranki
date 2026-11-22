@@ -81,6 +81,25 @@ pub fn substitute_fields(
     output
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the answer needs the question and note fields"
+)]
+/// Renders an answer template, resolving `{{FrontSide}}` to the question HTML.
+pub fn render_answer(
+    template: &str,
+    question_html: &str,
+    field_names: &[String],
+    values: &[String],
+) -> String {
+    let with_front_side = substitute_fields(
+        template,
+        &[String::from("FrontSide")],
+        &[question_html.to_owned()],
+    );
+    substitute_fields(&with_front_side, field_names, values)
+}
+
 /// Converts the supported markup subset into styled text segments.
 #[expect(
     clippy::excessive_nesting,
@@ -366,7 +385,7 @@ mod tests {
 
     use super::{
         Emphasis, MediaKind, Segment, media_path, media_refs, parse_markup,
-        plain_text, substitute_fields,
+        plain_text, render_answer, substitute_fields,
     };
 
     fn names() -> Vec<String> {
@@ -389,6 +408,16 @@ mod tests {
         let result =
             substitute_fields("{{Front}} / {{Back}}", &names(), &values());
         assert_eq!(result, "Question? / Answer!");
+    }
+
+    #[test]
+    fn answer_template_resolves_front_side() {
+        let template = "{{FrontSide}}\n\n<hr id=answer>\n\n{{Back}}";
+        let answer = render_answer(template, "Question?", &names(), &values());
+        assert!(answer.contains("Question?"));
+        assert!(answer.contains("<hr id=answer>"));
+        assert!(answer.contains("Answer!"));
+        assert!(!answer.contains("{{FrontSide}}"));
     }
 
     #[test]

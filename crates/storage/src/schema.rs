@@ -154,7 +154,7 @@ pub fn default_col(now_secs: i64, now_ms: i64) -> Value {
         "crt": now_secs,
         "mod": now_ms,
         "scm": now_ms,
-        "ver": 18_i64,
+        "ver": 11_i64,
         "dty": 0_i64,
         "usn": 0_i64,
         "ls": now_ms,

@@ -21,6 +21,7 @@ use clap::Subcommand;
 use ranki_core::FsrsScheduler;
 use ranki_core::Scheduler;
 use ranki_format::export_apkg;
+use ranki_format::export_colpkg;
 use ranki_format::import_apkg;
 use ranki_model::Card;
 use ranki_model::Id;
@@ -108,6 +109,8 @@ enum Command {
     Import { package: PathBuf },
     /// Export the collection as an Anki package.
     Export { package: PathBuf },
+    /// Export the collection as an Anki colpkg.
+    ExportColpkg { package: PathBuf },
     /// Check that the collection can be read.
     Check,
     /// Serve the AnkiConnect-compatible JSON-RPC API.
@@ -164,6 +167,9 @@ fn run(cli: Cli) -> CliResult<()> {
         }
         Command::Export { package } => {
             export_package(&collection_path, &media_dir, &package)
+        }
+        Command::ExportColpkg { package } => {
+            export_colpkg_package(&collection_path, &media_dir, &package)
         }
         Command::Check => check(&collection_path),
         Command::Connect { port } => connect::serve(&collection_path, port),
@@ -241,6 +247,7 @@ fn run_store_command(
         Command::Gui
         | Command::Import { .. }
         | Command::Export { .. }
+        | Command::ExportColpkg { .. }
         | Command::Check
         | Command::Connect { .. }
         | Command::Mcp => Ok(()),
@@ -280,6 +287,18 @@ fn export_package(
     collection.checkpoint()?;
     collection.close()?;
     export_apkg(path, media_dir, package)?;
+    Ok(())
+}
+
+fn export_colpkg_package(
+    path: &Path,
+    media_dir: &Path,
+    package: &Path,
+) -> CliResult<()> {
+    let collection = open_or_create(path)?;
+    collection.checkpoint()?;
+    collection.close()?;
+    export_colpkg(path, media_dir, package)?;
     Ok(())
 }
 
@@ -336,7 +355,13 @@ pub(crate) fn answer_card<S: Store>(
     let card = store.card(card_id)?.ok_or_else(|| {
         CliError::Message(format!("card not found: {card_id}"))
     })?;
-    let decision = FsrsScheduler::default().schedule(&card, rating, now);
+    let collection_start_secs = store.collection_created()?;
+    let decision = FsrsScheduler::default().schedule(
+        &card,
+        rating,
+        now,
+        collection_start_secs,
+    );
     store.apply_review(&decision)?;
     Ok(decision)
 }
@@ -413,6 +438,29 @@ mod tests {
         let cli = parse(&["ranki", "mcp", "--media-dir", "/tmp/media"]);
         assert_eq!(cli.media_dir.as_deref(), Some(Path::new("/tmp/media")));
         assert!(matches!(cli.command, Some(Command::Mcp)));
+    }
+
+    #[test]
+    fn export_colpkg_uses_global_collection_and_media_paths() {
+        let cli = parse(&[
+            "ranki",
+            "--collection",
+            "/tmp/demo.anki2",
+            "--media-dir",
+            "/tmp/media",
+            "export-colpkg",
+            "/tmp/backup.colpkg",
+        ]);
+        assert_eq!(
+            cli.collection.as_deref(),
+            Some(Path::new("/tmp/demo.anki2"))
+        );
+        assert_eq!(cli.media_dir.as_deref(), Some(Path::new("/tmp/media")));
+        assert!(matches!(
+            cli.command,
+            Some(Command::ExportColpkg { package })
+                if package == Path::new("/tmp/backup.colpkg")
+        ));
     }
 
     #[test]

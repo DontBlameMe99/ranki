@@ -351,4 +351,11 @@ pub trait Store {
     /// # Errors
     /// Returns [`StoreError`] if the collection cannot be read.
     fn collection_modified(&self) -> Result<i64, StoreError>;
+
+    /// Returns the collection creation time in Unix seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the collection cannot be read.
+    fn collection_created(&self) -> Result<i64, StoreError>;
 }

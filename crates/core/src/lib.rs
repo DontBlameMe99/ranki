@@ -17,6 +17,8 @@ use ranki_model::{Card, Rating, ReviewDecision};
 /// Chooses the next review for an answered card.
 pub trait Scheduler {
     /// Schedules `card` after a `rating` at `now_secs` Unix seconds.
+    ///
+    /// Review dues use days since `collection_start_secs`.
     #[must_use]
     #[expect(
         clippy::too_many_arguments,
@@ -27,6 +29,7 @@ pub trait Scheduler {
         card: &Card,
         rating: Rating,
         now_secs: i64,
+        collection_start_secs: i64,
     ) -> ReviewDecision;
 
     /// Stable name of the scheduling algorithm.
