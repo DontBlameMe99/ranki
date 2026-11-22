@@ -227,10 +227,66 @@ pub fn media_refs(input: &str, media_dir: Option<&Path>) -> Vec<MediaRef> {
     refs
 }
 
-/// Decoded media kept for the lifetime of the window.
-#[derive(Default)]
+const MAX_DISPLAY_WIDTH: f32 = 520.0;
+const MAX_DISPLAY_HEIGHT: f32 = 260.0;
+const MAX_TEXTURE_WIDTH: u32 = 1024;
+const MAX_TEXTURE_HEIGHT: u32 = 512;
+const IMAGE_CACHE_LIMIT: usize = 24;
+
+struct LruCache<V> {
+    entries: HashMap<PathBuf, (V, u64)>,
+    clock: u64,
+    limit: usize,
+}
+
+impl<V> LruCache<V> {
+    fn new(limit: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            clock: 0,
+            limit: limit.max(1),
+        }
+    }
+
+    fn get(&mut self, key: &Path) -> Option<&V> {
+        let now = self.clock.wrapping_add(1);
+        self.clock = now;
+        let entry = self.entries.get_mut(key)?;
+        entry.1 = now;
+        Some(&entry.0)
+    }
+
+    fn insert(&mut self, key: PathBuf, value: V) {
+        let now = self.clock.wrapping_add(1);
+        self.clock = now;
+        let victim_path = if self.entries.contains_key(&key)
+            || self.entries.len() < self.limit
+        {
+            None
+        } else {
+            self.entries
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(path, _)| path.clone())
+        };
+        if let Some(path_to_drop) = victim_path {
+            drop(self.entries.remove(&path_to_drop));
+        }
+        self.entries.insert(key, (value, now));
+    }
+}
+
+/// Decoded media, kept in a bounded least-recently-used set.
 pub struct ImageCache {
-    textures: HashMap<PathBuf, Option<TextureHandle>>,
+    textures: LruCache<Option<TextureHandle>>,
+}
+
+impl Default for ImageCache {
+    fn default() -> Self {
+        Self {
+            textures: LruCache::new(IMAGE_CACHE_LIMIT),
+        }
+    }
 }
 
 impl ImageCache {
@@ -240,30 +296,71 @@ impl ImageCache {
         ctx: &egui::Context,
         path: &Path,
     ) -> Option<TextureHandle> {
-        if let Some(cached) = self.textures.get(path) {
-            cached.clone()
-        } else {
-            let texture = decode_texture(ctx, path);
-            self.textures.insert(path.to_path_buf(), texture.clone());
-            texture
+        if let Some(texture) = self.textures.get(path) {
+            return texture.clone();
         }
+        let texture = decode_texture(ctx, path);
+        self.textures.insert(path.to_path_buf(), texture.clone());
+        texture
     }
 }
 
 fn decode_texture(ctx: &egui::Context, path: &Path) -> Option<TextureHandle> {
-    let image = image::open(path).ok()?.thumbnail(1024, 1024).to_rgba8();
-    let (width, height) = image.dimensions();
-    let width_usize = usize::try_from(width).unwrap_or(usize::MAX);
-    let height_usize = usize::try_from(height).unwrap_or(usize::MAX);
+    let decoded = image::open(path).ok()?;
+    let (width, height) = texture_size(decoded.width(), decoded.height());
+    let sized = if (decoded.width(), decoded.height()) == (width, height) {
+        decoded
+    } else {
+        decoded.thumbnail_exact(width, height)
+    };
+    let rgba = sized.into_rgba8();
     let color = egui::ColorImage::from_rgba_unmultiplied(
-        [width_usize, height_usize],
-        image.as_raw().as_slice(),
+        [
+            usize::try_from(width).unwrap_or(0),
+            usize::try_from(height).unwrap_or(0),
+        ],
+        rgba.as_raw().as_slice(),
     );
     Some(ctx.load_texture(
         path.to_string_lossy(),
         color,
         TextureOptions::default(),
     ))
+}
+
+fn texture_size(input_width: u32, input_height: u32) -> (u32, u32) {
+    if input_width == 0 || input_height == 0 {
+        return (0, 0);
+    }
+    let width = u64::from(input_width);
+    let height = u64::from(input_height);
+    let max_width = u64::from(MAX_TEXTURE_WIDTH);
+    let max_height = u64::from(MAX_TEXTURE_HEIGHT);
+    if max_width.saturating_mul(height) > max_height.saturating_mul(width) {
+        let scaled_height = height.min(max_height);
+        let scaled_width = width
+            .saturating_mul(scaled_height)
+            .div_euclid(height)
+            .clamp(1, max_width);
+        (
+            to_u32(scaled_width, MAX_TEXTURE_WIDTH),
+            to_u32(scaled_height, MAX_TEXTURE_HEIGHT),
+        )
+    } else {
+        let scaled_width = width.min(max_width);
+        let scaled_height = height
+            .saturating_mul(scaled_width)
+            .div_euclid(width)
+            .clamp(1, max_height);
+        (
+            to_u32(scaled_width, MAX_TEXTURE_WIDTH),
+            to_u32(scaled_height, MAX_TEXTURE_HEIGHT),
+        )
+    }
+}
+
+fn to_u32(value: u64, cap: u32) -> u32 {
+    u32::try_from(value).unwrap_or(cap)
 }
 
 /// Draws card text and inline images. Returns captions for media that cannot be shown.
@@ -319,8 +416,8 @@ pub fn render(
                             Image::from_texture(SizedTexture::from_handle(
                                 &texture,
                             ))
-                            .max_width(520.0)
-                            .max_height(260.0),
+                            .max_width(MAX_DISPLAY_WIDTH)
+                            .max_height(MAX_DISPLAY_HEIGHT),
                         );
                     }
                     None => notices.push(format!(
@@ -443,11 +540,12 @@ fn make_media(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use super::{
-        Emphasis, MediaKind, Segment, media_path, media_refs, parse_markup,
-        plain_text, render_answer, substitute_fields,
+        Emphasis, LruCache, MAX_TEXTURE_HEIGHT, MAX_TEXTURE_WIDTH, MediaKind,
+        Segment, media_path, media_refs, parse_markup, plain_text,
+        render_answer, substitute_fields, texture_size,
     };
 
     fn names() -> Vec<String> {
@@ -557,5 +655,77 @@ mod tests {
         assert_eq!(refs[0].path, None);
         assert_eq!(refs[1].kind, MediaKind::Image);
         assert_eq!(refs[1].path, Some(dir.join("Cargo.toml")));
+    }
+
+    fn cache_key(name: &str) -> PathBuf {
+        PathBuf::from(name)
+    }
+
+    #[test]
+    fn texture_size_preserves_aspect_ratio_and_stays_capped() {
+        let cases = [
+            ((2000, 1000), (1024, 512)),
+            ((1000, 2000), (256, 512)),
+            ((3000, 2000), (768, 512)),
+            ((320, 200), (320, 200)),
+            ((4000, 1), (1024, 1)),
+        ];
+        for (source, expected) in cases {
+            let actual = texture_size(source.0, source.1);
+            assert_eq!(actual, expected);
+            assert!(actual.0 <= MAX_TEXTURE_WIDTH);
+            assert!(actual.1 <= MAX_TEXTURE_HEIGHT);
+        }
+        assert_eq!(texture_size(0, 100), (0, 0));
+    }
+
+    #[test]
+    fn cache_eviction_drops_least_recently_used() {
+        let mut cache = LruCache::new(2);
+        cache.insert(cache_key("a.png"), 1);
+        cache.insert(cache_key("b.png"), 2);
+        assert_eq!(cache.get(Path::new("a.png")), Some(&1));
+
+        cache.insert(cache_key("c.png"), 3);
+
+        assert_eq!(cache.entries.len(), 2);
+        assert!(!cache.entries.contains_key(&cache_key("b.png")));
+        assert_eq!(cache.get(Path::new("a.png")), Some(&1));
+        assert_eq!(cache.get(Path::new("c.png")), Some(&3));
+    }
+
+    #[test]
+    fn cache_respects_size_bound() {
+        let mut cache = LruCache::new(3);
+        for index in 0..6 {
+            let name = format!("image{index}.png");
+            cache.insert(cache_key(&name), index);
+        }
+        assert_eq!(cache.entries.len(), 3);
+        for index in 0..3 {
+            let name = format!("image{index}.png");
+            assert!(!cache.entries.contains_key(&cache_key(&name)));
+        }
+    }
+
+    #[test]
+    fn repeated_cache_lookup_does_not_reload() {
+        let mut cache = LruCache::new(2);
+        let key = cache_key("flag.png");
+        let mut loads: u32 = 0;
+        assert!(cache.get(&key).is_none());
+        loads = loads.saturating_add(1);
+        cache.insert(key.clone(), loads);
+        assert_eq!(cache.get(&key), Some(&1));
+        assert_eq!(cache.get(&key), Some(&1));
+        assert_eq!(loads, 1);
+    }
+
+    #[test]
+    fn cache_retains_failed_decodes() {
+        let mut cache: LruCache<Option<u8>> = LruCache::new(2);
+        let key = cache_key("missing.png");
+        cache.insert(key.clone(), None);
+        assert!(matches!(cache.get(&key), Some(None)));
     }
 }
