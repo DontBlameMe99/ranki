@@ -1,6 +1,7 @@
 """Tests for the performance gate rules."""
 
 import copy
+import json
 import unittest
 
 from performance import (
@@ -12,6 +13,10 @@ from performance import (
 )
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+import tempfile
+from pathlib import Path
 
 
 def workload(name, budget, median):
@@ -125,6 +130,33 @@ class GateTest(unittest.TestCase):
         result = compare(head, ceiling=head, floor=floor)
         self.assertTrue(result["failed"])
         self.assertTrue(any(item["kind"] == "sampling" for item in result["rows"][0]["findings"]))
+
+    def test_ceiling_directory_uses_recorded_commit(self):
+        ceiling = report([("gui/frame/idle", 100.0, 10.0)])
+        floor = floor_for(ceiling)
+        head = copy.deepcopy(ceiling)
+        for key in ("median_ms", "worst_median_ms", "p95_ms", "worst_p95_ms"):
+            head["results"][0][key] *= 3.0
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / f"{SHA}.json").write_text(
+                json.dumps(ceiling), encoding="utf-8"
+            )
+            result = compare(head, ceiling_dir=directory, floor=floor)
+            self.assertTrue(result["failed"])
+            self.assertFalse(
+                any(item["kind"] == "ceiling" for item in result["global_findings"])
+            )
+            result = compare(head, ceiling_dir=directory, floor=floor_for(head))
+            self.assertTrue(result["failed"])
+
+    def test_missing_ceiling_report_fails(self):
+        ceiling = report([("gui/frame/idle", 100.0, 10.0)])
+        with tempfile.TemporaryDirectory() as directory:
+            result = compare(ceiling, ceiling_dir=directory, floor=floor_for(ceiling))
+            self.assertTrue(result["failed"])
+            self.assertTrue(
+                any(item["kind"] == "ceiling" for item in result["global_findings"])
+            )
 
     def test_changed_workload_definition_fails(self):
         ceiling = report([("gui/frame/idle", 100.0, 10.0)])

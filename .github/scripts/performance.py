@@ -110,6 +110,8 @@ def validate_floor(value, label="floor"):
     for name, record in value["metrics"].items():
         if not NAME.match(name):
             fail(f"{label}.metrics has an invalid name")
+        if not SHA.match(str(record.get("sha", ""))):
+            fail(f"{label}.metrics.{name}.sha must be a full commit sha")
         finite(record.get("median_ms"), f"{label}.metrics.{name}.median_ms", 1e-12)
         finite(record.get("budget_ms"), f"{label}.metrics.{name}.budget_ms", 1e-12)
         for key in ("samples", "repeat", "warmup"):
@@ -124,8 +126,10 @@ def empty_floor():
 
 
 def read_floor(path):
-    if not path or not Path(path).is_file():
+    if not path:
         return empty_floor()
+    if not Path(path).is_file():
+        fail(f"floor file not found: {path}")
     return validate_floor(read_json(path), path)
 
 
@@ -201,12 +205,24 @@ def regression(label, value, best, worst, own_best, own_worst):
     return None
 
 
-def compare(head, base=None, ceiling=None, floor=None):
+def compare(head, base=None, ceiling=None, floor=None, ceiling_dir=None):
     validate_aggregate(head)
     floor = floor or empty_floor()
     after = result_map(head)
     main = result_map(base)
-    reference = result_map(ceiling)
+    reference = {
+        result["name"]: (result, ceiling["method"])
+        for result in ceiling["results"]
+    } if ceiling else {}
+    if ceiling_dir:
+        for name, record in floor.get("metrics", {}).items():
+            report_path = Path(ceiling_dir) / f"{record['sha']}.json"
+            if not report_path.is_file():
+                continue
+            report = validate_aggregate(read_json(report_path), str(report_path))
+            result = result_map(report).get(name)
+            if result:
+                reference[name] = (result, report["method"])
     global_findings = []
     if floor.get("method") and head["method"] != floor["method"]:
         global_findings.append({
@@ -220,6 +236,18 @@ def compare(head, base=None, ceiling=None, floor=None):
             "failed": True,
             "note": "benchmark workload definition changed since the recorded ceiling",
         })
+    if ceiling_dir:
+        missing = [
+            name
+            for name, record in floor.get("metrics", {}).items()
+            if name not in reference
+        ]
+        if missing:
+            global_findings.append({
+                "kind": "ceiling",
+                "failed": True,
+                "note": f"missing re-measured ceiling for {', '.join(missing[:3])}",
+            })
     budgets = dict(floor.get("budgets", {}))
     for name, record in floor.get("metrics", {}).items():
         budgets[name] = min(budgets.get(name, record["budget_ms"]), record["budget_ms"])
@@ -227,7 +255,8 @@ def compare(head, base=None, ceiling=None, floor=None):
     rows = []
     for name in names:
         current = after.get(name)
-        ceiling_result = reference.get(name)
+        ceiling_entry = reference.get(name)
+        ceiling_result = ceiling_entry[0] if ceiling_entry else None
         compared_with_base = ceiling_result is None and name in main
         if compared_with_base:
             ceiling_result = main[name]
@@ -277,11 +306,7 @@ def compare(head, base=None, ceiling=None, floor=None):
                     "failed": False,
                     "note": "no ceiling yet, compared with base",
                 })
-            reference_method = None
-            if name in reference and ceiling:
-                reference_method = ceiling["method"]
-            elif name in main and base:
-                reference_method = base["method"]
+            reference_method = ceiling_entry[1] if ceiling_entry else (base["method"] if compared_with_base and base else None)
             if ceiling_result and reference_method == head["method"]:
                 for finding in [
                     regression("median", current["median_ms"], ceiling_result["median_ms"], ceiling_result["worst_median_ms"], current["median_ms"], current["worst_median_ms"]),
@@ -410,6 +435,7 @@ def record_floor(previous, head, sha, now):
             metrics[name] = {**old, "budget_ms": budget}
         else:
             metrics[name] = {
+                "sha": sha,
                 "method": head["method"],
                 "samples": result["samples"],
                 "repeat": result["repeat"],
@@ -448,6 +474,7 @@ def parse_args(argv):
     compare_command.add_argument("--head", required=True)
     compare_command.add_argument("--base")
     compare_command.add_argument("--ceiling")
+    compare_command.add_argument("--ceiling-dir")
     compare_command.add_argument("--floor")
     compare_command.add_argument("--comment", required=True)
     compare_command.add_argument("--result", required=True)
@@ -474,7 +501,9 @@ def main(argv=None):
             "head_sha": args.head,
             "base_sha": args.base,
             "floor_sha": floor.get("sha") or None,
-            "floor": {name: floor.get("sha") for name in floor.get("metrics", {})},
+            "floor": {
+                name: record["sha"] for name, record in floor.get("metrics", {}).items()
+            },
             "budgets": floor.get("budgets", {}),
         })
         for sha in variants:
@@ -501,7 +530,7 @@ def main(argv=None):
         base = validate_aggregate(read_json(args.base), "base") if args.base else None
         ceiling = validate_aggregate(read_json(args.ceiling), "ceiling") if args.ceiling else None
         floor = read_floor(args.floor)
-        comparison = compare(head, base, ceiling, floor)
+        comparison = compare(head, base, ceiling, floor, args.ceiling_dir)
         Path(args.comment).write_text(markdown(comparison), encoding="utf-8")
         Path(args.result).write_text("fail\n" if comparison["failed"] else "pass\n", encoding="utf-8")
         return 1 if comparison["failed"] else 0

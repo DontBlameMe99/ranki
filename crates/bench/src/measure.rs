@@ -14,16 +14,20 @@
     reason = "all surfaces are registered in one visible list"
 )]
 
+#[cfg(feature = "gui")]
+use std::cell::RefCell;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Error as IoError, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{
     AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering,
 };
+use std::sync::mpsc;
+use std::sync::mpsc::Receiver;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -153,21 +157,53 @@ impl Recorder {
         samples: usize,
         repeat: usize,
         warmup: usize,
+        run: F,
+    ) -> BenchResult<()>
+    where
+        F: FnMut() -> BenchResult<()>,
+    {
+        self.measure_with_setup(
+            name,
+            criterion,
+            budget_ms,
+            samples,
+            repeat,
+            warmup,
+            || Ok(()),
+            run,
+        )
+    }
+
+    fn measure_with_setup<F, S>(
+        &mut self,
+        name: &str,
+        criterion: &str,
+        budget_ms: f64,
+        samples: usize,
+        repeat: usize,
+        warmup: usize,
+        mut setup: S,
         mut run: F,
     ) -> BenchResult<()>
     where
+        S: FnMut() -> BenchResult<()>,
         F: FnMut() -> BenchResult<()>,
     {
         if env::var_os("RANKI_BENCH_VERBOSE").is_some() {
             eprintln!("benchmarking {name}");
         }
         for _ in 0..warmup {
+            setup()
+                .map_err(|error| message(format!("{name} setup: {error}")))?;
             run().map_err(|error| message(format!("{name}: {error}")))?;
         }
         let monitor = Monitor::start();
         let mut times = Vec::with_capacity(samples.saturating_mul(repeat));
         for _ in 0..samples {
             for _ in 0..repeat {
+                setup().map_err(|error| {
+                    message(format!("{name} setup: {error}"))
+                })?;
                 let start = Instant::now();
                 run().map_err(|error| message(format!("{name}: {error}")))?;
                 times.push(start.elapsed().as_secs_f64() * 1_000.0);
@@ -370,7 +406,7 @@ impl ConnectServer {
 struct McpSession {
     _child: ChildGuard,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    lines: Receiver<BenchResult<String>>,
     next_id: u64,
 }
 
@@ -395,10 +431,25 @@ impl McpSession {
             .stdout
             .take()
             .ok_or_else(|| message("MCP stdout is not piped"))?;
+        let (sender, lines) = mpsc::channel();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {
+                        if sender.send(Ok(line)).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
         let mut session = Self {
             _child: child,
             stdin,
-            stdout: BufReader::new(stdout),
+            lines,
             next_id: 0,
         };
         let initialize = json!({
@@ -436,10 +487,10 @@ impl McpSession {
         writeln!(self.stdin, "{}", serde_json::to_string(&request_value)?)?;
         self.stdin.flush()?;
         for _ in 0..100 {
-            let mut line = String::new();
-            if self.stdout.read_line(&mut line)? == 0 {
-                return Err(message("MCP server closed stdout"));
-            }
+            let line =
+                self.lines.recv_timeout(Duration::from_secs(5)).map_err(
+                    |_| message("MCP server did not answer within 5 seconds"),
+                )??;
             let Ok(response) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -518,7 +569,7 @@ fn workload_hash() -> String {
 
 #[cfg(feature = "gui")]
 fn measure_gui(fixture: &Fixture, recorder: &mut Recorder) -> BenchResult<()> {
-    let mut app = fixture.app()?;
+    let app = RefCell::new(fixture.app()?);
     recorder.measure(
         "gui/frame/idle",
         "render one review frame without a native window within 100 ms",
@@ -527,11 +578,11 @@ fn measure_gui(fixture: &Fixture, recorder: &mut Recorder) -> BenchResult<()> {
         1,
         3,
         || {
-            app.frame(None);
+            app.borrow_mut().frame(None);
             Ok(())
         },
     )?;
-    recorder.measure(
+    recorder.measure_with_setup(
         "gui/frame/reveal",
         "render the answer reveal frame within 100 ms",
         100.0,
@@ -539,8 +590,13 @@ fn measure_gui(fixture: &Fixture, recorder: &mut Recorder) -> BenchResult<()> {
         1,
         2,
         || {
-            app.frame(Some(egui::Key::Space));
-            app.frame(None);
+            app.borrow_mut().reset();
+            Ok(())
+        },
+        || {
+            let mut revealed = app.borrow_mut();
+            revealed.frame(Some(egui::Key::Space));
+            revealed.frame(None);
             Ok(())
         },
     )
@@ -559,7 +615,7 @@ pub fn run() -> BenchResult<Report> {
     let sm2_sink = AtomicI64::new(0);
     recorder.measure(
         "core/fsrs/schedule",
-        "200 FSRS scheduling decisions within 10 ms",
+        "one FSRS scheduling decision within 10 ms",
         10.0,
         10,
         20,
@@ -582,7 +638,7 @@ pub fn run() -> BenchResult<Report> {
     }
     recorder.measure(
         "core/sm2/schedule",
-        "200 SM-2 scheduling decisions within 10 ms",
+        "one SM-2 scheduling decision within 10 ms",
         10.0,
         10,
         20,
@@ -687,7 +743,7 @@ pub fn run() -> BenchResult<Report> {
     let mut store = Collection::open(collection)?;
     recorder.measure(
         "storage/review/write",
-        "schedule and persist 20 reviews within 100 ms",
+        "persist one scheduled review within 100 ms",
         100.0,
         10,
         20,

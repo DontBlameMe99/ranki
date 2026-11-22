@@ -56,12 +56,22 @@ audit uses that snapshot so a floor update between measurement and publish
 cannot change the rules.
 
 Ceilings live in `.github/performance-floor.json` on the separate `floors`
-branch, so a pull request cannot edit them. Successful pushes to `main` lower
-each ceiling only when that run's worst measurement beats the recorded best.
-Budgets only tighten. The `Performance audit` workflow checks out the gate
-script from the default branch and never executes measured code, so it also
-works for fork pull requests. A failed or missing measurement publishes a
-failing check.
+branch, so a pull request cannot edit them. Each workload records the commit
+that produced its ceiling. CI re-measures every recorded commit in the same
+session and uses that workload's own measurement as the comparison. Successful
+pushes to `main` lower each ceiling only when that run's worst measurement beats
+the recorded best. Budgets only tighten.
+
+## Trust model
+
+The `Performance audit` workflow checks out the gate script from the default
+branch and never executes measured code. The measurement itself still runs PR
+code, so the audit treats pull requests from forks as untrusted: it posts a
+failing check explaining that a maintainer must rerun the Performance workflow
+on a branch in this repository. Same-repository pull requests are gated on the
+uploaded measurement. A failed comparison, a missing measurement, or a missing
+re-measured ceiling publishes a failing check. Add `Performance audit` to the
+branch ruleset to block merges.
 
 ## Reproduce
 

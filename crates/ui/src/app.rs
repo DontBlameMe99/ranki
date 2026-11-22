@@ -1226,6 +1226,11 @@ impl BenchApp {
         Self { ctx, app }
     }
 
+    /// Returns the current card to the question side for the next frame.
+    pub fn reset(&mut self) {
+        self.frame(Some(egui::Key::R));
+    }
+
     /// Runs one full UI pass. `key` injects a key press for that frame.
     pub fn frame(&mut self, key: Option<egui::Key>) {
         let events = key
@@ -1993,5 +1998,6 @@ mod tests {
         let mut app = BenchApp::new(Box::new(fixture()), &Options::default());
         app.frame(None);
         app.frame(Some(Key::Space));
+        app.reset();
     }
 }

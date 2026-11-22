@@ -32,6 +32,7 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           sparse-checkout: .github/scripts
+          persist-credentials: false
 
       - name: Check gate
         run: python3 -m unittest discover -s .github/scripts -p 'performance_test.py'
@@ -67,6 +68,7 @@ jobs:
             core.setOutput('number', String(pr.number))
             core.setOutput('run_id', String(run.id))
             core.setOutput('artifact', String(artifacts.artifacts.some((item) => item.name === 'performance' && !item.expired)))
+            core.setOutput('fork', String(run.head_repository.full_name !== `${context.repo.owner}/${context.repo.repo}`))
 
       - name: Download measurement
         if: steps.resolve.outputs.publish == 'true' && steps.resolve.outputs.artifact == 'true'
@@ -80,29 +82,35 @@ jobs:
 
       - name: Compare
         if: steps.resolve.outputs.publish == 'true'
+        id: compare
         env:
           RESULT_DIR: ${{ runner.temp }}/performance
+          AUDIT_DIR: ${{ runner.temp }}/audit
         run: |
-          mkdir -p "$RESULT_DIR"
+          mkdir -p "$AUDIT_DIR"
+          if [ "${{ steps.resolve.outputs.fork }}" = 'true' ]; then
+            printf '<!-- ranki-performance -->\n### Performance audit\n\nFork pull requests cannot produce a trusted measurement. A maintainer must rerun the Performance workflow on a branch in this repository before this check can pass.\n' > "$AUDIT_DIR/comment.md"
+            printf 'fail\n' > "$AUDIT_DIR/result.txt"
+            exit 0
+          fi
           if [ "${{ steps.resolve.outputs.artifact }}" != 'true' ]; then
-            printf '<!-- ranki-performance -->\n### Performance audit\n\nNo measurement was uploaded for this run.\n' > "$RESULT_DIR/comment.md"
-            printf 'fail\n' > "$RESULT_DIR/result.txt"
+            printf '<!-- ranki-performance -->\n### Performance audit\n\nNo measurement was uploaded for this run.\n' > "$AUDIT_DIR/comment.md"
+            printf 'fail\n' > "$AUDIT_DIR/result.txt"
             exit 0
           fi
           head="$(jq -r '.head_sha' "$RESULT_DIR/meta.json")"
           base="$(jq -r '.base_sha // empty' "$RESULT_DIR/meta.json")"
-          floor_sha="$(jq -r '.floor_sha // empty' "$RESULT_DIR/meta.json")"
           args=(--head "$RESULT_DIR/aggregated/$head.json" --floor "$RESULT_DIR/floor.json"
-                --comment "$RESULT_DIR/comment.md" --result "$RESULT_DIR/result.txt")
+                --ceiling-dir "$RESULT_DIR/aggregated"
+                --comment "$AUDIT_DIR/comment.md" --result "$AUDIT_DIR/result.txt")
           [ -n "$base" ] && args+=(--base "$RESULT_DIR/aggregated/$base.json")
-          [ -n "$floor_sha" ] && [ -f "$RESULT_DIR/aggregated/$floor_sha.json" ] && args+=(--ceiling "$RESULT_DIR/aggregated/$floor_sha.json")
           python3 .github/scripts/performance.py compare "${args[@]}"
 
       - name: Update comment
         if: always() && steps.resolve.outputs.publish == 'true'
         uses: actions/github-script@v8
         env:
-          COMMENT_PATH: ${{ runner.temp }}/performance/comment.md
+          COMMENT_PATH: ${{ runner.temp }}/audit/comment.md
           PR_NUMBER: ${{ steps.resolve.outputs.number }}
         with:
           script: |
@@ -124,8 +132,9 @@ jobs:
         if: always() && steps.resolve.outputs.publish == 'true'
         uses: actions/github-script@v8
         env:
-          RESULT_PATH: ${{ runner.temp }}/performance/result.txt
-          COMMENT_PATH: ${{ runner.temp }}/performance/comment.md
+          RESULT_PATH: ${{ runner.temp }}/audit/result.txt
+          COMMENT_PATH: ${{ runner.temp }}/audit/comment.md
+          COMPARE_OUTCOME: ${{ steps.compare.outcome }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         with:
           script: |
@@ -136,8 +145,9 @@ jobs:
             const summary = fs.existsSync(process.env.COMMENT_PATH)
               ? fs.readFileSync(process.env.COMMENT_PATH, 'utf8')
               : 'No performance report was produced.'
-            const conclusion = result === 'pass' ? 'success' : 'failure'
-            const title = result === 'pass' ? 'Performance within limits' : 'Performance audit failed'
+            const compared = process.env.COMPARE_OUTCOME === 'success'
+            const conclusion = compared && result === 'pass' ? 'success' : 'failure'
+            const title = conclusion === 'success' ? 'Performance within limits' : 'Performance audit failed'
             const { owner, repo } = context.repo
             try {
               await github.rest.repos.createCommitStatus({
@@ -211,8 +221,8 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: performance-floor
-          path: ${{ runner.temp }}/floor
+          name: performance
+          path: ${{ runner.temp }}/performance
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -227,7 +237,17 @@ jobs:
             git worktree add --detach "$worktree" origin/main
           fi
           mkdir -p "$worktree/.github"
-          cp "$RUNNER_TEMP/floor/next-floor.json" "$worktree/.github/performance-floor.json"
+          current="$worktree/.github/performance-floor.json"
+          if [ ! -f "$current" ]; then
+            python3 .github/scripts/performance.py bootstrap --out "$current"
+          fi
+          head="$(jq -r '.head_sha' "$RUNNER_TEMP/performance/meta.json")"
+          python3 .github/scripts/performance.py record \
+            --floor "$current" \
+            --head "$RUNNER_TEMP/performance/aggregated/$head.json" \
+            --sha "$head" \
+            --out "$RUNNER_TEMP/next-floor.json"
+          cp "$RUNNER_TEMP/next-floor.json" "$current"
           git -C "$worktree" add .github/performance-floor.json
           if git -C "$worktree" diff --cached --quiet; then
             echo 'The ceiling is unchanged.'
