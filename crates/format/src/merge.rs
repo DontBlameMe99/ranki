@@ -16,7 +16,7 @@ use crate::ImportReport;
 use crate::error::db_error;
 use crate::error::json_error;
 use crate::media::MediaRename;
-use crate::media::rewrite_references;
+use crate::media::ReferenceMatcher;
 use crate::package::maybe_decompress;
 use crate::schema::encode_json;
 
@@ -94,11 +94,10 @@ pub fn merge_collection(
     renames: &[MediaRename],
     media_count: usize,
 ) -> Result<ImportReport, FormatError> {
-    rewrite_incoming_notes(connection, renames)?;
-
     let transaction = connection
         .transaction()
         .map_err(db_error("cannot start import transaction"))?;
+    rewrite_incoming_notes(&transaction, renames)?;
     let destination = read_col(&transaction, "main")?;
     let incoming = read_col(&transaction, "incoming")?;
     let now_secs = current_unix_seconds()?;
@@ -682,8 +681,9 @@ fn rewrite_incoming_notes(
     if renames.is_empty() {
         return Ok(());
     }
+    let matcher = ReferenceMatcher::new(renames);
     let mut statement = connection
-        .prepare("SELECT id, flds, sfld FROM incoming.notes")
+        .prepare_cached("SELECT id, flds, sfld FROM incoming.notes")
         .map_err(db_error("cannot read package notes"))?;
     let rows = statement
         .query_map([], |row| {
@@ -698,17 +698,19 @@ fn rewrite_incoming_notes(
         .map_err(db_error("cannot read package notes"))?;
     drop(statement);
 
+    let mut update = connection
+        .prepare_cached(
+            "UPDATE incoming.notes SET flds = ?, sfld = ? WHERE id = ?",
+        )
+        .map_err(db_error("cannot rewrite package media references"))?;
     for (id, fields, sort_field) in rows {
-        let new_fields = rewrite_references(&fields, renames);
-        let new_sort = rewrite_references(&sort_field, renames);
+        let new_fields = matcher.rewrite(&fields);
+        let new_sort = matcher.rewrite(&sort_field);
         if new_fields.as_ref() != fields.as_str()
             || new_sort.as_ref() != sort_field.as_str()
         {
-            connection
-                .execute(
-                    "UPDATE incoming.notes SET flds = ?, sfld = ? WHERE id = ?",
-                    params![new_fields.as_ref(), new_sort.as_ref(), id],
-                )
+            update
+                .execute(params![new_fields.as_ref(), new_sort.as_ref(), id])
                 .map_err(db_error("cannot rewrite package media references"))?;
         }
     }

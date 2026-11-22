@@ -8,6 +8,7 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -155,7 +156,7 @@ impl Fixture {
 
 fn write_collection(path: &Path, seed: &Seed) {
     let _ = fs::remove_file(path);
-    let connection = Connection::open(path).unwrap();
+    let mut connection = Connection::open(path).unwrap();
     connection.execute_batch(TEST_SCHEMA).unwrap();
     let conf =
         json!({"activeDecks": [1], "curDeck": 1, "curModel": 1}).to_string();
@@ -171,10 +172,11 @@ fn write_collection(path: &Path, seed: &Seed) {
             params![conf, models, decks, dconf, tags],
         )
         .unwrap();
+    let transaction = connection.transaction().unwrap();
 
     for note in &seed.notes {
         let sort_field = note.fields.split('\u{001f}').next().unwrap_or("");
-        connection
+        transaction
             .execute(
                 "INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data)
                  VALUES (?, ?, ?, 0, 0, '', ?, ?, 0, 0, '')",
@@ -183,7 +185,7 @@ fn write_collection(path: &Path, seed: &Seed) {
             .unwrap();
     }
     for card in &seed.cards {
-        connection
+        transaction
             .execute(
                 "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor,
                      reps, lapses, left, odue, odid, flags, data)
@@ -193,7 +195,7 @@ fn write_collection(path: &Path, seed: &Seed) {
             .unwrap();
     }
     if seed.revlog {
-        connection
+        transaction
             .execute(
                 "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type)
                  VALUES (1000, 100, 0, 3, 1, 0, 2500, 1200, 0)",
@@ -201,6 +203,7 @@ fn write_collection(path: &Path, seed: &Seed) {
             )
             .unwrap();
     }
+    transaction.commit().unwrap();
 }
 
 fn count(connection: &Connection, table: &str) -> i64 {
@@ -704,6 +707,150 @@ fn media_collision_uses_new_name_and_rewrites_notes() {
         "guid-a",
     );
     assert!(fields.contains("photo_1.png"));
+}
+
+#[test]
+fn reimport_with_conflicting_media_is_idempotent() {
+    let fixture = Fixture::new();
+    fs::write(fixture.media.join("photo.png"), b"new").unwrap();
+    let package = fixture.package();
+    let collection = fixture.dir.path().join("idempotent.anki2");
+    let media = fixture.dir.path().join("idempotent-media");
+    fs::create_dir_all(&media).unwrap();
+    fs::write(media.join("photo.png"), b"old").unwrap();
+
+    let first = import_apkg(&package, &collection, &media).unwrap();
+    assert_eq!(first.notes, 2);
+    let before = {
+        let connection = Connection::open(&collection).unwrap();
+        query_string(
+            &connection,
+            "SELECT flds FROM notes WHERE guid = ?",
+            "guid-a",
+        )
+    };
+    assert!(before.contains("photo_1.png"));
+
+    let second = import_apkg(&package, &collection, &media).unwrap();
+    assert_eq!(second.notes, 0);
+    let connection = Connection::open(&collection).unwrap();
+    assert_eq!(count(&connection, "notes"), 2);
+    assert_eq!(
+        query_string(
+            &connection,
+            "SELECT flds FROM notes WHERE guid = ?",
+            "guid-a",
+        ),
+        before
+    );
+    assert_eq!(fs::read_dir(&media).unwrap().count(), 2);
+}
+
+fn write_stress_package(path: &Path, collection_bytes: &[u8], count: usize) {
+    let mapping: BTreeMap<String, String> = (0..count)
+        .map(|index| (index.to_string(), format!("m{index:06}.png")))
+        .collect();
+    let file = File::create(path).unwrap();
+    let mut writer = ZipWriter::new(file);
+    writer
+        .start_file("collection.anki21", SimpleFileOptions::default())
+        .unwrap();
+    writer.write_all(collection_bytes).unwrap();
+    writer
+        .start_file("media", SimpleFileOptions::default())
+        .unwrap();
+    writer
+        .write_all(&serde_json::to_vec(&mapping).unwrap())
+        .unwrap();
+    for index in 0..count {
+        writer
+            .start_file(index.to_string(), SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(format!("new-{index}").as_bytes()).unwrap();
+    }
+    writer.finish().unwrap();
+}
+
+fn seed_conflicting_media(directory: &Path, count: usize) -> PathBuf {
+    let media = directory.join("stress-media");
+    fs::create_dir_all(&media).unwrap();
+    for index in 0..count {
+        fs::write(
+            media.join(format!("m{index:06}.png")),
+            format!("old-{index}"),
+        )
+        .unwrap();
+    }
+    media
+}
+
+#[test]
+fn stress_import_with_many_conflicting_media() {
+    const COUNT: usize = 2000;
+    let fixture = Fixture::new();
+    let notes: Vec<TestNote> = (0..COUNT)
+        .map(|index| TestNote {
+            id: i64::try_from(index + 1).unwrap(),
+            guid: format!("stress-{index}"),
+            mid: 1,
+            fields: format!(
+                "<img src=\"m{index:06}.png\"> front\u{001f}back m{index:06}.png"
+            ),
+        })
+        .collect();
+    write_collection(
+        &fixture.source,
+        &Seed {
+            notes,
+            cards: Vec::new(),
+            revlog: false,
+        },
+    );
+    let collection_bytes = fs::read(&fixture.source).unwrap();
+    let package = fixture.dir.path().join("stress.apkg");
+    write_stress_package(&package, &collection_bytes, COUNT);
+
+    let media = seed_conflicting_media(fixture.dir.path(), COUNT);
+
+    let collection = fixture.dir.path().join("stress.anki2");
+    let started = Instant::now();
+    let report = import_apkg(&package, &collection, &media).unwrap();
+    eprintln!("stress import took {:?}", started.elapsed());
+    assert_eq!(report.notes, COUNT);
+    assert_eq!(report.media, COUNT);
+    assert_eq!(fs::read_dir(&media).unwrap().count(), COUNT * 2);
+    for index in [0, 1000, COUNT - 1] {
+        let name = format!("m{index:06}.png");
+        assert_eq!(
+            fs::read(media.join(&name)).unwrap(),
+            format!("old-{index}").into_bytes()
+        );
+        assert_eq!(
+            fs::read(media.join(format!("m{index:06}_1.png"))).unwrap(),
+            format!("new-{index}").into_bytes()
+        );
+    }
+    let connection = Connection::open(&collection).unwrap();
+    let fields = query_string(
+        &connection,
+        "SELECT flds FROM notes WHERE guid = ?",
+        "stress-0",
+    );
+    assert!(fields.contains("m000000_1.png"));
+    assert!(!fields.contains("src=\"m000000.png\""));
+
+    let second = import_apkg(&package, &collection, &media).unwrap();
+    assert_eq!(second.notes, 0);
+    assert_eq!(fs::read_dir(&media).unwrap().count(), COUNT * 2);
+    let connection = Connection::open(&collection).unwrap();
+    assert_eq!(
+        query_string(
+            &connection,
+            "SELECT flds FROM notes WHERE guid = ?",
+            "stress-0",
+        ),
+        fields
+    );
 }
 
 #[test]
