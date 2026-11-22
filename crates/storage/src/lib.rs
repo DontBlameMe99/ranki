@@ -26,8 +26,13 @@ use std::collections::HashSet;
 use std::fmt::Display;
 use std::path::Path;
 use std::path::PathBuf;
+use std::slice;
 
 pub use ranki_model::StoreError;
+pub use ranki_model::stock_models;
+
+pub use records::models_from_tables_with_prefix;
+pub use records::models_to_json;
 
 use ranki_model::Card;
 use ranki_model::DEFAULT_DECK_ID;
@@ -46,10 +51,9 @@ use rusqlite::Transaction;
 use rusqlite::params;
 use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
+use serde_json::Map;
 use serde_json::Value as Json;
 use serde_json::json;
-
-/// Human-readable summary of the supported [`Store::find_cards`] syntax.
 pub const SEARCH_SYNTAX: &str = "deck:, tag:, note:, is:new/learn/review/suspended/buried, plain field text, * wildcard";
 
 /// An Anki collection backed by a SQLite file.
@@ -137,6 +141,58 @@ impl Collection {
     /// Returns the collection's file path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Installs a stock note type when the collection has no model by that name.
+    ///
+    /// An existing model with the same name is returned unchanged. Stock ids
+    /// are placeholders, so installation always allocates a fresh id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::NotFound`] for an unknown name and a backend error
+    /// when the collection cannot be updated.
+    pub fn ensure_model(
+        &mut self,
+        name: &str,
+    ) -> Result<NoteModel, StoreError> {
+        let existing = self.model_list()?;
+        if let Some(model) = existing.iter().find(|model| model.name == name) {
+            return Ok(model.clone());
+        }
+        let Some(stock) = stock_models()
+            .into_iter()
+            .find(|model| model.name.eq_ignore_ascii_case(name))
+        else {
+            return Err(StoreError::NotFound(format!("stock model {name}")));
+        };
+        let mut model = stock;
+        model.id = fresh_model_id(&existing)?;
+        let col = records::read_col(&self.conn)?;
+        let stamp = col_stamp(&col)?;
+        let mut object: Map<String, Json> =
+            serde_json::from_str(&col.models).unwrap_or_default();
+        let json = models_to_json(slice::from_ref(&model));
+        if let Some(entry) = json.get(model.id.to_string()).cloned() {
+            let _ = object.insert(model.id.to_string(), entry);
+        }
+        let models = serde_json::to_string(&Json::Object(object))
+            .map_err(|error| invalid(error.to_string()))?;
+        let transaction = self.conn.transaction().map_err(backend)?;
+        transaction
+            .execute(
+                "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4, models = ?5 WHERE id = 1",
+                params![
+                    stamp.now_ms,
+                    stamp.now_ms,
+                    stamp.usn,
+                    stamp.now_ms,
+                    models
+                ],
+            )
+            .map_err(backend)?;
+        transaction.commit().map_err(backend)?;
+        Ok(model)
     }
 
     /// Returns the collection creation time in Unix seconds.
@@ -513,11 +569,10 @@ impl Store for Collection {
                 ],
             )
             .map_err(backend)?;
-        let mut cards: Vec<Id> = Vec::with_capacity(model.templates.len());
-        for position in 0..model.templates.len() {
+        let ordinals = model.card_ordinals(&note.fields);
+        let mut cards: Vec<Id> = Vec::with_capacity(ordinals.len());
+        for ordinal in ordinals {
             let card_id = anki::next_id()?;
-            let ordinal =
-                anki::as_u16(i64::try_from(position).unwrap_or_default())?;
             let due = next_position.saturating_add(i64::from(ordinal));
             transaction
                 .execute(
@@ -640,7 +695,12 @@ impl Store for Collection {
     }
 }
 
-fn register_collations(conn: &Connection) -> Result<(), StoreError> {
+/// Registers the case-insensitive collation used by schema-18 table indexes.
+///
+/// # Errors
+///
+/// Returns an error when SQLite cannot install the collation.
+pub fn register_collations(conn: &Connection) -> Result<(), StoreError> {
     conn.create_collation("unicase", |left, right| {
         left.to_lowercase().cmp(&right.to_lowercase())
     })
@@ -676,6 +736,15 @@ struct Graves {
     cards: Vec<Id>,
     notes: Vec<Id>,
     decks: Vec<Id>,
+}
+
+fn fresh_model_id(existing: &[NoteModel]) -> Result<Id, StoreError> {
+    loop {
+        let id = anki::next_id()?;
+        if !existing.iter().any(|entry| entry.id == id) {
+            return Ok(id);
+        }
+    }
 }
 
 fn placeholders(start: i64, count: usize) -> String {

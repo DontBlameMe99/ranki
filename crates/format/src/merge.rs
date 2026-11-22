@@ -216,7 +216,7 @@ fn read_col(
                 conf
             },
             models: if is_empty_object(&models) {
-                modern_id_map(connection, "notetypes")
+                modern_models(connection)?
             } else {
                 models
             },
@@ -313,6 +313,15 @@ fn modern_id_map(connection: &Connection, table: &str) -> Value {
         map.insert(id.to_string(), entry);
     }
     Value::Object(map)
+}
+
+fn modern_models(connection: &Connection) -> Result<Value, FormatError> {
+    let models =
+        ranki_storage::models_from_tables_with_prefix(connection, "incoming")
+            .map_err(|error| {
+            FormatError::with_source("cannot decode package note types", error)
+        })?;
+    Ok(ranki_storage::models_to_json(&models))
 }
 
 fn write_col(

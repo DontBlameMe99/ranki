@@ -108,6 +108,9 @@ pub fn open_or_create(
         "cannot open collection {}",
         path.display()
     )))?;
+    ranki_storage::register_collations(&connection).map_err(|error| {
+        FormatError::with_source("cannot register collection collations", error)
+    })?;
     connection
         .execute_batch(SCHEMA)
         .map_err(db_error("cannot initialize collection schema"))?;

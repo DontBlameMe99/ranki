@@ -189,6 +189,33 @@ pub fn protobuf_string(bytes: &[u8], wanted: u32) -> Option<String> {
     }
     None
 }
+/// Reads a varint field from an Anki protobuf config blob.
+///
+/// Length-delimited and fixed-width fields are skipped so callers can read
+/// fields that occur after them.
+pub fn protobuf_varint(bytes: &[u8], wanted: u32) -> Option<u64> {
+    let wanted_field = u64::from(wanted);
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let tag = read_varint(bytes, &mut pos)?;
+        let field = tag >> 3;
+        match (tag & 7, field == wanted_field) {
+            (0, true) => return read_varint(bytes, &mut pos),
+            (0, false) => {
+                let _ = read_varint(bytes, &mut pos)?;
+            }
+            (2, _) => {
+                let length =
+                    usize::try_from(read_varint(bytes, &mut pos)?).ok()?;
+                pos = pos.checked_add(length)?;
+            }
+            (1, _) => pos = pos.checked_add(8)?,
+            (5, _) => pos = pos.checked_add(4)?,
+            _ => return None,
+        }
+    }
+    None
+}
 
 fn read_varint(bytes: &[u8], pos: &mut usize) -> Option<u64> {
     let mut result = 0u64;

@@ -19,14 +19,18 @@ use ranki_model::RevLog;
 use ranki_model::RevLogKind;
 use ranki_model::ReviewDecision;
 use ranki_model::Store;
+use ranki_model::parse_image_occlusion_field;
 use ranki_storage::Collection;
 use std::env;
 use std::ffi::OsStr;
+use std::fmt;
+use std::fmt::Display;
 use std::fs;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::str::FromStr;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
@@ -54,6 +58,39 @@ impl From<CliError> for String {
 
 pub(crate) type CliResult<T> = Result<T, CliError>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ModelRef {
+    Id(Id),
+    Name(String),
+}
+
+impl FromStr for ModelRef {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.trim().is_empty() {
+            return Err("model cannot be empty".to_owned());
+        }
+        Ok(value
+            .parse::<Id>()
+            .map_or_else(|_| Self::Name(value.to_owned()), Self::Id))
+    }
+}
+
+impl PartialEq<i64> for ModelRef {
+    fn eq(&self, other: &i64) -> bool {
+        matches!(self, Self::Id(id) if id == other)
+    }
+}
+
+impl Display for ModelRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Id(id) => write!(formatter, "{id}"),
+            Self::Name(name) => write!(formatter, "{name}"),
+        }
+    }
+}
 #[derive(Debug, Parser)]
 #[command(name = "ranki", version, about = "An Anki-compatible flashcard app")]
 struct Cli {
@@ -93,8 +130,12 @@ enum Command {
     Search { query: String },
     /// Add a note and its cards.
     AddNote {
-        #[arg(long = "model", visible_alias = "model-id", value_name = "ID")]
-        model_id: Id,
+        #[arg(
+            long = "model",
+            visible_alias = "model-id",
+            value_name = "ID_OR_NAME"
+        )]
+        model: ModelRef,
         #[arg(long = "deck", visible_alias = "deck-id", value_name = "ID")]
         deck_id: Id,
         #[arg(long = "field", value_name = "TEXT")]
@@ -102,6 +143,25 @@ enum Command {
         #[arg(long = "tag", value_name = "TAG")]
         tags: Vec<String>,
     },
+    /// Add a built-in Image Occlusion note from an image and cloze markers.
+    AddImageOcclusion {
+        #[arg(long = "deck", value_name = "ID")]
+        deck_id: Id,
+        #[arg(long, value_name = "PATH")]
+        image: PathBuf,
+        #[arg(long = "occlusion", value_name = "MARKER", required = true)]
+        occlusions: Vec<String>,
+        #[arg(long, value_name = "TEXT")]
+        header: Option<String>,
+        #[arg(long = "back-extra", value_name = "TEXT")]
+        back_extra: Option<String>,
+        #[arg(long, value_name = "TEXT")]
+        comments: Option<String>,
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+    },
+    /// List note models available in the collection, including stock types.
+    Models,
     /// Answer a card with an ease rating from 1 to 4.
     Answer {
         card_id: Id,
@@ -200,18 +260,31 @@ fn run(cli: Cli) -> CliResult<()> {
         | Command::Due { .. }
         | Command::Search { .. }
         | Command::AddNote { .. }
+        | Command::AddImageOcclusion { .. }
+        | Command::Models
         | Command::Answer { .. }
         | Command::Stats { .. } => {
             let mut collection = open_or_create(collection_path)?;
-            run_store_command(&mut collection, command, scheduler.as_ref())
+            run_store_command(
+                &mut collection,
+                command,
+                scheduler.as_ref(),
+                media_dir,
+            )
         }
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the CLI dispatch table maps each subcommand once"
+)]
 fn run_store_command(
     collection: &mut Collection,
     command: Command,
     scheduler: &dyn Scheduler,
+    media_dir: &Path,
 ) -> CliResult<()> {
     match command {
         Command::Decks => {
@@ -238,11 +311,12 @@ fn run_store_command(
             Ok(())
         }
         Command::AddNote {
-            model_id,
+            model,
             deck_id,
             fields,
             tags,
         } => {
+            let model_id = resolve_model(collection, &model)?;
             let note = NewNote {
                 model_id,
                 deck_id,
@@ -251,6 +325,45 @@ fn run_store_command(
             };
             for id in collection.add_note(&note)? {
                 println!("{id}");
+            }
+            Ok(())
+        }
+        Command::AddImageOcclusion {
+            deck_id,
+            image,
+            occlusions,
+            header,
+            back_extra,
+            comments,
+            tags,
+        } => add_image_occlusion(
+            collection,
+            media_dir,
+            deck_id,
+            &image,
+            &occlusions,
+            header.as_deref(),
+            back_extra.as_deref(),
+            comments.as_deref(),
+            &tags,
+        ),
+        Command::Models => {
+            for model in collection.models()? {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    model.id,
+                    model.name,
+                    model.fields.len(),
+                    model.templates.len()
+                );
+            }
+            for model in ranki_model::stock_models() {
+                println!(
+                    "stock\t{}\t{}\t{}",
+                    model.name,
+                    model.fields.len(),
+                    model.templates.len()
+                );
             }
             Ok(())
         }
@@ -377,6 +490,8 @@ fn run_deck_command(
         | Command::Due { .. }
         | Command::Search { .. }
         | Command::AddNote { .. }
+        | Command::AddImageOcclusion { .. }
+        | Command::Models
         | Command::Answer { .. }
         | Command::Stats { .. }
         | Command::Import { .. }
@@ -412,6 +527,92 @@ fn deck_by_id(collection: &Collection, id: Id) -> CliResult<ranki_model::Deck> {
         .into_iter()
         .find(|deck| deck.id == id)
         .ok_or_else(|| CliError::Message(format!("deck not found: {id}")))
+}
+
+fn resolve_model(
+    collection: &mut Collection,
+    model: &ModelRef,
+) -> CliResult<Id> {
+    match model {
+        ModelRef::Id(id) => Ok(*id),
+        ModelRef::Name(name) => {
+            let existing = collection.models()?;
+            if let Some(model) = existing
+                .iter()
+                .find(|entry| entry.name.eq_ignore_ascii_case(name))
+            {
+                return Ok(model.id);
+            }
+            Ok(collection.ensure_model(name)?.id)
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the image occlusion command maps one flag per note field"
+)]
+fn add_image_occlusion(
+    collection: &mut Collection,
+    media_dir: &Path,
+    deck_id: Id,
+    image: &Path,
+    occlusions: &[String],
+    header: Option<&str>,
+    back_extra: Option<&str>,
+    comments: Option<&str>,
+    tags: &[String],
+) -> CliResult<()> {
+    let occlusion = occlusions.join("<br>");
+    let parsed = parse_image_occlusion_field(&occlusion);
+    if parsed.shapes.is_empty() {
+        return Err(CliError::Message(
+            "no image-occlusion markers found".to_owned(),
+        ));
+    }
+    let model_id = resolve_model(
+        collection,
+        &ModelRef::Name("Image Occlusion".to_owned()),
+    )?;
+    let model = collection
+        .models()?
+        .into_iter()
+        .find(|entry| entry.id == model_id)
+        .ok_or_else(|| {
+            CliError::Message("image occlusion model missing".into())
+        })?;
+    if model.fields.len() != 5 {
+        return Err(CliError::Message(format!(
+            "image occlusion model needs 5 fields, found {}",
+            model.fields.len()
+        )));
+    }
+    let media_name = image
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| CliError::Message("invalid image file name".into()))?;
+    if media_name.is_empty() || media_name.contains(['"', '<', '>']) {
+        return Err(CliError::Message("unsafe image file name".into()));
+    }
+    fs::create_dir_all(media_dir)?;
+    fs::copy(image, media_dir.join(media_name))?;
+    let fields = vec![
+        occlusion,
+        format!("<img src=\"{media_name}\">"),
+        header.unwrap_or_default().to_owned(),
+        back_extra.unwrap_or_default().to_owned(),
+        comments.unwrap_or_default().to_owned(),
+    ];
+    let note = NewNote {
+        model_id,
+        deck_id,
+        fields,
+        tags: tags.to_vec(),
+    };
+    for id in collection.add_note(&note)? {
+        println!("{id}");
+    }
+    Ok(())
 }
 
 pub(crate) fn open_or_create(path: &Path) -> CliResult<Collection> {
@@ -563,7 +764,7 @@ mod tests {
             "front", "--field", "back", "--tag", "one", "--tag", "two",
         ]);
         let Some(Command::AddNote {
-            model_id,
+            model,
             deck_id,
             fields,
             tags,
@@ -571,9 +772,80 @@ mod tests {
         else {
             panic!("wrong command");
         };
-        assert_eq!((model_id, deck_id), (1, 2));
+        assert_eq!(model, 1);
+        assert_eq!(deck_id, 2);
         assert_eq!(fields, ["front", "back"]);
         assert_eq!(tags, ["one", "two"]);
+    }
+
+    #[test]
+    fn add_note_accepts_stock_model_names() {
+        let cli = parse(&[
+            "ranki",
+            "add-note",
+            "--model",
+            "Basic (and reversed card)",
+            "--deck",
+            "1",
+            "--field",
+            "front",
+            "--field",
+            "back",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::AddNote {
+                model: super::ModelRef::Name(name),
+                ..
+            }) if name == "Basic (and reversed card)"
+        ));
+    }
+
+    #[test]
+    fn add_image_occlusion_collects_markers_and_fields() {
+        let cli = parse(&[
+            "ranki",
+            "add-image-occlusion",
+            "--deck",
+            "1",
+            "--image",
+            "/tmp/diagram.png",
+            "--occlusion",
+            "{{c1::image-occlusion:rect:left=.1:top=.2:width=.3:height=.4}}",
+            "--occlusion",
+            "{{c2::image-occlusion:ellipse:left=.5:top=.6:width=.2:height=.2}}",
+            "--header",
+            "Diagram",
+            "--back-extra",
+            "More",
+            "--tag",
+            "io",
+        ]);
+        let Some(Command::AddImageOcclusion {
+            image,
+            occlusions,
+            header,
+            back_extra,
+            tags,
+            ..
+        }) = cli.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(image, Path::new("/tmp/diagram.png"));
+        assert_eq!(occlusions.len(), 2);
+        assert!(occlusions[1].contains("c2"));
+        assert_eq!(header.as_deref(), Some("Diagram"));
+        assert_eq!(back_extra.as_deref(), Some("More"));
+        assert_eq!(tags, ["io"]);
+    }
+
+    #[test]
+    fn models_command_is_available() {
+        assert!(matches!(
+            parse(&["ranki", "models"]).command,
+            Some(Command::Models)
+        ));
     }
 
     #[test]
