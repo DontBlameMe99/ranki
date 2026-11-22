@@ -16,6 +16,7 @@ self: {
   '';
 
   validOrNull = predicate: value: value == null || predicate value;
+  # Ranges mirror the Rust config validator (crates/bin/src/config.rs), the source of truth.
   validSettings = settings: let
     section = name:
       if builtins.isAttrs (settings.${name} or null)
@@ -30,15 +31,17 @@ self: {
     && validOrNull (value: builtins.elem value ["dark" "light" "system"]) (
       ui.theme or null
     )
-    && validOrNull (value: builtins.isFloat value && value > 0) (ui.font_size or null)
-    && validOrNull (value: builtins.isInt value && value >= 1 && value <= 1000) (
+    && validOrNull (value: builtins.isFloat value && value >= 8.0 && value <= 40.0) (
+      ui.font_size or null
+    )
+    && validOrNull (value: builtins.isInt value && value >= 1 && value <= 500) (
       ui.review_batch_size or null
     )
     && validOrNull builtins.isBool (ui.show_keyboard_hints or null)
     && validOrNull (value: builtins.elem value ["fsrs" "sm2"]) (
       scheduler.algorithm or null
     )
-    && validOrNull (value: builtins.isFloat value && value > 0 && value < 1) (
+    && validOrNull (value: builtins.isFloat value && value >= 0.5 && value <= 0.999) (
       scheduler.desired_retention or null
     );
 in {
