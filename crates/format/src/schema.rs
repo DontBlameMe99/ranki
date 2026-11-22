@@ -1,5 +1,7 @@
 use std::fs;
 use std::path::Path;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use rusqlite::Connection;
 use serde_json::Value;
@@ -93,7 +95,14 @@ pub fn ensure_parent(path: &Path) -> Result<(), FormatError> {
     )))
 }
 
-pub fn open_or_create(path: &Path) -> Result<Connection, FormatError> {
+/// Opens a collection, creating its schema and `col` row when needed.
+///
+/// Import callers pass the source collection's creation time. A standalone
+/// collection gets the current Unix time.
+pub fn open_or_create(
+    path: &Path,
+    crt: Option<i64>,
+) -> Result<Connection, FormatError> {
     ensure_parent(path)?;
     let connection = Connection::open(path).map_err(db_error(format!(
         "cannot open collection {}",
@@ -106,17 +115,22 @@ pub fn open_or_create(path: &Path) -> Result<Connection, FormatError> {
         .query_row("SELECT COUNT(*) FROM col", [], |row| row.get(0))
         .map_err(db_error("cannot read collection metadata"))?;
     if count == 0 {
-        insert_default_col(&connection)?;
+        insert_default_col(&connection, crt)?;
     }
     Ok(connection)
 }
 
-fn insert_default_col(connection: &Connection) -> Result<(), FormatError> {
+fn insert_default_col(
+    connection: &Connection,
+    crt: Option<i64>,
+) -> Result<(), FormatError> {
+    let creation_time = crt.map_or_else(current_time, Ok)?;
     connection
         .execute(
             "INSERT INTO col (id, crt, mod, scm, ver, dty, usn, ls, conf, models, decks, dconf, tags)
-             VALUES (1, 0, 0, 0, 11, 0, 0, 0, ?, ?, ?, ?, ?)",
+             VALUES (1, ?1, 0, 0, 11, 0, 0, 0, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
+                creation_time,
                 encode_json(&default_conf())?,
                 encode_json(&default_models())?,
                 encode_json(&default_decks())?,
@@ -126,6 +140,17 @@ fn insert_default_col(connection: &Connection) -> Result<(), FormatError> {
         )
         .map_err(db_error("cannot create collection metadata"))?;
     Ok(())
+}
+
+fn current_time() -> Result<i64, FormatError> {
+    let elapsed =
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| {
+                FormatError::with_source("cannot read system clock", error)
+            })?;
+    i64::try_from(elapsed.as_secs())
+        .map_err(|_| FormatError::new("system clock out of range"))
 }
 
 pub fn encode_json(value: &Value) -> Result<String, FormatError> {

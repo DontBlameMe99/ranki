@@ -18,8 +18,11 @@ use crate::media::rewrite_references;
 use crate::package::maybe_decompress;
 use crate::schema::encode_json;
 
+const DAY_SECS: i64 = 86_400;
+
 #[derive(Debug)]
 pub struct ColJson {
+    pub crt: i64,
     pub conf: Value,
     pub models: Value,
     pub decks: Value,
@@ -29,6 +32,7 @@ pub struct ColJson {
 
 struct MergeState {
     next_id: i64,
+    day_shift: i64,
     model_map: BTreeMap<i64, i64>,
     deck_map: BTreeMap<i64, i64>,
     dconf_map: BTreeMap<i64, i64>,
@@ -95,9 +99,15 @@ pub fn merge_collection(
         .map_err(db_error("cannot start import transaction"))?;
     let destination = read_col(&transaction, "main")?;
     let incoming = read_col(&transaction, "incoming")?;
-    let mut state =
-        MergeState::new(global_next_id(&transaction, &destination, &incoming)?);
-
+    let day_shift = incoming
+        .crt
+        .checked_sub(destination.crt)
+        .map(|delta| delta.div_euclid(DAY_SECS))
+        .ok_or_else(|| FormatError::new("invalid collection creation time"))?;
+    let mut state = MergeState::new(
+        global_next_id(&transaction, &destination, &incoming)?,
+        day_shift,
+    );
     let mut merged = destination;
     merge_col_json(&mut merged, &incoming, &mut state)?;
     write_col(&transaction, &merged)?;
@@ -117,9 +127,10 @@ pub fn merge_collection(
 }
 
 impl MergeState {
-    const fn new(next_id: i64) -> Self {
+    const fn new(next_id: i64, day_shift: i64) -> Self {
         Self {
             next_id,
+            day_shift,
             model_map: BTreeMap::new(),
             deck_map: BTreeMap::new(),
             dconf_map: BTreeMap::new(),
@@ -142,16 +153,17 @@ fn read_col(
     prefix: &str,
 ) -> Result<ColJson, FormatError> {
     let sql = format!(
-        "SELECT conf, models, decks, dconf, tags FROM {prefix}.col WHERE id = 1"
+        "SELECT crt, conf, models, decks, dconf, tags FROM {prefix}.col WHERE id = 1"
     );
     let row = connection
         .query_row(&sql, [], |row| {
             Ok((
-                row.get::<_, Option<String>>(0)?,
+                row.get::<_, i64>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })
         .optional()
@@ -162,13 +174,14 @@ fn read_col(
             FormatError::new(format!("{prefix} collection has no metadata row"))
         })?;
 
-    let conf = decode_json(row.0, "conf")?;
-    let models = decode_json(row.1, "models")?;
-    let decks = decode_json(row.2, "decks")?;
-    let dconf = decode_json(row.3, "dconf")?;
-    let tags = decode_json(row.4, "tags")?;
+    let conf = decode_json(row.1, "conf")?;
+    let models = decode_json(row.2, "models")?;
+    let decks = decode_json(row.3, "decks")?;
+    let dconf = decode_json(row.4, "dconf")?;
+    let tags = decode_json(row.5, "tags")?;
     if prefix == "incoming" {
         return Ok(ColJson {
+            crt: row.0,
             conf: if is_empty_object(&conf) {
                 modern_conf(connection)
             } else {
@@ -193,6 +206,7 @@ fn read_col(
         });
     }
     Ok(ColJson {
+        crt: row.0,
         conf,
         models,
         decks,
@@ -869,6 +883,8 @@ fn insert_cards(
             let _ = used.insert(row.id);
             row.id
         };
+        // Review and day-learning dues are days; the other queues are not.
+        let due = shifted_due(row.due, row.queue, state.day_shift)?;
         transaction
             .execute(
                 "INSERT INTO main.cards (id, nid, did, ord, mod, usn, type, queue, due, ivl,
@@ -883,7 +899,7 @@ fn insert_cards(
                     row.usn,
                     row.kind,
                     row.queue,
-                    row.due,
+                    due,
                     row.interval,
                     row.factor,
                     row.reps,
@@ -900,6 +916,19 @@ fn insert_cards(
         inserted = increment(inserted)?;
     }
     Ok(inserted)
+}
+
+fn shifted_due(
+    due: i64,
+    queue: i32,
+    day_shift: i64,
+) -> Result<i64, FormatError> {
+    if !matches!(queue, 2 | 3) {
+        return Ok(due);
+    }
+    due.checked_add(day_shift).ok_or_else(|| {
+        FormatError::new("card due overflow while importing package")
+    })
 }
 
 fn merge_revlog(

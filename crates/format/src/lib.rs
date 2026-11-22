@@ -37,10 +37,11 @@ pub fn import_apkg(
     media_dir: &Path,
 ) -> Result<ImportReport, FormatError> {
     let contents = package::read_apkg(imported_package)?;
+    let source_crt = package_creation_time(contents.collection.path())?;
     let renames = media::copy_media(media_dir, &contents.media)?;
     let media_count = contents.media.len();
 
-    let mut connection = schema::open_or_create(collection)?;
+    let mut connection = schema::open_or_create(collection, Some(source_crt))?;
     let incoming = contents.collection.path().to_string_lossy().into_owned();
     connection
         .execute("ATTACH DATABASE ? AS incoming", params![incoming])
@@ -54,6 +55,14 @@ pub fn import_apkg(
     let report = result?;
     detach?;
     Ok(report)
+}
+
+fn package_creation_time(path: &Path) -> Result<i64, FormatError> {
+    let connection = rusqlite::Connection::open(path)
+        .map_err(error::db_error("cannot open package collection"))?;
+    connection
+        .query_row("SELECT crt FROM col WHERE id = 1", [], |row| row.get(0))
+        .map_err(error::db_error("cannot read package creation time"))
 }
 
 /// Export a collection into an `.apkg` file Anki can import.

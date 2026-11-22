@@ -8,12 +8,16 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use ranki_format::ImportReport;
 use ranki_format::export_apkg;
 use ranki_format::export_colpkg;
 use ranki_format::import_apkg;
 use ranki_format::import_colpkg;
+use ranki_model::Store;
+use ranki_storage::Collection as AnkiCollection;
 use rusqlite::Connection;
 use rusqlite::params;
 use serde_json::json;
@@ -52,6 +56,7 @@ CREATE TABLE graves (usn INTEGER NOT NULL, oid INTEGER NOT NULL, type INTEGER NO
 ";
 
 const REAL_FIXTURE: &str = "/home/user/downloads/WorldFlags.apkg";
+const DAY_SECS: i64 = 86_400;
 
 #[derive(Clone)]
 struct TestNote {
@@ -246,6 +251,40 @@ fn entry_bytes(archive: &mut zip::ZipArchive<File>, name: &str) -> Vec<u8> {
     bytes
 }
 
+fn unix_seconds() -> i64 {
+    let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    i64::try_from(elapsed.as_secs()).unwrap()
+}
+
+fn write_review_source(path: &Path, crt: i64, due: i64) {
+    let seed = Seed {
+        notes: vec![TestNote {
+            id: 1,
+            guid: "review-guid".to_owned(),
+            mid: 1,
+            fields: "question\u{001f}answer".to_owned(),
+        }],
+        cards: vec![TestCard {
+            id: 100,
+            note_id: 1,
+            deck_id: 1,
+            ordinal: 0,
+        }],
+        revlog: false,
+    };
+    write_collection(path, &seed);
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute("UPDATE col SET crt = ?1 WHERE id = 1", [crt])
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE cards SET type = 2, queue = 2, ivl = 10, due = ?1 WHERE id = 100",
+            [due],
+        )
+        .unwrap();
+}
+
 #[test]
 fn roundtrip_notes_cards_and_review_log() {
     let fixture = Fixture::new();
@@ -266,6 +305,63 @@ fn roundtrip_notes_cards_and_review_log() {
     assert_eq!(count(&connection, "revlog"), 1);
     let guids = strings(&connection, "SELECT guid FROM notes ORDER BY guid");
     assert_eq!(guids, vec!["guid-a", "guid-b"]);
+}
+
+#[test]
+fn fresh_import_preserves_source_crt_and_due_scale() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.anki2");
+    let now = unix_seconds();
+    let source_days = 20_i64;
+    let source_crt = now.saturating_sub(DAY_SECS.saturating_mul(source_days));
+    let source_due = source_days.saturating_add(5);
+    write_review_source(&source, source_crt, source_due);
+
+    let package = dir.path().join("review.apkg");
+    export_apkg(&source, &dir.path().join("media"), &package).unwrap();
+    let collection = dir.path().join("fresh.anki2");
+    import_apkg(&package, &collection, &dir.path().join("fresh-media"))
+        .unwrap();
+
+    let connection = Connection::open(&collection).unwrap();
+    let stored_crt: i64 = connection
+        .query_row("SELECT crt FROM col WHERE id = 1", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(stored_crt, source_crt);
+    drop(connection);
+
+    let store = AnkiCollection::open(&collection).unwrap();
+    let due = store.due_cards(None, 10, now).unwrap();
+    assert_eq!(due.as_slice(), &[]);
+    let card = store.card(100).unwrap().unwrap();
+    assert_eq!(card.due, source_due);
+}
+
+#[test]
+fn existing_import_shifts_review_due_to_destination_scale() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("existing.anki2");
+    let created = AnkiCollection::create(&destination).unwrap();
+    let destination_crt = created.collection_created().unwrap();
+    drop(created);
+
+    let source_days = 20_i64;
+    let source_crt =
+        destination_crt.saturating_sub(DAY_SECS.saturating_mul(source_days));
+    let source_due = source_days.saturating_add(5);
+    let source = dir.path().join("source.anki2");
+    write_review_source(&source, source_crt, source_due);
+
+    let package = dir.path().join("review.apkg");
+    export_apkg(&source, &dir.path().join("media"), &package).unwrap();
+    import_apkg(&package, &destination, &dir.path().join("shifted-media"))
+        .unwrap();
+
+    let store = AnkiCollection::open(&destination).unwrap();
+    let card = store.card(100).unwrap().unwrap();
+    assert_eq!(card.due, 5);
+    let due = store.due_cards(None, 10, destination_crt).unwrap();
+    assert_eq!(due.as_slice(), &[]);
 }
 
 #[test]
