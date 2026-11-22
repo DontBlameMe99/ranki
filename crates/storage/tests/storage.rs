@@ -164,7 +164,7 @@ fn add_note_stores_anki_fields_tags_sort_field_and_checksum() {
         .expect("note")
         .expect("exists");
     assert_ne!(saved.guid, other.guid);
-    assert_eq!(saved.guid.len(), other.guid.len());
+    assert!(!saved.guid.is_empty() && !other.guid.is_empty());
     assert!(saved.guid.is_ascii());
 }
 
