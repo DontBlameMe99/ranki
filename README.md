@@ -65,7 +65,8 @@ home-manager switch --flake .#user@host
 The module writes `~/.config/ranki/config.toml` when `collection`, `mediaDir`, or
 `settings` is set, and leaves an existing file alone unless `forceConfig = true`.
 It installs a desktop entry by default and uses the wrapped Ranki package unless
-`package` is overridden. The generated settings use this schema:
+`package` is overridden. The package installs `assets/rai.svg` as the hicolor icon
+`ranki`, which the desktop entry uses. The generated settings use this schema:
 
 ```toml
 [general]

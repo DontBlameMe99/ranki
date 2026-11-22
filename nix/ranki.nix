@@ -8,13 +8,6 @@ self: {
   tomlFormat = pkgs.formats.toml {};
   hasConfig = cfg.collection != null || cfg.mediaDir != null || cfg.settings != {};
 
-  icon = pkgs.writeTextDir "ranki.svg" ''
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-      <rect width="64" height="64" rx="12" fill="#5b21b6"/>
-      <path d="M14 16h36v8H14zm0 12h22v8H14zm0 12h30v8H14z" fill="#fff"/>
-    </svg>
-  '';
-
   validOrNull = predicate: value: value == null || predicate value;
   # Ranges mirror the Rust config validator (crates/bin/src/config.rs), the source of truth.
   validSettings = settings: let
@@ -125,7 +118,7 @@ in {
       comment = "Anki-compatible flashcards";
       terminal = false;
       categories = ["Education"];
-      icon = "${icon}/ranki.svg";
+      icon = "ranki";
     };
   };
 }

@@ -69,6 +69,8 @@
             inherit cargoArtifacts;
             nativeBuildInputs = [pkgs.makeWrapper];
             postFixup = ''
+              install -Dm644 ${./assets/rai.svg} \
+                $out/share/icons/hicolor/scalable/apps/ranki.svg
               wrapProgram $out/bin/${binName} \
                 --prefix LD_LIBRARY_PATH : "${guiLibs}"
             '';
