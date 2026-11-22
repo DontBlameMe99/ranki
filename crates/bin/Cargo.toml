@@ -1,0 +1,22 @@
+[package]
+name                 = "ranki"
+version.workspace    = true
+repository.workspace = true
+edition.workspace    = true
+license.workspace    = true
+
+[dependencies]
+ranki-model.workspace = true
+ranki-core.workspace = true
+ranki-storage.workspace = true
+ranki-format.workspace = true
+ranki-ui.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tiny_http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

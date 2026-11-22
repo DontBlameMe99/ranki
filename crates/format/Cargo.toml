@@ -1,0 +1,19 @@
+[package]
+name = "ranki-format"
+version.workspace = true
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ranki-model.workspace = true
+ranki-storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
