@@ -71,6 +71,17 @@ enum Command {
     Gui,
     /// List decks in the collection.
     Decks,
+    /// Create a deck.
+    DeckCreate { name: String },
+    /// Rename a deck and its subdecks.
+    DeckRename { id: Id, name: String },
+    /// Remove a deck and its subdecks.
+    DeckRemove {
+        id: Id,
+        /// Remove non-empty decks without asking again.
+        #[arg(long)]
+        force: bool,
+    },
     /// Show cards that are due.
     Due {
         #[arg(long, value_name = "ID")]
@@ -183,6 +194,9 @@ fn run(cli: Cli) -> CliResult<()> {
             connect::serve(collection_path, port, scheduler.as_ref())
         }
         Command::Decks
+        | Command::DeckCreate { .. }
+        | Command::DeckRename { .. }
+        | Command::DeckRemove { .. }
         | Command::Due { .. }
         | Command::Search { .. }
         | Command::AddNote { .. }
@@ -206,6 +220,9 @@ fn run_store_command(
             }
             Ok(())
         }
+        Command::DeckCreate { .. }
+        | Command::DeckRename { .. }
+        | Command::DeckRemove { .. } => run_deck_command(collection, command),
         Command::Due { deck, limit } => {
             let cards =
                 collection.due_cards(deck, limit.unwrap_or(20), now_secs()?)?;
@@ -334,6 +351,67 @@ pub(crate) fn default_collection_path(
 pub(crate) fn media_dir_for(collection: &Path) -> PathBuf {
     let parent = collection.parent().unwrap_or_else(|| Path::new("."));
     parent.join("collection.media")
+}
+
+fn run_deck_command(
+    collection: &mut Collection,
+    command: Command,
+) -> CliResult<()> {
+    match command {
+        Command::DeckCreate { name } => {
+            let deck = collection.create_deck(&name)?;
+            println!("created\t{}\t{}", deck.id, deck.name);
+        }
+        Command::DeckRename { id, name } => {
+            let deck = collection.rename_deck(id, &name)?;
+            println!("renamed\t{}\t{}", deck.id, deck.name);
+        }
+        Command::DeckRemove { id, force } => {
+            let deck = deck_by_id(collection, id)?;
+            require_force(collection, &deck, force)?;
+            collection.remove_deck(id)?;
+            println!("removed\t{}\t{}", deck.id, deck.name);
+        }
+        Command::Gui
+        | Command::Decks
+        | Command::Due { .. }
+        | Command::Search { .. }
+        | Command::AddNote { .. }
+        | Command::Answer { .. }
+        | Command::Stats { .. }
+        | Command::Import { .. }
+        | Command::Export { .. }
+        | Command::ExportColpkg { .. }
+        | Command::Check
+        | Command::Connect { .. }
+        | Command::Mcp => {}
+    }
+    Ok(())
+}
+
+fn require_force(
+    collection: &Collection,
+    deck: &ranki_model::Deck,
+    force: bool,
+) -> CliResult<()> {
+    if force {
+        return Ok(());
+    }
+    let cards = collection.stats(Some(deck.id), now_secs()?)?.total_cards;
+    if cards == 0 {
+        return Ok(());
+    }
+    Err(CliError::Message(format!(
+        "deck {} ({}) has {cards} cards; pass --force to remove it",
+        deck.id, deck.name
+    )))
+}
+fn deck_by_id(collection: &Collection, id: Id) -> CliResult<ranki_model::Deck> {
+    collection
+        .decks()?
+        .into_iter()
+        .find(|deck| deck.id == id)
+        .ok_or_else(|| CliError::Message(format!("deck not found: {id}")))
 }
 
 pub(crate) fn open_or_create(path: &Path) -> CliResult<Collection> {

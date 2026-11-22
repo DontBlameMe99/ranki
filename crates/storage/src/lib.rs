@@ -22,6 +22,7 @@ mod records;
 mod schema;
 mod search;
 
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::path::Path;
 use std::path::PathBuf;
@@ -29,6 +30,7 @@ use std::path::PathBuf;
 pub use ranki_model::StoreError;
 
 use ranki_model::Card;
+use ranki_model::DEFAULT_DECK_ID;
 use ranki_model::Deck;
 use ranki_model::DeckStats;
 use ranki_model::Id;
@@ -195,12 +197,7 @@ impl Collection {
     }
 
     fn deck_list(&self) -> Result<Vec<Deck>, StoreError> {
-        let col = records::read_col(&self.conn)?;
-        let decks = records::decks_from_json(&col.decks)?;
-        if decks.is_empty() && records::table_exists(&self.conn, "decks")? {
-            return records::decks_from_tables(&self.conn);
-        }
-        Ok(decks)
+        deck_list_from(&self.conn)
     }
 
     fn model_list(&self) -> Result<Vec<NoteModel>, StoreError> {
@@ -214,16 +211,7 @@ impl Collection {
     }
 
     fn deck_subtree(&self, deck_id: Id) -> Result<Vec<Id>, StoreError> {
-        let decks = self.deck_list()?;
-        let Some(root) = decks.iter().find(|deck| deck.id == deck_id) else {
-            return Ok(Vec::new());
-        };
-        let prefix = format!("{}::", root.name);
-        Ok(decks
-            .iter()
-            .filter(|deck| deck.id == deck_id || deck.name.starts_with(&prefix))
-            .map(|deck| deck.id)
-            .collect())
+        Ok(deck_subtree_ids(&self.deck_list()?, deck_id))
     }
 
     fn deck_filter(
@@ -263,12 +251,7 @@ impl Store for Collection {
     }
 
     fn create_deck(&mut self, name: &str) -> Result<Deck, StoreError> {
-        let deck_name = name.trim();
-        if deck_name.is_empty()
-            || deck_name.split("::").any(|part| part.trim().is_empty())
-        {
-            return Err(invalid("invalid deck name"));
-        }
+        let deck_name = validate_deck_name(name)?;
         let decks = self.deck_list()?;
         if decks.iter().any(|deck| deck.name == deck_name) {
             return Err(invalid(format!("deck already exists: {deck_name}")));
@@ -281,8 +264,7 @@ impl Store for Collection {
             .usn
             .checked_add(1)
             .ok_or_else(|| invalid("usn overflow"))?;
-        let modern = col.decks.trim().is_empty()
-            && records::table_exists(&self.conn, "decks")?;
+        let modern = uses_deck_table(&self.conn, &col)?;
         if modern {
             self.conn
                 .execute(
@@ -327,6 +309,71 @@ impl Store for Collection {
             id,
             name: deck_name.into(),
             description: String::new(),
+        })
+    }
+
+    fn remove_deck(&mut self, id: Id) -> Result<(), StoreError> {
+        if id == DEFAULT_DECK_ID {
+            return Err(invalid("the Default deck cannot be removed"));
+        }
+        let transaction = self.conn.transaction().map_err(backend)?;
+        let decks = deck_list_from(&transaction)?;
+        if !decks.iter().any(|deck| deck.id == id) {
+            return Err(StoreError::NotFound(format!("deck {id}")));
+        }
+        let subtree = deck_subtree_ids(&decks, id);
+        let (card_ids, note_ids) = cards_in_decks(&transaction, &subtree)?;
+        delete_cards(&transaction, &card_ids)?;
+        let deleted_notes = delete_orphan_notes(&transaction, &note_ids)?;
+        reset_original_decks(&transaction, &subtree)?;
+
+        let col = records::read_col(&transaction)?;
+        let stamp = col_stamp(&col)?;
+        let modern = uses_deck_table(&transaction, &col)?;
+        let decks_json = if modern {
+            None
+        } else {
+            Some(decks_json_without(&col.decks, &subtree)?)
+        };
+        write_col_metadata(&transaction, &stamp, decks_json.as_deref())?;
+        if modern {
+            delete_from_deck_table(&transaction, &subtree)?;
+        }
+        let graves = Graves {
+            cards: card_ids,
+            notes: deleted_notes,
+            decks: subtree,
+        };
+        write_graves(&transaction, &stamp, &graves)?;
+        transaction.commit().map_err(backend)
+    }
+
+    fn rename_deck(&mut self, id: Id, name: &str) -> Result<Deck, StoreError> {
+        let new_name = validate_deck_name(name)?;
+        let transaction = self.conn.transaction().map_err(backend)?;
+        let decks = deck_list_from(&transaction)?;
+        let changes = rename_plan(&decks, id, new_name)?;
+        let description = decks
+            .iter()
+            .find(|deck| deck.id == id)
+            .map_or(String::new(), |deck| deck.description.clone());
+        let col = records::read_col(&transaction)?;
+        let stamp = col_stamp(&col)?;
+        let modern = uses_deck_table(&transaction, &col)?;
+        let decks_json = if modern {
+            None
+        } else {
+            Some(renamed_decks_json(&col.decks, &changes, &stamp)?)
+        };
+        write_col_metadata(&transaction, &stamp, decks_json.as_deref())?;
+        if modern {
+            rename_in_deck_table(&transaction, &changes, &stamp)?;
+        }
+        transaction.commit().map_err(backend)?;
+        Ok(Deck {
+            id,
+            name: new_name.into(),
+            description,
         })
     }
 
@@ -616,6 +663,21 @@ struct DeckFilter {
 
 type Counts = (Option<i64>, Option<i64>, Option<i64>, i64);
 
+type DeckRenames = Vec<(Id, String)>;
+type CardsAndNotes = (Vec<Id>, Vec<Id>);
+
+struct ColStamp {
+    usn: i32,
+    now_ms: i64,
+    now_secs: i64,
+}
+
+struct Graves {
+    cards: Vec<Id>,
+    notes: Vec<Id>,
+    decks: Vec<Id>,
+}
+
 fn placeholders(start: i64, count: usize) -> String {
     (0..count)
         .map(|index| {
@@ -625,6 +687,301 @@ fn placeholders(start: i64, count: usize) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn deck_list_from(conn: &Connection) -> Result<Vec<Deck>, StoreError> {
+    let col = records::read_col(conn)?;
+    let decks = records::decks_from_json(&col.decks)?;
+    if decks.is_empty() && records::table_exists(conn, "decks")? {
+        return records::decks_from_tables(conn);
+    }
+    Ok(decks)
+}
+
+fn deck_subtree_ids(decks: &[Deck], deck_id: Id) -> Vec<Id> {
+    let Some(root) = decks.iter().find(|deck| deck.id == deck_id) else {
+        return Vec::new();
+    };
+    let prefix = format!("{}::", root.name);
+    decks
+        .iter()
+        .filter(|deck| deck.id == deck_id || deck.name.starts_with(&prefix))
+        .map(|deck| deck.id)
+        .collect()
+}
+
+fn validate_deck_name(name: &str) -> Result<&str, StoreError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed.split("::").any(|part| part.trim().is_empty())
+    {
+        Err(invalid("invalid deck name"))
+    } else {
+        Ok(trimmed)
+    }
+}
+
+fn uses_deck_table(
+    conn: &Connection,
+    col: &records::ColData,
+) -> Result<bool, StoreError> {
+    if !records::table_exists(conn, "decks")? {
+        return Ok(false);
+    }
+    Ok(records::decks_from_json(&col.decks)?.is_empty())
+}
+
+fn col_stamp(col: &records::ColData) -> Result<ColStamp, StoreError> {
+    let usn = col
+        .usn
+        .checked_add(1)
+        .ok_or_else(|| invalid("usn overflow"))?;
+    Ok(ColStamp {
+        usn,
+        now_ms: anki::now_ms()?,
+        now_secs: anki::now_secs()?,
+    })
+}
+
+fn write_col_metadata(
+    conn: &Connection,
+    stamp: &ColStamp,
+    decks_json: Option<&str>,
+) -> Result<(), StoreError> {
+    if let Some(decks) = decks_json {
+        conn.execute(
+            "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4, decks = ?5 WHERE id = 1",
+            params![stamp.now_ms, stamp.now_ms, stamp.usn, stamp.now_ms, decks],
+        )
+        .map_err(backend)?;
+    } else {
+        conn.execute(
+            "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
+            params![stamp.now_ms, stamp.now_ms, stamp.usn, stamp.now_ms],
+        )
+        .map_err(backend)?;
+    }
+    Ok(())
+}
+
+fn sql_params(ids: &[Id]) -> Vec<SqlValue> {
+    ids.iter().copied().map(SqlValue::Integer).collect()
+}
+
+fn cards_in_decks(
+    conn: &Connection,
+    deck_ids: &[Id],
+) -> Result<CardsAndNotes, StoreError> {
+    if deck_ids.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let list = placeholders(1, deck_ids.len());
+    let mut statement = conn
+        .prepare(&format!("SELECT id, nid FROM cards WHERE did IN ({list})"))
+        .map_err(backend)?;
+    let rows = statement
+        .query_map(params_from_iter(sql_params(deck_ids)), |row| {
+            Ok((row.get::<_, Id>(0)?, row.get::<_, Id>(1)?))
+        })
+        .map_err(backend)?;
+    let mut cards = Vec::new();
+    let mut notes = Vec::new();
+    for row in rows {
+        let (card_id, note_id) = row.map_err(backend)?;
+        cards.push(card_id);
+        if !notes.contains(&note_id) {
+            notes.push(note_id);
+        }
+    }
+    Ok((cards, notes))
+}
+
+fn delete_cards(conn: &Connection, card_ids: &[Id]) -> Result<(), StoreError> {
+    if card_ids.is_empty() {
+        return Ok(());
+    }
+    let list = placeholders(1, card_ids.len());
+    conn.execute(
+        &format!("DELETE FROM revlog WHERE cid IN ({list})"),
+        params_from_iter(sql_params(card_ids)),
+    )
+    .map_err(backend)?;
+    conn.execute(
+        &format!("DELETE FROM cards WHERE id IN ({list})"),
+        params_from_iter(sql_params(card_ids)),
+    )
+    .map_err(backend)?;
+    Ok(())
+}
+
+fn delete_orphan_notes(
+    conn: &Connection,
+    note_ids: &[Id],
+) -> Result<Vec<Id>, StoreError> {
+    let mut deleted = Vec::new();
+    for note_id in note_ids {
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cards WHERE nid = ?1",
+                [*note_id],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        if remaining == 0 {
+            conn.execute("DELETE FROM notes WHERE id = ?1", [*note_id])
+                .map_err(backend)?;
+            deleted.push(*note_id);
+        }
+    }
+    Ok(deleted)
+}
+
+fn reset_original_decks(
+    conn: &Connection,
+    deck_ids: &[Id],
+) -> Result<(), StoreError> {
+    if deck_ids.is_empty() {
+        return Ok(());
+    }
+    let list = placeholders(1, deck_ids.len());
+    conn.execute(
+        &format!("UPDATE cards SET odid = 0 WHERE odid IN ({list})"),
+        params_from_iter(sql_params(deck_ids)),
+    )
+    .map(|_| ())
+    .map_err(backend)
+}
+
+fn delete_from_deck_table(
+    conn: &Connection,
+    deck_ids: &[Id],
+) -> Result<(), StoreError> {
+    if deck_ids.is_empty() {
+        return Ok(());
+    }
+    let list = placeholders(1, deck_ids.len());
+    conn.execute(
+        &format!("DELETE FROM decks WHERE id IN ({list})"),
+        params_from_iter(sql_params(deck_ids)),
+    )
+    .map(|_| ())
+    .map_err(backend)
+}
+
+fn decks_json_without(json: &str, ids: &[Id]) -> Result<String, StoreError> {
+    let mut value: Json = serde_json::from_str(json)
+        .map_err(|error| invalid(error.to_string()))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| invalid("decks is not an object"))?;
+    for id in ids {
+        object.remove(&id.to_string());
+    }
+    serde_json::to_string(&value).map_err(|error| invalid(error.to_string()))
+}
+
+fn renamed_decks_json(
+    json: &str,
+    changes: &DeckRenames,
+    stamp: &ColStamp,
+) -> Result<String, StoreError> {
+    let mut value: Json = serde_json::from_str(json)
+        .map_err(|error| invalid(error.to_string()))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| invalid("decks is not an object"))?;
+    for (deck_id, deck_name) in changes {
+        let key = deck_id.to_string();
+        let entry = object.get_mut(&key).ok_or_else(|| {
+            StoreError::NotFound(format!(
+                "deck {deck_id} missing from col.decks"
+            ))
+        })?;
+        let fields = entry
+            .as_object_mut()
+            .ok_or_else(|| invalid("deck entry is not an object"))?;
+        fields.insert("name".into(), json!(deck_name));
+        fields.insert("usn".into(), json!(stamp.usn));
+        fields.insert("mod".into(), json!(stamp.now_secs));
+    }
+    serde_json::to_string(&value).map_err(|error| invalid(error.to_string()))
+}
+
+fn rename_in_deck_table(
+    conn: &Connection,
+    changes: &DeckRenames,
+    stamp: &ColStamp,
+) -> Result<(), StoreError> {
+    for (deck_id, deck_name) in changes {
+        let updated = conn
+            .execute(
+                "UPDATE decks SET name = ?1, mtime_secs = ?2, usn = ?3, common = ?4 WHERE id = ?5",
+                params![
+                    anki::encode_deck_name(deck_name),
+                    stamp.now_secs,
+                    stamp.usn,
+                    anki::deck_common(stamp.usn, stamp.now_secs),
+                    deck_id,
+                ],
+            )
+            .map_err(backend)?;
+        if updated == 0 {
+            return Err(StoreError::NotFound(format!("deck {deck_id}")));
+        }
+    }
+    Ok(())
+}
+
+fn rename_plan(
+    decks: &[Deck],
+    id: Id,
+    new_name: &str,
+) -> Result<DeckRenames, StoreError> {
+    let root = decks
+        .iter()
+        .find(|deck| deck.id == id)
+        .ok_or_else(|| StoreError::NotFound(format!("deck {id}")))?;
+    let prefix = format!("{}::", root.name);
+    let mut changes = Vec::with_capacity(decks.len());
+    for deck in decks {
+        if deck.id == id {
+            changes.push((deck.id, new_name.to_owned()));
+        } else if let Some(suffix) = deck.name.strip_prefix(&prefix) {
+            changes.push((deck.id, format!("{new_name}::{suffix}")));
+        }
+    }
+    let mut seen: HashSet<&str> = HashSet::with_capacity(decks.len());
+    for deck in decks {
+        let name = changes
+            .iter()
+            .find(|(changed_id, _)| *changed_id == deck.id)
+            .map_or(deck.name.as_str(), |(_, name)| name.as_str());
+        if !seen.insert(name) {
+            return Err(invalid(format!("deck already exists: {name}")));
+        }
+    }
+    Ok(changes)
+}
+
+fn write_graves(
+    conn: &Connection,
+    stamp: &ColStamp,
+    graves: &Graves,
+) -> Result<(), StoreError> {
+    for (kind, ids) in [
+        (0_i64, graves.cards.as_slice()),
+        (1_i64, graves.notes.as_slice()),
+        (2_i64, graves.decks.as_slice()),
+    ] {
+        for id in ids {
+            conn.execute(
+                "INSERT OR REPLACE INTO graves (oid, type, usn) VALUES (?1, ?2, ?3)",
+                params![id, kind, stamp.usn],
+            )
+            .map_err(backend)?;
+        }
+    }
+    Ok(())
 }
 fn update_col(conn: &Connection, bump_scm: bool) -> Result<i32, StoreError> {
     let col = records::read_col(conn)?;

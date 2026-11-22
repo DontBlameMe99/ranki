@@ -201,3 +201,89 @@ fn unknown_config_keys_are_reported_by_full_path() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("ui.them"), "{stderr}");
 }
+
+#[test]
+fn deck_create_rename_and_remove_commands_update_the_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("collection.anki2");
+    let arg = path.to_str().unwrap();
+
+    let created =
+        run(&["--collection", arg, "deck-create", "Study::Languages"]);
+    let fields: Vec<_> = created.trim().split('\t').collect();
+    assert_eq!(fields[0], "created");
+    assert_eq!(fields[2], "Study::Languages");
+    let id: i64 = fields[1].parse().unwrap();
+    assert!(id > 0);
+
+    let renamed = run(&[
+        "--collection",
+        arg,
+        "deck-rename",
+        &id.to_string(),
+        "Learning",
+    ]);
+    assert_eq!(renamed.trim(), format!("renamed\t{id}\tLearning"));
+    assert!(run(&["--collection", arg, "decks"]).contains("Learning"));
+
+    let card_id = run(&[
+        "--collection",
+        arg,
+        "add-note",
+        "--model",
+        "1",
+        "--deck",
+        &id.to_string(),
+        "--field",
+        "deck command",
+        "--field",
+        "answer",
+    ])
+    .trim()
+    .parse::<i64>()
+    .unwrap();
+    assert!(card_id > 0);
+
+    let failure = Command::new(env!("CARGO_BIN_EXE_ranki"))
+        .args(["--collection", arg, "deck-remove", &id.to_string()])
+        .output()
+        .unwrap();
+    assert!(!failure.status.success());
+    assert!(
+        String::from_utf8_lossy(&failure.stderr).contains("--force"),
+        "{}",
+        String::from_utf8_lossy(&failure.stderr)
+    );
+
+    let removed = run(&[
+        "--collection",
+        arg,
+        "deck-remove",
+        &id.to_string(),
+        "--force",
+    ]);
+    assert_eq!(removed.trim(), format!("removed\t{id}\tLearning"));
+    let decks = run(&["--collection", arg, "decks"]);
+    assert!(!decks.contains("Learning"), "{decks}");
+
+    let store = Collection::open(&path).unwrap();
+    assert_eq!(store.find_cards("deck command").unwrap(), [] as [i64; 0]);
+}
+
+#[test]
+fn deck_remove_refuses_to_delete_the_default_deck() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("collection.anki2");
+    let arg = path.to_str().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ranki"))
+        .args(["--collection", arg, "deck-remove", "1", "--force"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Default deck"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(run(&["--collection", arg, "decks"]).contains("Default"));
+}

@@ -291,6 +291,45 @@ pub trait Store {
     /// Returns [`StoreError`] if the name is invalid or the write fails.
     fn create_deck(&mut self, name: &str) -> Result<Deck, StoreError>;
 
+    /// Deletes a deck and every deck below it in the `A::B` hierarchy.
+    ///
+    /// Cards in those decks are deleted with their review logs. Notes are
+    /// deleted when no cards remain, and grave rows are written for every
+    /// deleted card, note, and deck. Media files are left in place because
+    /// Anki's collection schema has no media ownership table and a file can
+    /// be shared by notes outside the deleted subtree. The Default deck
+    /// (id 1) cannot be deleted.
+    ///
+    /// Implementations that cannot delete decks return
+    /// [`StoreError::Unsupported`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the deck is missing, is the Default deck,
+    /// or the write fails.
+    fn remove_deck(&mut self, id: Id) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported(format!(
+            "remove_deck is not supported for deck {id}"
+        )))
+    }
+
+    /// Renames a deck and every subdeck, preserving all ids.
+    ///
+    /// Names use Anki's `A::B` hierarchy. An empty name, an empty name
+    /// segment, or a name that collides with another deck is rejected. The
+    /// collection's `col.decks` JSON is updated in the same write.
+    ///
+    /// Implementations that cannot rename decks return
+    /// [`StoreError::Unsupported`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the deck is missing, the name is invalid,
+    /// or the write fails.
+    fn rename_deck(&mut self, id: Id, name: &str) -> Result<Deck, StoreError> {
+        Err(StoreError::Unsupported(format!(
+            "rename_deck is not supported for deck {id} to {name}"
+        )))
+    }
+
     /// Lists note models with their templates.
     ///
     /// # Errors

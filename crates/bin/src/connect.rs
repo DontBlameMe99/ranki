@@ -198,6 +198,8 @@ fn dispatch(
         "cardsInfo" => cards_info(store, params),
         "answerCards" => answer_cards(store, params, scheduler),
         "createDeck" => create_deck(store, params),
+        "renameDeck" => rename_deck(store, params),
+        "deleteDeck" => delete_deck(store, params),
         "suspend" => {
             let suspend = params
                 .get("suspend")
@@ -455,6 +457,59 @@ fn create_deck(
 ) -> Result<Value, RpcError> {
     let name = param_str(params, "deck")?;
     Ok(json!(store.create_deck(name)?.id))
+}
+
+fn required_string<'a>(
+    params: &'a Value,
+    key: &str,
+) -> Result<&'a str, RpcError> {
+    let value = params.get(key).ok_or_else(|| {
+        InterfaceError::new(
+            ErrorCode::InvalidData,
+            format!("missing parameter: {key}"),
+        )
+    })?;
+    value.as_str().ok_or_else(|| {
+        InterfaceError::new(
+            ErrorCode::InvalidData,
+            format!("invalid parameter: {key}"),
+        )
+        .into()
+    })
+}
+
+fn deck_id_param(store: &Collection, params: &Value) -> Result<Id, RpcError> {
+    if let Some(id) = params.get("id").and_then(Value::as_i64) {
+        return Ok(id);
+    }
+    let name = required_string(params, "deck")?;
+    let deck = store
+        .decks()?
+        .into_iter()
+        .find(|deck| deck.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            ranki_model::StoreError::NotFound(format!("deck not found: {name}"))
+        })?;
+    Ok(deck.id)
+}
+
+fn rename_deck(
+    store: &mut Collection,
+    params: &Value,
+) -> Result<Value, RpcError> {
+    let id = deck_id_param(store, params)?;
+    let new_name = required_string(params, "newName")?;
+    store.rename_deck(id, new_name)?;
+    Ok(Value::Null)
+}
+
+fn delete_deck(
+    store: &mut Collection,
+    params: &Value,
+) -> Result<Value, RpcError> {
+    let id = deck_id_param(store, params)?;
+    store.remove_deck(id)?;
+    Ok(Value::Null)
 }
 
 fn set_suspended(
@@ -792,5 +847,59 @@ mod tests {
             serde_json::to_value(response).unwrap()["errorCode"],
             json!("format")
         );
+    }
+    #[test]
+    fn rename_deck_and_delete_deck_update_the_deck_list() {
+        let (_dir, mut store) = fixture();
+        let id = call(&mut store, "createDeck", json!({"deck": "Old::Child"}))
+            .as_i64()
+            .unwrap();
+        assert_eq!(
+            call(
+                &mut store,
+                "renameDeck",
+                json!({"deck": "Old::Child", "newName": "New::Child"})
+            ),
+            json!(null)
+        );
+        let names = call(&mut store, "deckNames", json!({}));
+        assert!(names.as_array().unwrap().contains(&json!("New::Child")));
+        assert!(!names.as_array().unwrap().contains(&json!("Old::Child")));
+
+        assert_eq!(
+            call(&mut store, "deleteDeck", json!({"deck": "new::child"})),
+            json!(null)
+        );
+        let names = call(&mut store, "deckNames", json!({}));
+        assert!(!names.as_array().unwrap().contains(&json!("New::Child")));
+        assert!(store.decks().unwrap().iter().all(|deck| deck.id != id));
+    }
+
+    #[test]
+    fn deck_actions_report_stable_error_codes() {
+        let (_dir, mut store) = fixture();
+        let cases = [
+            (
+                br#"{"action":"deleteDeck","version":6,"params":{"deck":"Missing"}}"#.as_slice(),
+                Some("not_found"),
+            ),
+            (
+                br#"{"action":"deleteDeck","version":6,"params":{"deck":"Default"}}"#.as_slice(),
+                Some("invalid_data"),
+            ),
+            (
+                br#"{"action":"renameDeck","version":6,"params":{"id":999}}"#.as_slice(),
+                Some("invalid_data"),
+            ),
+            (
+                br#"{"action":"renameDeck","version":6,"params":{"id":999,"newName":"New"}}"#.as_slice(),
+                Some("not_found"),
+            ),
+        ];
+        for (body, expected) in cases {
+            let response = handle_body(&mut store, body, scheduler().as_ref());
+            assert_eq!(response.result, Value::Null);
+            assert_eq!(response.error_code, expected, "{body:?}");
+        }
     }
 }

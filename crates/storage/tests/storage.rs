@@ -598,3 +598,269 @@ fn ids_are_unique_across_storage_core_and_manual_logs() {
     sorted.dedup();
     assert_eq!(sorted.len(), ids.len());
 }
+
+#[test]
+fn rename_deck_renames_subdecks_and_preserves_ids() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let parent = store.create_deck("Study").expect("parent");
+    let child = store.create_deck("Study::Languages").expect("child");
+    let grandchild = store
+        .create_deck("Study::Languages::French")
+        .expect("grandchild");
+    let mut entry = note(&["bonjour", "hello"], &[]);
+    entry.deck_id = grandchild.id;
+    let card_id = store.add_note(&entry).expect("add")[0];
+
+    let renamed = store.rename_deck(parent.id, "Learning").expect("rename");
+    assert_eq!(renamed.id, parent.id);
+    assert_eq!(renamed.name, "Learning");
+
+    let decks = store.decks().expect("decks");
+    let names: Vec<_> = decks.iter().map(|deck| deck.name.as_str()).collect();
+    assert!(names.contains(&"Learning"));
+    assert!(names.contains(&"Learning::Languages"));
+    assert!(names.contains(&"Learning::Languages::French"));
+    assert!(!names.iter().any(|name| name.starts_with("Study")));
+    for expected in [&child, &grandchild] {
+        assert!(decks.iter().any(|deck| deck.id == expected.id));
+    }
+    let card = store.card(card_id).expect("card").expect("exists");
+    assert_eq!(card.deck_id, grandchild.id);
+
+    let conn = read_only(&path);
+    let decks_json: String = conn
+        .query_row("SELECT decks FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("decks json");
+    let parsed: Value = serde_json::from_str(&decks_json).expect("valid JSON");
+    let deck_name = |id: i64| {
+        parsed
+            .get(id.to_string())
+            .and_then(|value| value.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert_eq!(deck_name(parent.id), "Learning");
+    assert_eq!(deck_name(child.id), "Learning::Languages");
+    assert_eq!(deck_name(grandchild.id), "Learning::Languages::French");
+    let index: String = conn
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'ix_cards_sched'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("index");
+    assert_eq!(index, "ix_cards_sched");
+}
+
+#[test]
+fn rename_deck_rejects_empty_and_colliding_names() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let parent = store.create_deck("A").expect("parent");
+    store.create_deck("A::B").expect("child");
+    store.create_deck("B").expect("other");
+    assert!(store.rename_deck(parent.id, "  ").is_err());
+    assert!(store.rename_deck(parent.id, "A::").is_err());
+    assert!(store.rename_deck(parent.id, "B").is_err());
+    assert!(store.rename_deck(999, "Renamed").is_err());
+
+    let source = store.create_deck("Q").expect("source");
+    store.create_deck("Q::Z").expect("source child");
+    store.create_deck("Z::Z").expect("collision");
+    assert!(store.rename_deck(source.id, "Z").is_err());
+    assert!(
+        store
+            .decks()
+            .expect("decks")
+            .iter()
+            .any(|deck| deck.name == "Q")
+    );
+}
+
+#[test]
+fn remove_deck_deletes_subtree_cards_notes_revlog_and_writes_graves() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let parent = store.create_deck("Work").expect("parent");
+    let child = store.create_deck("Work::Notes").expect("child");
+    let mut entry = note(&["question", "answer"], &["tag"]);
+    entry.deck_id = child.id;
+    let card_id = store.add_note(&entry).expect("add")[0];
+    let note_id = store.card(card_id).expect("card").expect("exists").note_id;
+    let log_id = 9_002_i64;
+    let decision = ReviewDecision {
+        card: store.card(card_id).expect("card").expect("exists"),
+        revlog: RevLog {
+            id: log_id,
+            card_id,
+            usn: 0,
+            ease: Rating::Good,
+            interval: 4,
+            last_interval: 0,
+            factor: 2500,
+            time_ms: 500,
+            kind: RevLogKind::Review,
+        },
+    };
+    store.apply_review(&decision).expect("review");
+
+    store.remove_deck(parent.id).expect("remove");
+
+    assert_eq!(store.decks().expect("decks").len(), 1);
+    assert!(store.card(card_id).expect("card").is_none());
+    assert!(store.note(note_id).expect("note").is_none());
+    assert!(store.revlog(log_id).expect("revlog").is_none());
+    let conn = read_only(&path);
+    let mut statement = conn
+        .prepare("SELECT oid, type FROM graves ORDER BY type, oid")
+        .expect("prepare");
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+        .expect("query");
+    let graves: Vec<_> = rows.map(|row| row.expect("row")).collect();
+    assert!(graves.contains(&(card_id, 0)), "{graves:?}");
+    assert!(graves.contains(&(note_id, 1)), "{graves:?}");
+    assert!(graves.contains(&(parent.id, 2)), "{graves:?}");
+    assert!(graves.contains(&(child.id, 2)), "{graves:?}");
+    let decks_json: String = conn
+        .query_row("SELECT decks FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("decks json");
+    let parsed: Value = serde_json::from_str(&decks_json).expect("JSON");
+    assert!(parsed.get(parent.id.to_string()).is_none());
+    assert!(parsed.get(child.id.to_string()).is_none());
+    assert!(parsed.get("1").is_some());
+}
+
+#[test]
+fn remove_deck_protects_default_and_rejects_unknown_decks() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    assert!(matches!(
+        store.remove_deck(1),
+        Err(StoreError::InvalidData(_))
+    ));
+    assert!(matches!(
+        store.remove_deck(999),
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(
+        store
+            .decks()
+            .expect("decks")
+            .iter()
+            .any(|deck| deck.id == 1)
+    );
+}
+
+#[test]
+fn remove_deck_keeps_notes_that_still_have_cards() {
+    let (_directory, path) = fixture();
+    {
+        let conn = Connection::open(&path).expect("open");
+        let models: String = conn
+            .query_row("SELECT models FROM col WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("models");
+        let mut model_json: Value =
+            serde_json::from_str(&models).expect("parse");
+        let template = model_json["1"]["tmpls"][0].clone();
+        model_json["1"]["tmpls"]
+            .as_array_mut()
+            .expect("templates")
+            .push(template);
+        conn.execute(
+            "UPDATE col SET models = ?1 WHERE id = 1",
+            [serde_json::to_string(&model_json).expect("serialize")],
+        )
+        .expect("update");
+    }
+    let mut store = Collection::open(&path).expect("open");
+    let source = store.create_deck("Source").expect("source");
+    let other = store.create_deck("Other").expect("other");
+    let mut entry = note(&["front", "back"], &[]);
+    entry.deck_id = source.id;
+    let cards = store.add_note(&entry).expect("add");
+    assert_eq!(cards.len(), 2);
+    let note_id = store.card(cards[0]).expect("card").expect("exists").note_id;
+
+    let mut moved = store.card(cards[1]).expect("card").expect("exists");
+    moved.deck_id = other.id;
+    let decision = ReviewDecision {
+        card: moved,
+        revlog: RevLog {
+            id: 9_003_i64,
+            card_id: cards[1],
+            usn: 0,
+            ease: Rating::Good,
+            interval: 0,
+            last_interval: 0,
+            factor: 2500,
+            time_ms: 0,
+            kind: RevLogKind::Manual,
+        },
+    };
+    store.apply_review(&decision).expect("move");
+    store.remove_deck(source.id).expect("remove");
+
+    assert!(store.card(cards[0]).expect("card").is_none());
+    assert_eq!(
+        store.card(cards[1]).expect("card").expect("exists").deck_id,
+        other.id
+    );
+    assert!(store.note(note_id).expect("note").is_some());
+}
+
+#[test]
+fn rename_and_remove_work_with_modern_deck_tables() {
+    let (_directory, path) = fixture();
+    {
+        let conn = Connection::open(&path).expect("open");
+        conn.execute_batch(
+            "UPDATE col SET decks = '{}' WHERE id = 1;
+             CREATE TABLE decks (
+                 id integer primary key,
+                 name text not null,
+                 mtime_secs integer not null,
+                 usn integer not null,
+                 common blob not null,
+                 kind integer not null
+             );
+             INSERT INTO decks VALUES (10, 'Modern', 0, 0, x'', 0);
+             INSERT INTO decks VALUES (11, 'Modern\u{001f}Child', 0, 0, x'', 0);",
+        )
+        .expect("modern schema");
+    }
+    let mut store = Collection::open(&path).expect("open");
+    let parent = store
+        .decks()
+        .expect("decks")
+        .into_iter()
+        .find(|deck| deck.name == "Modern")
+        .expect("parent");
+    let renamed = store.rename_deck(parent.id, "Current").expect("rename");
+    assert_eq!(renamed.name, "Current");
+    let names: Vec<_> = store
+        .decks()
+        .expect("decks")
+        .into_iter()
+        .map(|deck| deck.name)
+        .collect();
+    assert!(names.contains(&"Current::Child".to_owned()));
+
+    let conn = read_only(&path);
+    let raw: String = conn
+        .query_row("SELECT name FROM decks WHERE id = 11", [], |row| row.get(0))
+        .expect("encoded name");
+    assert_eq!(raw, "Current\u{001f}Child");
+    drop(conn);
+
+    store.remove_deck(parent.id).expect("remove");
+    let conn = read_only(&path);
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM decks", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(count, 0);
+}

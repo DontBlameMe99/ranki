@@ -123,6 +123,16 @@ fn validate_query(query: &str) -> Result<(), ErrorData> {
     Ok(())
 }
 
+fn validate_deck_name(name: &str) -> Result<&str, ErrorData> {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed.split("::").any(|part| part.trim().is_empty())
+    {
+        return Err(invalid("invalid deck name"));
+    }
+    Ok(trimmed)
+}
+
 fn validate_path(raw: &str) -> Result<PathBuf, ErrorData> {
     let path = Path::new(raw);
     if raw.is_empty() || !path.is_relative() {
@@ -151,6 +161,33 @@ fn validate_path(raw: &str) -> Result<PathBuf, ErrorData> {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ListDecksInput {}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CreateDeckInput {
+    #[schemars(length(min = 1))]
+    name: String,
+    #[schemars(extend("const" = true))]
+    confirm: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RenameDeckInput {
+    id: Id,
+    #[schemars(length(min = 1))]
+    name: String,
+    #[schemars(extend("const" = true))]
+    confirm: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RemoveDeckInput {
+    id: Id,
+    #[schemars(extend("const" = true))]
+    confirm: bool,
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -399,6 +436,13 @@ struct ExportResult {
     path: String,
     bytes: u64,
 }
+fn deck_view(deck: &ranki_model::Deck) -> DeckView {
+    DeckView {
+        id: deck.id,
+        name: deck.name.clone(),
+        description: deck.description.clone(),
+    }
+}
 
 fn card_view(card: &ranki_model::Card) -> CardView {
     let (card_type, initial_queue) = match (card.card_type, card.queue) {
@@ -569,15 +613,78 @@ impl RankiMcp {
     ) -> ToolOutcome<DeckList> {
         let decks = self.store()?.decks()?;
         Ok(Json(DeckList {
-            decks: decks
-                .into_iter()
-                .map(|deck| DeckView {
-                    id: deck.id,
-                    name: deck.name,
-                    description: deck.description,
-                })
-                .collect(),
+            decks: decks.iter().map(deck_view).collect(),
         }))
+    }
+
+    #[tool(
+        description = "Create a deck in the active collection",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    fn create_deck(
+        &self,
+        Parameters(input): Parameters<CreateDeckInput>,
+    ) -> ToolOutcome<DeckView> {
+        if !input.confirm {
+            return Err(confirm_failure());
+        }
+        let name = validate_deck_name(&input.name)?;
+        let deck = self.store()?.create_deck(name)?;
+        Ok(Json(deck_view(&deck)))
+    }
+
+    #[tool(
+        description = "Rename a deck and its subdecks",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    fn rename_deck(
+        &self,
+        Parameters(input): Parameters<RenameDeckInput>,
+    ) -> ToolOutcome<DeckView> {
+        if !input.confirm {
+            return Err(confirm_failure());
+        }
+        let name = validate_deck_name(&input.name)?;
+        let deck = self.store()?.rename_deck(input.id, name)?;
+        Ok(Json(deck_view(&deck)))
+    }
+
+    #[tool(
+        description = "Remove a deck, its subdecks, and their cards",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        )
+    )]
+    fn remove_deck(
+        &self,
+        Parameters(input): Parameters<RemoveDeckInput>,
+    ) -> ToolOutcome<DeckView> {
+        if !input.confirm {
+            return Err(confirm_failure());
+        }
+        let mut store = self.store()?;
+        let deck = store
+            .decks()?
+            .into_iter()
+            .find(|deck| deck.id == input.id)
+            .ok_or_else(|| {
+                ToolError::from(ranki_model::StoreError::NotFound(format!(
+                    "deck {}",
+                    input.id
+                )))
+            })?;
+        store.remove_deck(input.id)?;
+        Ok(Json(deck_view(&deck)))
     }
 
     #[tool(
@@ -870,15 +977,24 @@ mod tests {
 
     use super::AddNoteInput;
     use super::AnswerCardInput;
+    use super::CreateDeckInput;
     use super::DueCardsInput;
     use super::FindCardsInput;
     use super::ListDecksInput;
     use super::PackageInput;
+    use super::RankiMcp;
+    use super::RemoveDeckInput;
+    use super::RenameDeckInput;
     use super::ToolError;
+    use super::ToolOutcome;
+    use super::validate_deck_name;
     use super::validate_limit;
     use super::validate_path;
     use super::validate_query;
     use crate::error::ErrorCode;
+    use ranki_storage::Collection;
+    use rmcp::handler::server::wrapper::Parameters;
+    use tempfile::TempDir;
 
     #[test]
     fn tool_errors_keep_the_source_error_code() {
@@ -898,6 +1014,9 @@ mod tests {
             schema_for!(DueCardsInput),
             schema_for!(FindCardsInput),
             schema_for!(AddNoteInput),
+            schema_for!(CreateDeckInput),
+            schema_for!(RenameDeckInput),
+            schema_for!(RemoveDeckInput),
             schema_for!(AnswerCardInput),
             schema_for!(PackageInput),
         ] {
@@ -911,6 +1030,9 @@ mod tests {
     fn write_tools_require_const_true() {
         for schema in [
             schema_for!(AddNoteInput),
+            schema_for!(CreateDeckInput),
+            schema_for!(RenameDeckInput),
+            schema_for!(RemoveDeckInput),
             schema_for!(AnswerCardInput),
             schema_for!(PackageInput),
         ] {
@@ -990,5 +1112,71 @@ mod tests {
         assert!(validate_path("/tmp/other.apkg").is_err());
         assert!(validate_path("").is_err());
         assert!(validate_path(".").is_err());
+    }
+    fn mcp_server() -> (TempDir, RankiMcp) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("collection.anki2");
+        let collection = Collection::create(&path).unwrap();
+        let scheduler =
+            ranki_core::from_settings(&ranki_model::Settings::default());
+        let server = RankiMcp::new(
+            collection,
+            directory.path().to_path_buf(),
+            scheduler,
+        );
+        (directory, server)
+    }
+
+    fn ok<T>(result: ToolOutcome<T>) -> T {
+        result
+            .map(|value| value.0)
+            .ok()
+            .unwrap_or_else(|| panic!("deck tool failed"))
+    }
+
+    #[test]
+    fn deck_name_validation_rejects_blank_and_broken_hierarchies() {
+        assert_eq!(validate_deck_name(" A::B ").unwrap(), "A::B");
+        assert!(validate_deck_name("").is_err());
+        assert!(validate_deck_name("A::").is_err());
+        assert!(validate_deck_name("::B").is_err());
+    }
+
+    #[test]
+    fn deck_tools_create_rename_and_remove() {
+        let (_directory, server) = mcp_server();
+        let created = ok(server.create_deck(Parameters(CreateDeckInput {
+            name: "Study::Languages".into(),
+            confirm: true,
+        })));
+        assert_eq!(created.name, "Study::Languages");
+
+        let renamed = ok(server.rename_deck(Parameters(RenameDeckInput {
+            id: created.id,
+            name: "Learning".into(),
+            confirm: true,
+        })));
+        assert_eq!(renamed.id, created.id);
+        assert_eq!(renamed.name, "Learning");
+
+        let rejected = server
+            .remove_deck(Parameters(RemoveDeckInput {
+                id: created.id,
+                confirm: false,
+            }))
+            .err()
+            .unwrap_or_else(|| panic!("unconfirmed removal must fail"));
+        let ToolError::Call(error) = rejected else {
+            panic!("unconfirmed removal must be a tool error");
+        };
+        assert_eq!(error.code(), ErrorCode::Message);
+
+        let removed = ok(server.remove_deck(Parameters(RemoveDeckInput {
+            id: created.id,
+            confirm: true,
+        })));
+        assert_eq!(removed.id, created.id);
+        let decks = ok(server.list_decks(Parameters(ListDecksInput {}))).decks;
+        assert!(!decks.iter().any(|deck| deck.id == created.id));
     }
 }
