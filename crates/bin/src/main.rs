@@ -4,9 +4,14 @@ mod config;
 mod connect;
 mod error;
 mod mcp;
+mod optimize;
+mod sync;
 
 use clap::Parser;
 use clap::Subcommand;
+use ranki_core::FsrsParams;
+use ranki_core::FsrsPreset;
+use ranki_core::FsrsScheduler;
 use ranki_core::Scheduler;
 use ranki_format::export_apkg;
 use ranki_format::export_colpkg;
@@ -21,6 +26,7 @@ use ranki_model::ReviewDecision;
 use ranki_model::Store;
 use ranki_model::parse_image_occlusion_field;
 use ranki_storage::Collection;
+use ranki_sync::SyncTransport;
 use std::env;
 use std::ffi::OsStr;
 use std::fmt;
@@ -31,6 +37,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
@@ -93,11 +100,27 @@ impl Display for ModelRef {
 }
 #[derive(Debug, Parser)]
 #[command(name = "ranki", version, about = "An Anki-compatible flashcard app")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mutually exclusive sync flags map directly onto CLI switches"
+)]
 struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     collection: Option<PathBuf>,
     #[arg(long, global = true, value_name = "PATH")]
     media_dir: Option<PathBuf>,
+    #[arg(long, global = true, conflicts_with = "no_sync")]
+    sync: bool,
+    #[arg(long, global = true, conflicts_with = "sync")]
+    no_sync: bool,
+    #[arg(long, global = true, conflicts_with = "no_sync_auto")]
+    sync_auto: bool,
+    #[arg(long, global = true, conflicts_with = "sync_auto")]
+    no_sync_auto: bool,
+    #[arg(long, global = true, value_name = "USER")]
+    sync_username: Option<String>,
+    #[arg(long, global = true, value_name = "PATH")]
+    sync_hkey_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -186,6 +209,18 @@ enum Command {
         #[arg(long, default_value_t = 8765)]
         port: u16,
     },
+    /// Sync with `AnkiWeb` or show remote status.
+    Sync {
+        /// Show remote metadata without changing either collection.
+        #[arg(long, conflicts_with_all = ["full_upload", "full_download"])]
+        status: bool,
+        /// Replace the remote collection with the local one.
+        #[arg(long, conflicts_with_all = ["status", "full_download"])]
+        full_upload: bool,
+        /// Replace the local collection with the remote one.
+        #[arg(long, conflicts_with_all = ["status", "full_upload"])]
+        full_download: bool,
+    },
     /// Serve the Model Context Protocol over stdio.
     Mcp,
 }
@@ -215,7 +250,21 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> CliResult<()> {
-    let config = config::load();
+    let mut config = config::load();
+    let mut transport = sync::http_transport(&config);
+    run_with_sync(cli, &mut config, &mut transport)
+}
+
+/// CLI entry point with an injectable sync transport. Tests never reach HTTP.
+#[expect(
+    clippy::too_many_lines,
+    reason = "CLI dispatch maps each subcommand once"
+)]
+fn run_with_sync(
+    cli: Cli,
+    config: &mut config::Config,
+    transport: &mut dyn SyncTransport,
+) -> CliResult<()> {
     let mut cli = cli;
     if cli.collection.is_none() {
         cli.collection = env::var_os("RANKI_COLLECTION").map(PathBuf::from);
@@ -227,21 +276,51 @@ fn run(cli: Cli) -> CliResult<()> {
     } else {
         Some(default_collection_path(env::var_os("HOME").as_deref())?)
     };
-    let settings = config::resolve_settings(&cli, &config, fallback);
-    let scheduler = ranki_core::from_settings(&settings);
+    let settings = config::resolve_settings(&cli, config, fallback);
+    let manual_sync = matches!(cli.command, Some(Command::Sync { .. }));
+    let auth = if manual_sync || settings.sync.enabled && settings.sync.auto {
+        sync::load_auth(&settings, &sync::read_env())
+    } else {
+        None
+    };
+    let auto_sync = settings.sync.enabled
+        && settings.sync.auto
+        && (auth.is_some() || sync::has_stored_key(&settings))
+        && !manual_sync;
 
-    if matches!(cli.command, Some(Command::Mcp)) {
-        return mcp::serve(Some(&settings.collection), scheduler);
+    if auto_sync {
+        match sync::sync_once(
+            sync::TransportRef(transport),
+            &settings,
+            auth.as_ref(),
+        ) {
+            Ok(outcome) => {
+                sync::warn_outcome(&outcome);
+                maybe_optimize(config, &settings);
+            }
+            Err(error) => eprintln!("ranki: sync: {error}"),
+        }
     }
 
+    if matches!(cli.command, Some(Command::Mcp)) {
+        return mcp::serve(
+            Some(&settings.collection),
+            scheduler_for(&settings),
+        );
+    }
+    let scheduler = scheduler_for(&settings);
     let collection_path = settings.collection.as_path();
     let media_dir = settings.media_dir.as_path();
     let command = cli.command.unwrap_or(Command::Gui);
-    match command {
+    let result = match command {
         Command::Mcp => Ok(()),
         Command::Gui => open_gui(&settings),
         Command::Import { package } => {
-            import_package(collection_path, media_dir, &package)
+            let result = import_package(collection_path, media_dir, &package);
+            if result.is_ok() {
+                maybe_optimize(config, &settings);
+            }
+            result
         }
         Command::Export { package } => {
             export_package(collection_path, media_dir, &package)
@@ -252,6 +331,33 @@ fn run(cli: Cli) -> CliResult<()> {
         Command::Check => check(collection_path),
         Command::Connect { port } => {
             connect::serve(collection_path, port, scheduler.as_ref())
+        }
+        Command::Sync {
+            status,
+            full_upload,
+            full_download,
+        } => {
+            let mode = if status {
+                sync::SyncMode::Status
+            } else if full_upload {
+                sync::SyncMode::FullUpload
+            } else if full_download {
+                sync::SyncMode::FullDownload
+            } else {
+                sync::SyncMode::Safe
+            };
+            let result = sync::manual_sync(
+                sync::TransportRef(transport),
+                &settings,
+                auth.as_ref(),
+                mode,
+            );
+            if result.is_ok() && mode != sync::SyncMode::Status {
+                maybe_optimize(config, &settings);
+            }
+            result
+                .map(|text| println!("{text}"))
+                .map_err(|error| CliError::Message(format!("sync: {error}")))
         }
         Command::Decks
         | Command::DeckCreate { .. }
@@ -272,6 +378,71 @@ fn run(cli: Cli) -> CliResult<()> {
                 media_dir,
             )
         }
+    };
+    if auto_sync {
+        match sync::sync_once(
+            sync::TransportRef(transport),
+            &settings,
+            auth.as_ref(),
+        ) {
+            Ok(outcome) => sync::warn_outcome(&outcome),
+            Err(error) => eprintln!("ranki: sync: {error}"),
+        }
+    }
+    result
+}
+
+fn scheduler_for(settings: &config::Settings) -> Arc<dyn Scheduler> {
+    if settings.scheduler != ranki_model::SchedulerKind::Fsrs {
+        return ranki_core::from_settings(settings);
+    }
+    let params = fsrs_params(settings);
+    Arc::new(
+        FsrsScheduler::new(FsrsPreset {
+            desired_retention: settings.desired_retention,
+            ..FsrsPreset::default()
+        })
+        .with_params(params),
+    )
+}
+
+fn fsrs_params(settings: &config::Settings) -> FsrsParams {
+    if settings.fsrs_params.is_empty() {
+        return FsrsParams::default();
+    }
+    let mut values = settings.fsrs_params.clone();
+    apply_decay(&mut values, settings.fsrs_decay);
+    FsrsParams::from_slice(&values).unwrap_or_default()
+}
+fn apply_decay(values: &mut Vec<f32>, decay: f32) {
+    match values.len() {
+        19 => values.push(decay),
+        21 => {
+            if let Some(slot) = values.get_mut(20) {
+                *slot = decay;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn maybe_optimize(config: &mut config::Config, settings: &config::Settings) {
+    let Ok(now) = now_secs() else {
+        return;
+    };
+    if !settings.collection.exists() {
+        return;
+    }
+    let Ok(collection) = Collection::open(&settings.collection) else {
+        eprintln!("ranki: auto-optimize: cannot open the collection");
+        return;
+    };
+    let before = config.clone();
+    optimize::maybe_auto_optimize(&collection, config, now);
+    if *config != before
+        && let Err(error) = config::save(config)
+    {
+        eprintln!("ranki: config: cannot save: {error}");
     }
 }
 
@@ -395,22 +566,14 @@ fn run_store_command(
         | Command::ExportColpkg { .. }
         | Command::Check
         | Command::Connect { .. }
+        | Command::Sync { .. }
         | Command::Mcp => Ok(()),
     }
 }
 
 fn open_gui(settings: &config::Settings) -> CliResult<()> {
     let collection = open_or_create(&settings.collection)?;
-    let options = ranki_ui::Options {
-        collection: settings.collection.clone(),
-        media_dir: settings.media_dir.clone(),
-        theme: settings.theme,
-        font_size: settings.font_size,
-        review_batch_size: settings.review_batch_size,
-        show_keyboard_hints: settings.show_keyboard_hints,
-        scheduler: settings.scheduler,
-        desired_retention: settings.desired_retention,
-    };
+    let options = settings.clone();
     ranki_ui::run(Box::new(collection), options);
     Ok(())
 }
@@ -499,6 +662,7 @@ fn run_deck_command(
         | Command::ExportColpkg { .. }
         | Command::Check
         | Command::Connect { .. }
+        | Command::Sync { .. }
         | Command::Mcp => {}
     }
     Ok(())
@@ -694,15 +858,24 @@ fn check(path: &Path) -> CliResult<()> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
 
     use clap::Parser;
+    use ranki_sync::MockResponse;
+    use ranki_sync::MockTransport;
+    use ranki_sync::SyncMethod;
 
     use super::Cli;
     use super::Command;
     use super::default_collection_path;
+    use super::fsrs_params;
     use super::media_dir_for;
     use super::parse_rating;
+    use super::run_with_sync;
     use ranki_model::Rating;
 
     fn parse(args: &[&str]) -> Cli {
@@ -894,5 +1067,84 @@ mod tests {
             Path::new("/home/user/.local/share/Anki2/main/collection.media")
         );
         assert!(default_collection_path(None).is_err());
+    }
+
+    #[test]
+    fn sync_command_parses_escape_hatches() {
+        assert!(matches!(
+            parse(&["ranki", "sync"]).command,
+            Some(Command::Sync {
+                status: false,
+                full_upload: false,
+                full_download: false,
+            })
+        ));
+        assert!(matches!(
+            parse(&["ranki", "sync", "--status"]).command,
+            Some(Command::Sync { status: true, .. })
+        ));
+        assert!(matches!(
+            parse(&["ranki", "sync", "--full-upload"]).command,
+            Some(Command::Sync {
+                full_upload: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse(&["ranki", "sync", "--full-download"]).command,
+            Some(Command::Sync {
+                full_download: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_sync_command_uses_the_injected_transport() {
+        let directory = tempfile::tempdir().unwrap();
+        let key_file = directory.path().join("hkey");
+        fs::write(&key_file, "test-hkey").unwrap();
+        fs::set_permissions(&key_file, fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let mut config = ranki_model::Config::default();
+        config.sync.hkey_file = Some(key_file.to_string_lossy().into_owned());
+        let collection = directory.path().join("collection.anki2");
+        let cli = parse(&[
+            "ranki",
+            "--collection",
+            collection.to_str().unwrap(),
+            "sync",
+            "--status",
+        ]);
+        let now = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        )
+        .unwrap_or(0);
+        let mut transport = MockTransport::new().with_response(
+            SyncMethod::Meta,
+            MockResponse::ok_json(&serde_json::json!({
+                "mod": 1, "scm": 1, "usn": 1, "ts": now, "empty": true,
+            }))
+            .unwrap(),
+        );
+        run_with_sync(cli, &mut config, &mut transport).unwrap();
+        assert_eq!(transport.request_count(), 1);
+        assert_eq!(transport.requests()[0].method, SyncMethod::Meta);
+    }
+
+    #[test]
+    fn scheduler_uses_configured_fsrs_params_and_decay() {
+        let mut settings = ranki_model::Settings::default();
+        let params = fsrs_params(&settings);
+        assert_eq!(params.decay(), 0.1542);
+
+        settings.fsrs_params = vec![0.2; 21];
+        settings.fsrs_decay = 0.35;
+        let params = fsrs_params(&settings);
+        assert_eq!(params.decay(), 0.35);
+        assert_eq!(params.weights().get(20).copied(), Some(0.35));
     }
 }

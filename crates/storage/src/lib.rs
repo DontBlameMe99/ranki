@@ -685,6 +685,19 @@ impl Store for Collection {
             total_cards: usize::try_from(counts.3).unwrap_or_default(),
         })
     }
+    fn review_history(&self) -> Result<Vec<RevLog>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT id, cid, usn, ease, ivl, lastIvl, factor, time, type \
+                 FROM revlog ORDER BY cid, id",
+            )
+            .map_err(backend)?;
+        let rows = statement
+            .query_map([], records::revlog_from_row)
+            .map_err(backend)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(backend)
+    }
 
     fn collection_created(&self) -> Result<i64, StoreError> {
         Self::collection_created(self)
@@ -1092,4 +1105,54 @@ fn set_next_position(
         .execute("UPDATE col SET conf = ?1 WHERE id = 1", [config_json])
         .map(|_| ())
         .map_err(backend)
+}
+
+#[cfg(test)]
+mod tests {
+    use ranki_model::NewNote;
+    use ranki_model::Rating;
+    use ranki_model::RevLog;
+    use ranki_model::RevLogKind;
+    use ranki_model::ReviewDecision;
+    use ranki_model::Store;
+
+    use super::Collection;
+
+    #[test]
+    fn review_history_returns_logs_in_card_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("collection.anki2");
+        let mut collection = Collection::create(&path).unwrap();
+        let ids = collection
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![String::from("front"), String::from("back")],
+                tags: Vec::new(),
+            })
+            .unwrap();
+        let card = collection.card(ids[0]).unwrap().unwrap();
+        let log = RevLog {
+            id: 1_700_000_000_000,
+            card_id: card.id,
+            usn: 0,
+            ease: Rating::Good,
+            interval: 1,
+            last_interval: 0,
+            factor: 2_500,
+            time_ms: 100,
+            kind: RevLogKind::Review,
+        };
+        collection
+            .apply_review(&ReviewDecision {
+                card,
+                revlog: log.clone(),
+            })
+            .unwrap();
+        let history = collection.review_history().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, log.id);
+        assert_eq!(history[0].card_id, log.card_id);
+        assert_eq!(history[0].kind, RevLogKind::Review);
+    }
 }

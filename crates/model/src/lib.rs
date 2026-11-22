@@ -13,7 +13,7 @@ pub use cloze::cloze_markers;
 pub use cloze::cloze_ordinals;
 pub use config::{
     Config, GeneralConfig, SchedulerConfig, SchedulerKind, Settings,
-    ThemeChoice, UiConfig, media_dir_for,
+    SyncConfig, SyncSettings, ThemeChoice, UiConfig, media_dir_for,
 };
 pub use id::next_id;
 pub use image_occlusion::parse_image_occlusion_field;
@@ -509,6 +509,18 @@ pub trait Store {
         decision: &ReviewDecision,
     ) -> Result<(), StoreError>;
 
+    /// Returns every review log, ordered by card and then by log id.
+    ///
+    /// Implementations without a review history return
+    /// [`StoreError::Unsupported`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
+    fn review_history(&self) -> Result<Vec<RevLog>, StoreError> {
+        Err(StoreError::Unsupported(
+            "review_history is not supported by this store".to_owned(),
+        ))
+    }
     /// Returns card counts for a deck.
     ///
     /// # Errors

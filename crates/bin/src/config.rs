@@ -1,14 +1,14 @@
 //! Loads the shared config schema from disk.
 
+use ranki_model::config::parse;
+pub use ranki_model::{Config, Settings};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
+use std::io;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
-
-use ranki_model::config::parse;
-pub use ranki_model::{Config, Settings};
 
 use crate::Cli;
 
@@ -19,6 +19,24 @@ pub fn load() -> Config {
         env::var_os("HOME").as_deref(),
     );
     path.map_or_else(Config::default, |config_file| read_config(&config_file))
+}
+
+/// Writes the shared config back after optimizer updates.
+///
+/// # Errors
+/// Returns an error when the config directory or file cannot be written.
+pub fn save(config: &Config) -> io::Result<()> {
+    let Some(path) = config_path(
+        env::var_os("XDG_CONFIG_HOME").as_deref(),
+        env::var_os("HOME").as_deref(),
+    ) else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let text = toml::to_string(config).map_err(io::Error::other)?;
+    fs::write(path, text)
 }
 
 pub fn config_path(
@@ -52,12 +70,31 @@ pub fn resolve_settings(
     config: &Config,
     fallback_collection: Option<PathBuf>,
 ) -> Settings {
-    Settings::resolve(
+    let mut settings = Settings::resolve(
         cli.collection.clone(),
         cli.media_dir.clone(),
         fallback_collection,
         config,
-    )
+    );
+    if cli.sync {
+        settings.sync.enabled = true;
+    }
+    if cli.no_sync {
+        settings.sync.enabled = false;
+    }
+    if cli.sync_auto {
+        settings.sync.auto = true;
+    }
+    if cli.no_sync_auto {
+        settings.sync.auto = false;
+    }
+    if let Some(username) = cli.sync_username.clone() {
+        settings.sync.username = Some(username);
+    }
+    if let Some(path) = cli.sync_hkey_file.clone() {
+        settings.sync.hkey_file = Some(path);
+    }
+    settings
 }
 
 #[cfg(test)]
@@ -115,5 +152,40 @@ mod tests {
         );
         assert_eq!(settings.collection, Path::new("/tmp/default.anki2"));
         assert_eq!(settings.media_dir, Path::new("/tmp/collection.media"));
+    }
+    #[test]
+    fn sync_cli_flags_override_config() {
+        let mut config = Config::default();
+        config.sync.enabled = true;
+        config.sync.auto = true;
+        config.sync.username = Some(String::from("config-user"));
+        let settings = resolve_settings(
+            &cli(&[
+                "ranki",
+                "--no-sync",
+                "--sync-username",
+                "cli-user",
+                "--sync-hkey-file",
+                "/keys/ranki",
+                "decks",
+            ]),
+            &config,
+            None,
+        );
+        assert!(!settings.sync.enabled);
+        assert!(settings.sync.auto);
+        assert_eq!(settings.sync.username.as_deref(), Some("cli-user"));
+        assert_eq!(
+            settings.sync.hkey_file.as_deref(),
+            Some(Path::new("/keys/ranki"))
+        );
+
+        let settings = resolve_settings(
+            &cli(&["ranki", "--sync", "--no-sync-auto", "decks"]),
+            &config,
+            None,
+        );
+        assert!(settings.sync.enabled);
+        assert!(!settings.sync.auto);
     }
 }
