@@ -52,6 +52,8 @@
         guiLibs = pkgs.lib.makeLibraryPath [
           pkgs.wayland
           pkgs.libxkbcommon
+          pkgs.vulkan-loader
+          pkgs.fontconfig
           pkgs.libglvnd
         ];
 
@@ -59,15 +61,26 @@
           inherit src;
           strictDeps = true;
           pname = binName;
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.libxkbcommon.dev
+            pkgs.vulkan-loader
+            pkgs.fontconfig
+          ];
         };
 
-        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        cargoArtifacts = craneLib.buildDepsOnly (
+          (builtins.removeAttrs commonArgs ["src"])
+          // {
+            dummySrc = src;
+          }
+        );
 
         package = craneLib.buildPackage (
           commonArgs
           // {
             inherit cargoArtifacts;
-            nativeBuildInputs = [pkgs.makeWrapper];
+            nativeBuildInputs = commonArgs.nativeBuildInputs ++ [pkgs.makeWrapper];
             postFixup = ''
               install -Dm644 ${./assets/rai.svg} \
                 $out/share/icons/hicolor/scalable/apps/ranki.svg
@@ -186,6 +199,9 @@
             [
               rustToolchain
               pkg-config
+              libxkbcommon.dev
+              vulkan-loader
+              fontconfig
               cargo-nextest
               cargo-watch
               cargo-audit

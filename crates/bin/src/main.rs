@@ -411,8 +411,8 @@ fn open_gui(settings: &config::Settings) -> CliResult<()> {
         scheduler: settings.scheduler,
         desired_retention: settings.desired_retention,
     };
-    ranki_ui::run(Box::new(collection), options)
-        .map_err(|error| CliError::Message(error.to_string()))
+    ranki_ui::run(Box::new(collection), options);
+    Ok(())
 }
 
 fn import_package(

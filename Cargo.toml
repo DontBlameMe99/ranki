@@ -20,8 +20,7 @@ ranki-ui = { path = "crates/ui" }
 
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-eframe = { version = "0.37", default-features = false, features = ["glow", "wayland", "default_fonts"] }
-egui = "0.37"
+gpui = { version = "=0.2.2", default-features = false, features = ["wayland"] }
 rusqlite = { version = "0.43", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -32,6 +31,12 @@ tiny_http = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
+
+# zed-async-tar 0.5 still requires xattr 0.2, which refers to libc::ENOATTR.
+# Current libc only exposes ENODATA on Linux. Upstream fixed this in xattr 1.7,
+# but that release is semver-incompatible with zed-async-tar.
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
 
 [workspace.lints.rust]
 unsafe_code      = "deny"

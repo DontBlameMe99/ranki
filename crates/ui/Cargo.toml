@@ -8,9 +8,7 @@ license.workspace = true
 [dependencies]
 ranki-model.workspace = true
 ranki-core.workspace = true
-eframe.workspace = true
-egui.workspace = true
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+gpui.workspace = true
 
 [lints]
 workspace = true
