@@ -31,6 +31,56 @@ nix build .#default      # packaged binary in ./result/bin/ranki
 ./result/bin/ranki --help
 ```
 
+## Home Manager
+
+Add Ranki and Home Manager as flake inputs, both following the same nixpkgs:
+
+```nix
+{
+  inputs.ranki.url = "git+https://codeberg.org/DontBlameMe/ranki";
+  inputs.ranki.inputs.nixpkgs.follows = "nixpkgs";
+  inputs.home-manager.url = "github:nix-community/home-manager";
+  inputs.home-manager.inputs.nixpkgs.follows = "nixpkgs";
+}
+```
+
+Import the module and enable it:
+
+```nix
+{ inputs, ... }:
+{
+  imports = [ inputs.ranki.homeManagerModules.default ];
+
+  programs.ranki = {
+    enable = true;
+    settings.ui.theme = "dark";
+  };
+}
+```
+
+```bash
+home-manager switch --flake .#user@host
+```
+
+The module writes `~/.config/ranki/config.toml` when `collection`, `mediaDir`, or
+`settings` is set, and leaves an existing file alone unless `forceConfig = true`.
+It installs a desktop entry by default and uses the wrapped Ranki package unless
+`package` is overridden. The generated settings use this schema:
+
+```toml
+[general]
+collection = "..."
+media_dir = "..."
+[ui]
+theme = "system"   # dark | light | system
+font_size = 16.0
+review_batch_size = 20
+show_keyboard_hints = true
+[scheduler]
+algorithm = "fsrs" # fsrs | sm2
+desired_retention = 0.9
+```
+
 ## Collections
 
 All commands accept the global `--collection PATH` and `--media-dir PATH`

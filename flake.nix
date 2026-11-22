@@ -25,7 +25,9 @@
     rust-overlay,
     git-hooks,
     ...
-  }:
+  }: let
+    rankiHomeModule = import ./nix/ranki.nix self;
+  in
     flake-utils.lib.eachDefaultSystem (
       system: let
         pkgs = import nixpkgs {
@@ -200,5 +202,12 @@
           '';
         };
       }
-    );
+    )
+    // {
+      homeManagerModules.default = rankiHomeModule;
+      homeModules = rec {
+        default = rankiHomeModule;
+        ranki = default;
+      };
+    };
 }
