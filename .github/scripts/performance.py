@@ -224,6 +224,12 @@ def compare(head, base=None, ceiling=None, floor=None, ceiling_dir=None):
             if result:
                 reference[name] = (result, report["method"])
     global_findings = []
+    if not floor.get("metrics") and not base:
+        global_findings.append({
+            "kind": "reference",
+            "failed": True,
+            "note": "no ceiling and no base measurement to compare against",
+        })
     if floor.get("method") and head["method"] != floor["method"]:
         global_findings.append({
             "kind": "method",
@@ -495,7 +501,11 @@ def main(argv=None):
         if not SHA.match(args.head):
             fail("--head must be a full commit sha")
         floor = read_floor(args.floor)
-        variants = sorted({value for value in (args.base, floor.get("sha")) if value and SHA.match(value)} - {args.head})
+        metric_shas = [record["sha"] for record in floor.get("metrics", {}).values()]
+        variants = sorted(
+            {value for value in (args.base, *metric_shas) if value and SHA.match(value)}
+            - {args.head}
+        )
         write_json(args.out, {
             "kind": args.kind,
             "head_sha": args.head,

@@ -100,10 +100,14 @@ jobs:
           fi
           head="$(jq -r '.head_sha' "$RESULT_DIR/meta.json")"
           base="$(jq -r '.base_sha // empty' "$RESULT_DIR/meta.json")"
+          if [ -z "$base" ]; then
+            printf '<!-- ranki-performance -->\n### Performance audit\n\nNo base commit was recorded for this run.\n' > "$AUDIT_DIR/comment.md"
+            printf 'fail\n' > "$AUDIT_DIR/result.txt"
+            exit 0
+          fi
           args=(--head "$RESULT_DIR/aggregated/$head.json" --floor "$RESULT_DIR/floor.json"
-                --ceiling-dir "$RESULT_DIR/aggregated"
+                --ceiling-dir "$RESULT_DIR/aggregated" --base "$RESULT_DIR/aggregated/$base.json"
                 --comment "$AUDIT_DIR/comment.md" --result "$AUDIT_DIR/result.txt")
-          [ -n "$base" ] && args+=(--base "$RESULT_DIR/aggregated/$base.json")
           python3 .github/scripts/performance.py compare "${args[@]}"
 
       - name: Update comment

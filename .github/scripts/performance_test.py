@@ -1,9 +1,12 @@
 """Tests for the performance gate rules."""
 
 import copy
+import io
 import json
 import unittest
+from contextlib import redirect_stdout
 
+from performance import main
 from performance import (
     aggregate,
     compare,
@@ -166,6 +169,14 @@ class GateTest(unittest.TestCase):
         self.assertTrue(result["failed"])
         self.assertTrue(any(item["kind"] == "workload" for item in result["global_findings"]))
 
+    def test_empty_floor_without_base_fails(self):
+        head = report([("process/cli/decks", 100.0, 10.0)])
+        result = compare(head)
+        self.assertTrue(result["failed"])
+        self.assertTrue(
+            any(item["kind"] == "reference" for item in result["global_findings"])
+        )
+
     def test_no_ceiling_uses_base_as_reference(self):
         base = report([("process/cli/decks", 100.0, 10.0)])
         head = report([("process/cli/decks", 100.0, 11.0)])
@@ -175,6 +186,29 @@ class GateTest(unittest.TestCase):
 
 
 class FloorTest(unittest.TestCase):
+    def test_plan_schedules_each_metric_sha(self):
+        ceiling = report([("core/fsrs", 100.0, 10.0)])
+        floor = floor_for(ceiling)
+        other = "abcdef0123456789abcdef0123456789abcdef01"
+        floor["metrics"]["core/fsrs"]["sha"] = other
+        with tempfile.TemporaryDirectory() as directory:
+            floor_path = Path(directory) / "floor.json"
+            meta_path = Path(directory) / "meta.json"
+            floor_path.write_text(json.dumps(floor), encoding="utf-8")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                main([
+                    "plan",
+                    "--head", SHA,
+                    "--base", "1111111111111111111111111111111111111111",
+                    "--floor", str(floor_path),
+                    "--kind", "pull_request",
+                    "--out", str(meta_path),
+                ])
+            self.assertIn(other, output.getvalue().split())
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(meta["floor"]["core/fsrs"], other)
+
     def test_ceiling_only_lowers_when_worst_run_beats_it(self):
         first = report([("core/sm2", 100.0, 10.0)])
         floor = floor_for(first)
