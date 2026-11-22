@@ -2314,6 +2314,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ranki-bench"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "ranki-core",
+ "ranki-format",
+ "ranki-model",
+ "ranki-storage",
+ "ranki-ui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "ranki-core"
 version = "0.1.0"
 dependencies = [

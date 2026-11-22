@@ -174,7 +174,7 @@
             // {
               inherit src cargoArtifacts;
               pname = "${binName}-tarpaulin";
-              buildPhaseCargoCommand = "cargo tarpaulin";
+              buildPhaseCargoCommand = "cargo tarpaulin --exclude-files 'crates/bench/src/*'";
               installPhase = "mkdir -p $out";
               nativeBuildInputs = [pkgs.cargo-tarpaulin];
             }
