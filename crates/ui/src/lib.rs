@@ -7,7 +7,7 @@ pub(crate) mod app;
 pub(crate) mod card_view;
 pub(crate) mod theme;
 
-pub use app::run;
+pub use app::{BenchApp, run};
 pub use ranki_model::{SchedulerKind, Settings, ThemeChoice};
 
 /// Settings for the review window, shared with the command line.

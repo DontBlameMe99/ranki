@@ -163,3 +163,8 @@ applies to local runs and CI:
 ```bash
 nix build .#checks.x86_64-linux.tarpaulin --print-build-logs
 ```
+
+Performance is measured across the CLI, AnkiConnect, MCP, GUI, storage,
+scheduling, and package surfaces in release builds. A pull request fails the
+`Performance audit` check when a workload regresses. See
+[docs/performance.md](docs/performance.md) for the method and local commands.

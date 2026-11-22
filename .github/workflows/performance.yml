@@ -1,0 +1,117 @@
+name: Performance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: performance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Measurements run on PR code with a read-only token. The trusted audit workflow
+# turns the uploaded artifacts into the required check and PR comment.
+jobs:
+  measure:
+    name: Measure all surfaces
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      RUN_KIND: ${{ github.event_name == 'pull_request' && 'pull_request' || 'push' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Plan variants
+        run: |
+          mkdir -p performance/raw performance/aggregated
+          floor="$RUNNER_TEMP/floor.json"
+          set +e
+          git ls-remote --exit-code --heads origin floors >/dev/null 2>&1
+          floors_status=$?
+          set -e
+          if [ "$floors_status" -eq 0 ]; then
+            git fetch --depth=1 origin floors
+            git show FETCH_HEAD:.github/performance-floor.json > "$floor"
+          elif [ "$floors_status" -eq 2 ]; then
+            python3 .github/scripts/performance.py bootstrap --out "$floor"
+          else
+            echo 'Cannot check the floors branch.' >&2
+            exit 1
+          fi
+          python3 .github/scripts/performance.py plan \
+            --head "$(git rev-parse HEAD)" \
+            --base "$BASE_SHA" \
+            --floor "$floor" \
+            --kind "$RUN_KIND" \
+            --out performance/meta.json > "$RUNNER_TEMP/variants.txt"
+          cp "$floor" performance/floor.json
+
+      - name: Prepare variants
+        run: |
+          head="$(git rev-parse HEAD)"
+          : > "$RUNNER_TEMP/variants.tsv"
+          printf '%s %s 0\n' "$head" "$GITHUB_WORKSPACE" >> "$RUNNER_TEMP/variants.tsv"
+          while read -r sha; do
+            [ -n "$sha" ] || continue
+            git fetch --depth=1 origin "$sha"
+            dir="$RUNNER_TEMP/variant-$sha"
+            git worktree add --detach "$dir" "$sha"
+            # Older commits without the headless GUI hook run the same harness
+            # with the GUI feature off, leaving their own review code untouched.
+            skip_gui=0
+            grep -q 'pub struct BenchApp' "$dir/crates/ui/src/app.rs" || skip_gui=1
+            # The harness comes from the head so every variant runs exactly the
+            # same workloads and sampling rules.
+            mkdir -p "$dir/crates/bench"
+            cp -R "$GITHUB_WORKSPACE/crates/bench/." "$dir/crates/bench/"
+            printf '%s %s %s\n' "$sha" "$dir" "$skip_gui" >> "$RUNNER_TEMP/variants.tsv"
+          done < "$RUNNER_TEMP/variants.txt"
+
+      - name: Build variants
+        run: |
+          while read -r sha dir skip_gui; do
+            echo "Building $sha"
+            features=()
+            [ "$skip_gui" = 1 ] && features=(--no-default-features)
+            (cd "$dir" && CARGO_TARGET_DIR="$RUNNER_TEMP/target/$sha" \
+              nix develop --command cargo build --release -p ranki -p ranki-bench "${features[@]}")
+          done < "$RUNNER_TEMP/variants.tsv"
+
+      - name: Measure
+        run: |
+          for round in 1 2 3; do
+            while read -r sha _; do
+              target="$RUNNER_TEMP/target/$sha"
+              echo "Measuring $sha round $round"
+              RANKI_BIN="$target/release/ranki" \
+                "$target/release/ranki-bench" measure \
+                --out "$GITHUB_WORKSPACE/performance/raw/$sha-$round.json"
+            done < "$RUNNER_TEMP/variants.tsv"
+          done
+          python3 .github/scripts/performance.py aggregate \
+            --dir performance/raw --out performance/aggregated --rounds 3
+
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: performance
+          path: |
+            performance/meta.json
+            performance/floor.json
+            performance/aggregated/*.json
+            performance/raw/*.json
+          retention-days: 30
+

@@ -1138,12 +1138,12 @@ impl ReviewApp {
     }
 }
 
-impl eframe::App for ReviewApp {
+impl ReviewApp {
     #[expect(
         clippy::excessive_nesting,
         reason = "input handling and two eframe panels share one frame callback"
     )]
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui_impl(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx();
         let now = Instant::now();
         let focused = ctx.input(|input| input.raw.focused);
@@ -1201,6 +1201,58 @@ impl eframe::App for ReviewApp {
         egui::CentralPanel::default()
             .show(ui, |center_ui| self.review(center_ui));
         self.dialogs(ui.ctx());
+    }
+}
+
+impl eframe::App for ReviewApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.ui_impl(ui);
+    }
+}
+
+/// Review window driven without a native window, for headless frame benchmarks.
+pub struct BenchApp {
+    ctx: egui::Context,
+    app: ReviewApp,
+}
+
+impl BenchApp {
+    /// Builds the same review state the native window uses.
+    #[must_use]
+    pub fn new(store: Box<dyn Store>, options: &Options) -> Self {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, options.theme, options.font_size);
+        let app = ReviewApp::new(store, options);
+        Self { ctx, app }
+    }
+
+    /// Returns the current card to the question side for the next frame.
+    pub fn reset(&mut self) {
+        self.frame(Some(egui::Key::R));
+    }
+
+    /// Runs one full UI pass. `key` injects a key press for that frame.
+    pub fn frame(&mut self, key: Option<egui::Key>) {
+        let events = key
+            .into_iter()
+            .map(|pressed| egui::Event::Key {
+                key: pressed,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            })
+            .collect();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 768.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let output = self.ctx.run_ui(input, |ui| self.app.ui_impl(ui));
+        output.drop_without_applying_deltas();
     }
 }
 
@@ -1438,10 +1490,10 @@ mod tests {
     };
 
     use super::{
-        Action, DEBOUNCE, Dialog, EmptyKind, MAX_REVIEW_TIME, Options, Rating,
-        ReviewApp, SchedulerKind, action_for_key, elapsed_millis, empty_copy,
-        empty_kind, focused_delta, interval_label, next_due_deck,
-        progress_fraction,
+        Action, BenchApp, DEBOUNCE, Dialog, EmptyKind, MAX_REVIEW_TIME,
+        Options, Rating, ReviewApp, SchedulerKind, action_for_key,
+        elapsed_millis, empty_copy, empty_kind, focused_delta, interval_label,
+        next_due_deck, progress_fraction,
     };
 
     #[derive(Clone)]
@@ -1940,5 +1992,12 @@ mod tests {
         assert_eq!(SchedulerKind::Sm2.label(), "SM-2");
         assert_eq!(SchedulerKind::Fsrs.other(), SchedulerKind::Sm2);
         let _ = Context::default();
+    }
+    #[test]
+    fn bench_app_renders_frames_without_a_window() {
+        let mut app = BenchApp::new(Box::new(fixture()), &Options::default());
+        app.frame(None);
+        app.frame(Some(Key::Space));
+        app.reset();
     }
 }

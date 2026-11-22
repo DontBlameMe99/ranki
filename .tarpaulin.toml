@@ -5,4 +5,5 @@ exclude-files = [
   "crates/ui/src/app.rs",
   "crates/ui/src/card_view.rs",
   "crates/ui/src/theme.rs",
+  "crates/bench/src/*",
 ]
