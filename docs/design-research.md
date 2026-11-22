@@ -168,8 +168,7 @@ All APIs named below exist in the pinned egui 0.37 source.
 ## Before and after tied to code
 
 1. `app.rs:476-491` and `card_view.rs:233-270`. Before: `Question` in weak
-   text, an image-only card rendered as `Media  Image: Abkhazia.png
-   (available)`, no boundary, most of the panel is empty. After: a 24 px padded stage
+   text, an image-only card rendered as `Media  Image: Abkhazia.png (available)`, no boundary, most of the panel is empty. After: a 24 px padded stage
    with the image centered at up to 520 px wide, a 26 px question above it,
    and a 12 px media-status line below the stage.
 2. `app.rs:500-518`. Before: `Reveal answer (Space)` followed by `1 Again`,

@@ -50,8 +50,7 @@ or 2px, never softened by a shadow.
 All artboards declare `Inter` at weights 400, 500, 600, 700, then `Noto Sans JP`
 at weight 500 for Japanese glyphs, then `system-ui, sans-serif`. No Nerd Font is
 used in the mockups. Icons are inline Lucide-style SVG: 14, 16, 18, or 20 px,
-`stroke-width="2"`, round caps and joins, currentColor. The repo's `CCL Nerd
-Font` fallback is for text glyph icons in egui, not for matching these SVGs.
+`stroke-width="2"`, round caps and joins, currentColor. The repo's `CCL Nerd Font` fallback is for text glyph icons in egui, not for matching these SVGs.
 
 | Size | Weight | Line height / tracking | Use |
 | --- | --- | --- | --- |
@@ -183,6 +182,8 @@ lighter notch.
   existing `font_candidates` logic already prefers the matched family and falls
   back to CCL Nerd Font.
 
+<!-- end list -->
+
 ```rust
 // crates/ui/src/theme.rs
 use egui::Color32;
@@ -223,6 +224,5 @@ pub const fn alpha(color: Color32, a: u8) -> Color32 {
 ```
 
 `accent_ink` already returns crust in dark and white in light. For rating
-buttons, add `rating_tint(code, theme) = alpha(rating_fill(code, theme),
-RATING_FILL_ALPHA)` and use `rating_fill` only for the 40% border. In Latte use
+buttons, add `rating_tint(code, theme) = alpha(rating_fill(code, theme), RATING_FILL_ALPHA)` and use `rating_fill` only for the 40% border. In Latte use
 `palette(theme).text` for the label; in Mocha use `rating_fill` directly.

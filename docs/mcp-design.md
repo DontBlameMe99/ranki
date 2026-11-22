@@ -46,11 +46,11 @@ Other real examples:
   `mise://tasks`, `mise://env`, `mise://config`, and tools `list_commands`, `run_task`,
   `install_tool`. It refuses untrusted project config and labels commands with effects
   `read`, `write` and `destructive`.
-- [usage](https://github.com/jdx/usage/blob/main/cli/src/cli/mcp.rs) has `usage mcp -f
-  FILE.usage.kdl`, also on `rmcp`. It builds a current-thread Tokio runtime because the
+- [usage](https://github.com/jdx/usage/blob/main/cli/src/cli/mcp.rs) has `usage mcp -f FILE.usage.kdl`, also on `rmcp`. It builds a current-thread Tokio runtime because the
   server is one stdio conversation. It returns tool errors, not protocol errors, for
   caller mistakes such as an unknown command, and puts usage instructions in
   `ServerConfig`.
+
 ## Recommendation
 
 Use one binary. Add a `ranki mcp` subcommand to the existing `clap` enum in `crates/bin`.
@@ -146,7 +146,7 @@ stderr through `tracing-subscriber`.
 
 ## Tool surface
 
-All names are snake_case. Outputs are JSON text in `content` plus `structuredContent`
+All names are snake\_case. Outputs are JSON text in `content` plus `structuredContent`
 where the client supports it. `Deck`, `Card`, `Note`, `RevLog` and `Stats` below use the
 field names and numeric codes from `crates/model/src/lib.rs`. `Card.due` keeps its
 type-dependent meaning from `docs/architecture.md`. `model_id`, `deck_id` and all card
@@ -243,11 +243,10 @@ fields are omitted when absent.
 
 Mapping to the `Store` trait:
 
-- `list_decks` -> `decks`. `due_cards` -> `due_cards`. `find_cards` -> `find_cards`.
-  `get_card` -> `card` and `note`. `add_note` builds `NewNote { model_id, deck_id, fields,
-  tags }` and returns `add_note`'s card ids. `answer_card` loads the card, maps the rating
+- `list_decks` -\> `decks`. `due_cards` -\> `due_cards`. `find_cards` -\> `find_cards`.
+  `get_card` -\> `card` and `note`. `add_note` builds `NewNote { model_id, deck_id, fields, tags }` and returns `add_note`'s card ids. `answer_card` loads the card, maps the rating
   to `Rating::code()` 1 to 4, asks `ranki-core` for the new card and `RevLog`, then calls
-  `apply_review` with the resulting `ReviewDecision`. `stats` -> `stats`. `import_apkg`
+  `apply_review` with the resulting `ReviewDecision`. `stats` -\> `stats`. `import_apkg`
   and `export_apkg` call `ranki-format`; their counters follow that crate's result.
 
 ## Errors and safety
@@ -260,8 +259,7 @@ Mapping to the `Store` trait:
   become tool errors with the storage message. `Unsupported` says the operation is not
   available. A poisoned mutex is an internal error. Never panic in a tool, never include a
   backtrace, and never write logs to stdout.
-- Writes (`add_note`, `answer_card`, `import_apkg`, `export_apkg`) require `confirm:
-  true`. A missing or false value performs no write and returns a tool error. Tool
+- Writes (`add_note`, `answer_card`, `import_apkg`, `export_apkg`) require `confirm: true`. A missing or false value performs no write and returns a tool error. Tool
   annotations mark them non-idempotent and not destructive.
 - Expose no delete, suspend, bury, reset, empty-deck or schema-changing tool. If a later
   change needs one, it gets its own design.
@@ -280,8 +278,7 @@ Mapping to the `Store` trait:
 ## Coexistence with `ranki connect`
 
 `ranki connect` remains the AnkiConnect-compatible HTTP JSON-RPC API. It is a separate
-subcommand with a local listener, used by Anki tooling that expects AnkiConnect. `ranki
-mcp` is a local stdio process launched by an MCP client. There is no shared port, no HTTP
+subcommand with a local listener, used by Anki tooling that expects AnkiConnect. `ranki mcp` is a local stdio process launched by an MCP client. There is no shared port, no HTTP
 inside `mcp`, and no MCP inside `connect`. Both call the same `Store` implementations and
 the same `ranki-core` scheduler through thin adapters, so their behavior stays aligned
 without coupling their transports. A later bridge from MCP to a running GUI would follow
