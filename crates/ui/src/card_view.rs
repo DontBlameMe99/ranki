@@ -1,6 +1,7 @@
 //! Small, safe renderer for Anki-style note templates.
 
 use std::{
+    collections::HashMap,
     iter::Peekable,
     mem,
     path::{Path, PathBuf},
@@ -8,10 +9,10 @@ use std::{
 };
 
 use egui::{
-    FontId, Label, RichText, TextWrapMode,
+    FontId, Image, Label, TextWrapMode, TextureHandle, TextureOptions,
+    load::SizedTexture,
     text::{LayoutJob, TextFormat},
 };
-
 const MAX_ENTITY_LEN: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,52 +227,113 @@ pub fn media_refs(input: &str, media_dir: Option<&Path>) -> Vec<MediaRef> {
     refs
 }
 
-#[expect(
-    clippy::excessive_nesting,
-    reason = "egui lays out the card and its media in one callback chain"
-)]
-pub fn render(ui: &mut egui::Ui, html: &str, media_dir: Option<&Path>) {
-    let color = ui.visuals().text_color();
-    let mut job = LayoutJob::default();
-    job.wrap.max_width = ui.available_width().max(160.0);
-    for segment in parse_markup(html) {
-        let size = match segment.emphasis {
-            Emphasis::Bold | Emphasis::BoldItalic => 19.0,
-            Emphasis::Plain | Emphasis::Italic => 17.0,
-        };
-        let mut format = TextFormat::simple(FontId::proportional(size), color);
-        format.italics =
-            matches!(segment.emphasis, Emphasis::Italic | Emphasis::BoldItalic);
-        job.append(&segment.text, 0.0, format);
-    }
-    ui.add(
-        Label::new(job)
-            .selectable(true)
-            .wrap_mode(TextWrapMode::Wrap),
-    );
-
-    let refs = media_refs(html, media_dir);
-    if refs.is_empty() {
-        return;
-    }
-    ui.add_space(10.0);
-    ui.horizontal_wrapped(|row| {
-        row.label(RichText::new("Media").weak());
-        for media in refs {
-            let kind = match media.kind {
-                MediaKind::Sound => "Sound",
-                MediaKind::Image => "Image",
-            };
-            let state = if media.path.is_some() {
-                "available"
-            } else {
-                "missing"
-            };
-            row.label(format!("{kind}: {} ({state})", media.name));
-        }
-    });
+/// Decoded media kept for the lifetime of the window.
+#[derive(Default)]
+pub struct ImageCache {
+    textures: HashMap<PathBuf, Option<TextureHandle>>,
 }
 
+impl ImageCache {
+    /// Returns a cached texture, decoding the file once per path.
+    pub fn texture(
+        &mut self,
+        ctx: &egui::Context,
+        path: &Path,
+    ) -> Option<TextureHandle> {
+        if let Some(cached) = self.textures.get(path) {
+            cached.clone()
+        } else {
+            let texture = decode_texture(ctx, path);
+            self.textures.insert(path.to_path_buf(), texture.clone());
+            texture
+        }
+    }
+}
+
+fn decode_texture(ctx: &egui::Context, path: &Path) -> Option<TextureHandle> {
+    let image = image::open(path).ok()?.thumbnail(1024, 1024).to_rgba8();
+    let (width, height) = image.dimensions();
+    let width_usize = usize::try_from(width).unwrap_or(usize::MAX);
+    let height_usize = usize::try_from(height).unwrap_or(usize::MAX);
+    let color = egui::ColorImage::from_rgba_unmultiplied(
+        [width_usize, height_usize],
+        image.as_raw().as_slice(),
+    );
+    Some(ctx.load_texture(
+        path.to_string_lossy(),
+        color,
+        TextureOptions::default(),
+    ))
+}
+
+/// Draws card text and inline images. Returns captions for media that cannot be shown.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the renderer takes the full card context"
+)]
+#[expect(
+    clippy::excessive_nesting,
+    reason = "egui nests media widgets inside the card"
+)]
+pub fn render(
+    ui: &mut egui::Ui,
+    html: &str,
+    media_dir: Option<&Path>,
+    font_size: f32,
+    cache: &mut ImageCache,
+) -> Vec<String> {
+    let color = ui.visuals().text_color();
+    let segments = parse_markup(html);
+    if !segments.is_empty() {
+        let mut job = LayoutJob::default();
+        job.wrap.max_width = ui.available_width().clamp(320.0, 720.0);
+        for segment in segments {
+            let mut format =
+                TextFormat::simple(FontId::proportional(font_size), color);
+            format.italics = matches!(
+                segment.emphasis,
+                Emphasis::Italic | Emphasis::BoldItalic
+            );
+            job.append(&segment.text, 0.0, format);
+        }
+        ui.add(
+            Label::new(job)
+                .selectable(false)
+                .wrap_mode(TextWrapMode::Wrap),
+        );
+    }
+
+    let mut notices = Vec::new();
+    for media in media_refs(html, media_dir) {
+        let kind = match media.kind {
+            MediaKind::Sound => "Sound",
+            MediaKind::Image => "Image",
+        };
+        match media.path {
+            None => notices.push(format!("{kind}: {} not found", media.name)),
+            Some(path) if media.kind == MediaKind::Image => {
+                match cache.texture(ui.ctx(), &path) {
+                    Some(texture) => {
+                        ui.add_space(8.0);
+                        ui.add(
+                            Image::from_texture(SizedTexture::from_handle(
+                                &texture,
+                            ))
+                            .max_width(520.0)
+                            .max_height(260.0),
+                        );
+                    }
+                    None => notices.push(format!(
+                        "Image: {} cannot be decoded",
+                        media.name
+                    )),
+                }
+            }
+            Some(_) => notices.push(format!("Sound: {} available", media.name)),
+        }
+    }
+    notices
+}
 const fn emphasis(style: (bool, bool)) -> Emphasis {
     match style {
         (true, true) => Emphasis::BoldItalic,

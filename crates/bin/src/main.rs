@@ -1,5 +1,6 @@
 //! Command line entry point for Ranki.
 
+mod config;
 mod connect;
 mod mcp;
 
@@ -147,39 +148,40 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> CliResult<()> {
-    if matches!(cli.command, Some(Command::Mcp)) {
-        return mcp::serve(cli.collection.as_deref());
-    }
-    let collection_path = match &cli.collection {
+    let config = config::load();
+    let fallback = match &cli.collection {
         Some(path) => path.clone(),
         None => default_collection_path(env::var_os("HOME").as_deref())?,
     };
-    let media_dir = cli
-        .media_dir
-        .clone()
-        .unwrap_or_else(|| media_dir_for(&collection_path));
+    let settings = config::resolve_settings(&cli, &config, fallback);
+
+    if matches!(cli.command, Some(Command::Mcp)) {
+        return mcp::serve(Some(&settings.collection));
+    }
+    let collection_path = settings.collection.as_path();
+    let media_dir = settings.media_dir.as_path();
     let command = cli.command.unwrap_or(Command::Gui);
     match command {
         Command::Mcp => Ok(()),
-        Command::Gui => open_gui(&collection_path, media_dir),
+        Command::Gui => open_gui(&settings),
         Command::Import { package } => {
-            import_package(&collection_path, &media_dir, &package)
+            import_package(collection_path, media_dir, &package)
         }
         Command::Export { package } => {
-            export_package(&collection_path, &media_dir, &package)
+            export_package(collection_path, media_dir, &package)
         }
         Command::ExportColpkg { package } => {
-            export_colpkg_package(&collection_path, &media_dir, &package)
+            export_colpkg_package(collection_path, media_dir, &package)
         }
-        Command::Check => check(&collection_path),
-        Command::Connect { port } => connect::serve(&collection_path, port),
+        Command::Check => check(collection_path),
+        Command::Connect { port } => connect::serve(collection_path, port),
         Command::Decks
         | Command::Due { .. }
         | Command::Search { .. }
         | Command::AddNote { .. }
         | Command::Answer { .. }
         | Command::Stats { .. } => {
-            let mut collection = open_or_create(&collection_path)?;
+            let mut collection = open_or_create(collection_path)?;
             run_store_command(&mut collection, command)
         }
     }
@@ -254,12 +256,18 @@ fn run_store_command(
     }
 }
 
-fn open_gui(path: &Path, media_dir: PathBuf) -> CliResult<()> {
-    let collection = open_or_create(path)?;
+fn open_gui(settings: &config::Settings) -> CliResult<()> {
+    let collection = open_or_create(&settings.collection)?;
     let options = ranki_ui::Options {
         window_title: String::from("Ranki"),
-        media_dir: Some(media_dir),
-        light_theme: false,
+        media_dir: Some(settings.media_dir.clone()),
+        light_theme: settings.theme == ranki_ui::ThemeChoice::Light,
+        theme: settings.theme,
+        font_size: settings.font_size,
+        review_batch_size: settings.review_batch_size,
+        show_keyboard_hints: settings.show_keyboard_hints,
+        scheduler: settings.scheduler,
+        desired_retention: settings.desired_retention,
     };
     ranki_ui::run(Box::new(collection), options)
         .map_err(|error| CliError::Message(error.to_string()))
