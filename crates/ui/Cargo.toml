@@ -9,6 +9,8 @@ license.workspace = true
 ranki-model.workspace = true
 ranki-core.workspace = true
 gpui.workspace = true
+futures = "0.3"
+serde_json.workspace = true
 
 [lints]
 workspace = true
