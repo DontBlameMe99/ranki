@@ -6,15 +6,12 @@ use ranki_model::StoreError;
 use sha1::Digest;
 use sha1::Sha1;
 use std::process;
-use std::sync::atomic::AtomicI64;
-use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 const DAY_SECS: i64 = 86_400;
 const BASE91: &[u8; 91] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\"";
-static LAST_ID: AtomicI64 = AtomicI64::new(0);
 
 pub fn now_secs() -> Result<i64, StoreError> {
     let millis = now_ms()?;
@@ -45,13 +42,7 @@ pub fn day_number(
 }
 
 pub fn next_id() -> Result<Id, StoreError> {
-    let millis = now_ms()?;
-    let previous = LAST_ID
-        .try_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
-            old.max(millis).checked_add(1)
-        })
-        .map_err(|_| StoreError::Backend("id overflow".into()))?;
-    Ok(previous.max(millis))
+    Ok(ranki_model::next_id(now_ms()?))
 }
 pub fn guid(id: Id) -> Result<String, StoreError> {
     let duration =

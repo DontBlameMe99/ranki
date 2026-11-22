@@ -7,7 +7,8 @@ use crate::Scheduler;
 use crate::shared::{
     FuzzInput, ReviewContext, ReviewOutcome, StepConfig, as_f32, as_i32,
     due_from_days, elapsed_days, f32_from_f64, factor_or_default, finish,
-    fuzz_interval, is_schedulable, positive_factor, step_outcome, unchanged,
+    fuzz_interval, is_schedulable, positive_factor, preview_interval,
+    step_outcome, unchanged, unchanged_outcome,
 };
 
 /// FSRS-5 model weights and the fixed forgetting curve constants.
@@ -123,18 +124,31 @@ impl FsrsScheduler {
         }
     }
 
+    fn plan(&self, ctx: &ReviewContext<'_>) -> ReviewOutcome {
+        if !is_schedulable(ctx.card) {
+            return unchanged_outcome(ctx);
+        }
+        let prepared = self.prepare(ctx);
+        match ctx.card.card_type {
+            CardType::New | CardType::Learning | CardType::Relearning => {
+                self.schedule_steps(ctx, prepared)
+            }
+            CardType::Review => self.schedule_review(ctx, prepared),
+        }
+    }
+
     fn schedule_steps(
         &self,
         ctx: &ReviewContext<'_>,
         prepared: Prepared,
-    ) -> ReviewDecision {
+    ) -> ReviewOutcome {
         let relearning = ctx.card.card_type == CardType::Relearning;
         let steps = if relearning {
             &self.preset.relearning_steps_minutes
         } else {
             &self.preset.learning_steps_minutes
         };
-        let outcome = step_outcome(
+        step_outcome(
             ctx,
             StepConfig {
                 steps,
@@ -143,15 +157,14 @@ impl FsrsScheduler {
                 factor: prepared.factor,
                 data: prepared.data,
             },
-        );
-        finish(ctx, outcome)
+        )
     }
 
     fn schedule_review(
         &self,
         ctx: &ReviewContext<'_>,
         prepared: Prepared,
-    ) -> ReviewDecision {
+    ) -> ReviewOutcome {
         let steps = &self.preset.relearning_steps_minutes;
         if ctx.rating == Rating::Again && !steps.is_empty() {
             let mut outcome = step_outcome(
@@ -165,9 +178,9 @@ impl FsrsScheduler {
                 },
             );
             outcome.lapses = 1;
-            return finish(ctx, outcome);
+            return outcome;
         }
-        let outcome = ReviewOutcome {
+        ReviewOutcome {
             card_type: CardType::Review,
             queue: CardQueue::Review,
             due: due_from_days(
@@ -186,8 +199,7 @@ impl FsrsScheduler {
                 RevLogKind::Review
             },
             step_seconds: None,
-        };
-        finish(ctx, outcome)
+        }
     }
 }
 
@@ -214,13 +226,23 @@ impl Scheduler for FsrsScheduler {
         if !is_schedulable(card) {
             return unchanged(&ctx);
         }
-        let prepared = self.prepare(&ctx);
-        match card.card_type {
-            CardType::New | CardType::Learning | CardType::Relearning => {
-                self.schedule_steps(&ctx, prepared)
-            }
-            CardType::Review => self.schedule_review(&ctx, prepared),
-        }
+        finish(&ctx, self.plan(&ctx))
+    }
+
+    fn preview(
+        &self,
+        card: &Card,
+        rating: Rating,
+        now_secs: i64,
+        collection_start_secs: i64,
+    ) -> i32 {
+        let ctx = ReviewContext {
+            card,
+            rating,
+            now_secs,
+            collection_start_secs,
+        };
+        preview_interval(&self.plan(&ctx))
     }
 
     fn name(&self) -> &'static str {

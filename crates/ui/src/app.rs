@@ -3,16 +3,14 @@
 use std::{
     collections::{HashSet, VecDeque},
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use egui::{Button, Key, Modal, Modifiers, ProgressBar, RichText, Theme};
-use ranki_core::{
-    FsrsPreset, FsrsScheduler, Scheduler, Sm2Preset, Sm2Scheduler,
-};
+use ranki_core::Scheduler;
 use ranki_model::{
-    Card, Deck, DeckStats, NewNote, Note, NoteModel, Rating, ReviewDecision,
-    Store, StoreError,
+    Card, Deck, DeckStats, NewNote, Note, NoteModel, Rating, Store, StoreError,
 };
 
 use crate::{Options, SchedulerKind, card_view, theme};
@@ -106,7 +104,7 @@ struct ReviewApp {
     focused_elapsed: Duration,
     last_tick: Option<Instant>,
     last_grade_at: Option<Instant>,
-    scheduler: Box<dyn Scheduler>,
+    scheduler: Arc<dyn Scheduler>,
     scheduler_kind: SchedulerKind,
     desired_retention: f32,
     due_batch_size: usize,
@@ -131,12 +129,11 @@ struct ReviewApp {
 /// # Errors
 /// Returns an error when the winit window or graphics context cannot start.
 pub fn run(store: Box<dyn Store>, options: Options) -> eframe::Result<()> {
-    let title = options.window_title.clone();
     let theme_choice = options.theme;
     let font_size = options.font_size;
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(title)
+            .with_title("Ranki")
             .with_inner_size(egui::vec2(1024.0, 768.0))
             .with_min_inner_size(egui::vec2(800.0, 600.0)),
         ..Default::default()
@@ -146,13 +143,13 @@ pub fn run(store: Box<dyn Store>, options: Options) -> eframe::Result<()> {
         native_options,
         Box::new(move |creation| {
             theme::apply(&creation.egui_ctx, theme_choice, font_size);
-            Ok(Box::new(ReviewApp::new(store, options)))
+            Ok(Box::new(ReviewApp::new(store, &options)))
         }),
     )
 }
 
 impl ReviewApp {
-    fn new(store: Box<dyn Store>, options: Options) -> Self {
+    fn new(store: Box<dyn Store>, options: &Options) -> Self {
         let (collection_start_secs, initial_error) = match store
             .collection_created()
         {
@@ -164,7 +161,7 @@ impl ReviewApp {
         let collection_modified = store.collection_modified().ok();
         let mut app = Self {
             store,
-            media_dir: options.media_dir,
+            media_dir: Some(options.media_dir.clone()),
             theme_choice: options.theme,
             theme: theme::resolve_theme(None, options.theme),
             decks: Vec::new(),
@@ -422,7 +419,7 @@ impl ReviewApp {
         self.set_status(format!(
             "Rated {}, next in {}",
             rating_label(rating),
-            interval_label(&decision)
+            interval_label(decision.revlog.interval)
         ));
         self.answered = self.answered.saturating_add(1);
         self.current = None;
@@ -936,13 +933,13 @@ impl ReviewApp {
         };
         let now = now_secs();
         rating_keys().map(|(_, rating)| {
-            let decision = self.scheduler.schedule(
+            let interval = self.scheduler.preview(
                 card,
                 rating,
                 now,
                 self.collection_start_secs,
             );
-            (rating, interval_label(&decision))
+            (rating, interval_label(interval))
         })
     }
 
@@ -1210,14 +1207,12 @@ impl eframe::App for ReviewApp {
 fn make_scheduler(
     kind: SchedulerKind,
     desired_retention: f32,
-) -> Box<dyn Scheduler> {
-    match kind {
-        SchedulerKind::Fsrs => Box::new(FsrsScheduler::new(FsrsPreset {
-            desired_retention,
-            ..FsrsPreset::default()
-        })),
-        SchedulerKind::Sm2 => Box::new(Sm2Scheduler::new(Sm2Preset::default())),
-    }
+) -> Arc<dyn Scheduler> {
+    ranki_core::from_settings(&Options {
+        scheduler: kind,
+        desired_retention,
+        ..Options::default()
+    })
 }
 
 const fn due_count(stats: &DeckStats) -> usize {
@@ -1329,8 +1324,8 @@ const fn rating_style(
     )
 }
 
-fn interval_label(decision: &ReviewDecision) -> String {
-    let interval = i64::from(decision.revlog.interval);
+fn interval_label(raw_interval: i32) -> String {
+    let interval = i64::from(raw_interval);
     if interval < 0 {
         let seconds = interval.saturating_neg();
         if seconds < 60 {
@@ -1694,7 +1689,7 @@ mod tests {
     }
 
     fn app(store: MemoryStore) -> ReviewApp {
-        ReviewApp::new(Box::new(store), Options::default())
+        ReviewApp::new(Box::new(store), &Options::default())
     }
 
     fn advance_past_debounce(target: &mut ReviewApp) {
@@ -1879,30 +1874,10 @@ mod tests {
     }
 
     #[test]
-    fn interval_labels_come_from_the_decision() {
-        let store = fixture();
-        let card = store.cards[0].clone();
-        let mut learning = card;
-        learning.due = 60;
-        let mut decision = ReviewDecision {
-            card: learning,
-            revlog: ranki_model::RevLog {
-                id: 1,
-                card_id: 1,
-                usn: 0,
-                ease: Rating::Good,
-                interval: -60,
-                last_interval: 0,
-                factor: 2500,
-                time_ms: 0,
-                kind: ranki_model::RevLogKind::Learn,
-            },
-        };
-        assert_eq!(interval_label(&decision), "1m");
-        decision.revlog.interval = 4;
-        assert_eq!(interval_label(&decision), "4d");
-        decision.revlog.interval = 365;
-        assert_eq!(interval_label(&decision), "1y");
+    fn interval_labels_cover_seconds_days_and_years() {
+        assert_eq!(interval_label(-60), "1m");
+        assert_eq!(interval_label(4), "4d");
+        assert_eq!(interval_label(365), "1y");
     }
 
     #[test]

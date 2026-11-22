@@ -1,5 +1,4 @@
-use std::sync::atomic::AtomicI64;
-use std::sync::atomic::Ordering;
+use ranki_model::next_id;
 
 use ranki_model::{
     Card, CardQueue, CardType, Rating, RevLog, RevLogKind, ReviewDecision,
@@ -9,7 +8,6 @@ use crate::{DEFAULT_FACTOR, LEFT_STEP_MARKER, SECONDS_PER_DAY};
 
 const I32_MAX_F32: f32 = 2_147_483_647.0;
 const I32_MIN_F32: f32 = -2_147_483_648.0;
-static LAST_REVLOG_ID: AtomicI64 = AtomicI64::new(0);
 
 const MAX_STEPS: u32 = u32::MAX - LEFT_STEP_MARKER;
 
@@ -60,24 +58,6 @@ pub const fn day_number(now_secs: i64, collection_start_secs: i64) -> i64 {
     now_secs
         .saturating_sub(collection_start_secs)
         .div_euclid(SECONDS_PER_DAY)
-}
-
-/// Allocates a unique, increasing millisecond id for a review log entry.
-pub fn next_revlog_id(now_secs: i64) -> i64 {
-    let millis = now_secs.saturating_mul(1_000);
-    let next = |old: i64| {
-        if old < 0 {
-            old.checked_add(1)
-                .filter(|candidate| *candidate < 0)
-                .unwrap_or(i64::MIN)
-        } else {
-            old.max(millis).checked_add(1).unwrap_or(i64::MIN)
-        }
-    };
-    let old = LAST_REVLOG_ID
-        .try_update(Ordering::SeqCst, Ordering::SeqCst, |old| Some(next(old)))
-        .unwrap_or(i64::MIN);
-    next(old)
 }
 
 pub fn elapsed_days(card: &Card, now_secs: i64) -> u32 {
@@ -226,10 +206,35 @@ pub fn step_outcome(
     }
 }
 
+/// Encodes the review interval the same way [`finish`] writes it to the log.
+#[must_use]
+pub fn preview_interval(outcome: &ReviewOutcome) -> i32 {
+    outcome.step_seconds.map_or(outcome.interval, |seconds| {
+        i32::try_from(seconds).unwrap_or(i32::MAX).saturating_neg()
+    })
+}
+
+/// Outcome for a card that is not due for review.
+#[must_use]
+pub fn unchanged_outcome(ctx: &ReviewContext<'_>) -> ReviewOutcome {
+    ReviewOutcome {
+        card_type: ctx.card.card_type,
+        queue: ctx.card.queue,
+        due: ctx.card.due,
+        interval: ctx.card.interval,
+        lapses: ctx.card.lapses,
+        left: ctx.card.left,
+        factor: ctx.card.factor,
+        data: ctx.card.data.clone(),
+        kind: RevLogKind::Manual,
+        step_seconds: None,
+    }
+}
 pub fn finish(
     ctx: &ReviewContext<'_>,
     outcome: ReviewOutcome,
 ) -> ReviewDecision {
+    let interval = preview_interval(&outcome);
     let mut card = ctx.card.clone();
     card.modified = ctx.now_secs;
     card.usn = -1;
@@ -243,14 +248,8 @@ pub fn finish(
     card.left = outcome.left;
     card.data = outcome.data;
 
-    let interval = match outcome.step_seconds {
-        Some(seconds) => {
-            i32::try_from(seconds).unwrap_or(i32::MAX).saturating_neg()
-        }
-        None => outcome.interval,
-    };
     let revlog = RevLog {
-        id: next_revlog_id(ctx.now_secs),
+        id: next_id(ctx.now_secs.saturating_mul(1_000)),
         card_id: card.id,
         usn: -1,
         ease: ctx.rating,
@@ -267,7 +266,7 @@ pub fn finish(
 pub fn unchanged(ctx: &ReviewContext<'_>) -> ReviewDecision {
     let card = ctx.card.clone();
     let revlog = RevLog {
-        id: next_revlog_id(ctx.now_secs),
+        id: next_id(ctx.now_secs.saturating_mul(1_000)),
         card_id: card.id,
         usn: -1,
         ease: ctx.rating,

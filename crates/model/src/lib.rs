@@ -3,6 +3,15 @@
 //! Field names and numeric values mirror Anki's `collection.anki2` schema so
 //! records can be read and written without conversion loss.
 
+pub mod config;
+mod id;
+
+pub use config::{
+    Config, GeneralConfig, SchedulerConfig, SchedulerKind, Settings,
+    ThemeChoice, UiConfig, media_dir_for,
+};
+pub use id::next_id;
+
 use serde::{Deserialize, Serialize};
 
 /// Anki identifiers are 64-bit integers.

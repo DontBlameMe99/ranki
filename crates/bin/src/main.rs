@@ -2,24 +2,11 @@
 
 mod config;
 mod connect;
+mod error;
 mod mcp;
 
-use std::env;
-use std::ffi::OsStr;
-use std::fs;
-use std::io;
-use std::path::Path;
-use std::path::PathBuf;
-use std::process::ExitCode;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
-
-static MANUAL_LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 use clap::Parser;
 use clap::Subcommand;
-use ranki_core::FsrsScheduler;
 use ranki_core::Scheduler;
 use ranki_format::export_apkg;
 use ranki_format::export_colpkg;
@@ -33,6 +20,15 @@ use ranki_model::RevLogKind;
 use ranki_model::ReviewDecision;
 use ranki_model::Store;
 use ranki_storage::Collection;
+use std::env;
+use std::ffi::OsStr;
+use std::fs;
+use std::io;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
 /// Errors surfaced by the binary and its two built-in interfaces.
@@ -149,15 +145,24 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> CliResult<()> {
     let config = config::load();
-    let fallback = match &cli.collection {
-        Some(path) => path.clone(),
-        None => default_collection_path(env::var_os("HOME").as_deref())?,
+    let mut cli = cli;
+    if cli.collection.is_none() {
+        cli.collection = env::var_os("RANKI_COLLECTION").map(PathBuf::from);
+    }
+    let has_collection =
+        cli.collection.is_some() || config.general.collection.is_some();
+    let fallback = if has_collection {
+        None
+    } else {
+        Some(default_collection_path(env::var_os("HOME").as_deref())?)
     };
     let settings = config::resolve_settings(&cli, &config, fallback);
+    let scheduler = ranki_core::from_settings(&settings);
 
     if matches!(cli.command, Some(Command::Mcp)) {
-        return mcp::serve(Some(&settings.collection));
+        return mcp::serve(Some(&settings.collection), scheduler);
     }
+
     let collection_path = settings.collection.as_path();
     let media_dir = settings.media_dir.as_path();
     let command = cli.command.unwrap_or(Command::Gui);
@@ -174,7 +179,9 @@ fn run(cli: Cli) -> CliResult<()> {
             export_colpkg_package(collection_path, media_dir, &package)
         }
         Command::Check => check(collection_path),
-        Command::Connect { port } => connect::serve(collection_path, port),
+        Command::Connect { port } => {
+            connect::serve(collection_path, port, scheduler.as_ref())
+        }
         Command::Decks
         | Command::Due { .. }
         | Command::Search { .. }
@@ -182,7 +189,7 @@ fn run(cli: Cli) -> CliResult<()> {
         | Command::Answer { .. }
         | Command::Stats { .. } => {
             let mut collection = open_or_create(collection_path)?;
-            run_store_command(&mut collection, command)
+            run_store_command(&mut collection, command, scheduler.as_ref())
         }
     }
 }
@@ -190,6 +197,7 @@ fn run(cli: Cli) -> CliResult<()> {
 fn run_store_command(
     collection: &mut Collection,
     command: Command,
+    scheduler: &dyn Scheduler,
 ) -> CliResult<()> {
     match command {
         Command::Decks => {
@@ -230,8 +238,13 @@ fn run_store_command(
             Ok(())
         }
         Command::Answer { card_id, rating } => {
-            let decision =
-                answer_card(collection, card_id, rating, now_secs()?)?;
+            let decision = answer_card(
+                collection,
+                card_id,
+                rating,
+                now_secs()?,
+                scheduler,
+            )?;
             println!("{}\t{}", card_id, decision.card.due);
             Ok(())
         }
@@ -259,9 +272,8 @@ fn run_store_command(
 fn open_gui(settings: &config::Settings) -> CliResult<()> {
     let collection = open_or_create(&settings.collection)?;
     let options = ranki_ui::Options {
-        window_title: String::from("Ranki"),
-        media_dir: Some(settings.media_dir.clone()),
-        light_theme: settings.theme == ranki_ui::ThemeChoice::Light,
+        collection: settings.collection.clone(),
+        media_dir: settings.media_dir.clone(),
         theme: settings.theme,
         font_size: settings.font_size,
         review_batch_size: settings.review_batch_size,
@@ -352,32 +364,27 @@ pub(crate) fn now_ms() -> CliResult<i64> {
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "store, card id, rating and time are all needed"
+    reason = "the shared answer helper needs store, card, rating, time, and scheduler"
 )]
 pub(crate) fn answer_card<S: Store>(
     store: &mut S,
     card_id: Id,
     rating: Rating,
     now: i64,
+    scheduler: &dyn Scheduler,
 ) -> CliResult<ReviewDecision> {
     let card = store.card(card_id)?.ok_or_else(|| {
         CliError::Message(format!("card not found: {card_id}"))
     })?;
     let collection_start_secs = store.collection_created()?;
-    let decision = FsrsScheduler::default().schedule(
-        &card,
-        rating,
-        now,
-        collection_start_secs,
-    );
+    let decision =
+        scheduler.schedule(&card, rating, now, collection_start_secs);
     store.apply_review(&decision)?;
     Ok(decision)
 }
 
 pub(crate) fn save_card<S: Store>(store: &mut S, card: Card) -> CliResult<()> {
-    let sequence = MANUAL_LOG_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let offset = i64::try_from(sequence).unwrap_or(i64::MAX);
-    let log_id = now_ms()?.saturating_add(offset);
+    let log_id = ranki_model::next_id(now_ms()?);
     let log = RevLog {
         id: log_id,
         card_id: card.id,

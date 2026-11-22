@@ -3,6 +3,7 @@
 use std::fmt;
 use std::path::Path;
 
+use ranki_core::Scheduler;
 use ranki_model::CardQueue;
 use ranki_model::CardType;
 use ranki_model::Deck;
@@ -25,40 +26,52 @@ use tiny_http::Server;
 use crate::CliError;
 use crate::CliResult;
 use crate::answer_card;
+use crate::error::{ErrorCode, InterfaceError};
 use crate::save_card;
-
 const API_VERSION: u32 = 6;
 
 #[derive(Debug)]
-struct RpcError(String);
+struct RpcError(InterfaceError);
+
+impl From<InterfaceError> for RpcError {
+    fn from(error: InterfaceError) -> Self {
+        Self(error)
+    }
+}
 
 impl From<ranki_model::StoreError> for RpcError {
     fn from(error: ranki_model::StoreError) -> Self {
-        Self(error.to_string())
+        Self(error.into())
     }
 }
 
 impl From<CliError> for RpcError {
     fn from(error: CliError) -> Self {
-        Self(error.to_string())
+        Self(error.into())
     }
 }
 
 impl From<String> for RpcError {
     fn from(error: String) -> Self {
-        Self(error)
+        Self(InterfaceError::message(error))
     }
 }
 
 impl From<&str> for RpcError {
     fn from(error: &str) -> Self {
-        Self(error.to_owned())
+        Self(InterfaceError::message(error))
     }
 }
 
 impl fmt::Display for RpcError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+        self.0.fmt(formatter)
+    }
+}
+
+impl From<RpcError> for InterfaceError {
+    fn from(error: RpcError) -> Self {
+        error.0
     }
 }
 
@@ -75,6 +88,8 @@ struct RpcRequest {
 struct RpcResponse {
     result: Value,
     error: Option<String>,
+    #[serde(rename = "errorCode", skip_serializing_if = "Option::is_none")]
+    error_code: Option<&'static str>,
 }
 
 impl RpcResponse {
@@ -82,25 +97,34 @@ impl RpcResponse {
         Self {
             result,
             error: None,
+            error_code: None,
         }
     }
 
-    fn error(message: impl Into<String>) -> Self {
+    fn error(source: impl Into<InterfaceError>) -> Self {
+        let mapped = source.into();
+        let code = mapped.code();
+        let (_, message) = mapped.into_parts();
         Self {
             result: Value::Null,
-            error: Some(message.into()),
+            error: Some(message),
+            error_code: Some(code.as_str()),
         }
     }
 }
 
-pub fn serve(path: &Path, port: u16) -> CliResult<()> {
+pub fn serve(
+    path: &Path,
+    port: u16,
+    scheduler: &dyn Scheduler,
+) -> CliResult<()> {
     let address = ("127.0.0.1", port);
     let server = Server::http(address).map_err(|error| {
         CliError::Message(format!("cannot listen on 127.0.0.1:{port}: {error}"))
     })?;
     let mut store = Collection::open(path)?;
     for mut request in server.incoming_requests() {
-        let response = read_and_dispatch(&mut store, &mut request);
+        let response = read_and_dispatch(&mut store, &mut request, scheduler);
         let body = serde_json::to_string(&response)?;
         let header =
             Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
@@ -115,15 +139,20 @@ pub fn serve(path: &Path, port: u16) -> CliResult<()> {
 fn read_and_dispatch(
     store: &mut Collection,
     request: &mut Request,
+    scheduler: &dyn Scheduler,
 ) -> RpcResponse {
     let mut body = Vec::new();
     if let Err(error) = request.as_reader().read_to_end(&mut body) {
         return RpcResponse::error(format!("cannot read request: {error}"));
     }
-    handle_body(store, &body)
+    handle_body(store, &body, scheduler)
 }
 
-fn handle_body(store: &mut Collection, body: &[u8]) -> RpcResponse {
+fn handle_body(
+    store: &mut Collection,
+    body: &[u8],
+    scheduler: &dyn Scheduler,
+) -> RpcResponse {
     let request: RpcRequest = match serde_json::from_slice(body) {
         Ok(request) => request,
         Err(error) => {
@@ -137,16 +166,21 @@ fn handle_body(store: &mut Collection, body: &[u8]) -> RpcResponse {
         ));
     }
     let params = request.params.unwrap_or_else(|| json!({}));
-    match dispatch(store, &request.action, &params) {
+    match dispatch(store, &request.action, &params, scheduler) {
         Ok(result) => RpcResponse::ok(result),
-        Err(error) => RpcResponse::error(error.to_string()),
+        Err(error) => RpcResponse::error(error),
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dispatch shares one entry point for every action"
+)]
 fn dispatch(
     store: &mut Collection,
     action: &str,
     params: &Value,
+    scheduler: &dyn Scheduler,
 ) -> Result<Value, RpcError> {
     match action {
         "version" => Ok(json!(API_VERSION)),
@@ -162,7 +196,7 @@ fn dispatch(
             Ok(json!(store.find_cards(param_str(params, "query")?)?))
         }
         "cardsInfo" => cards_info(store, params),
-        "answerCards" => answer_cards(store, params),
+        "answerCards" => answer_cards(store, params, scheduler),
         "createDeck" => create_deck(store, params),
         "suspend" => {
             let suspend = params
@@ -176,7 +210,11 @@ fn dispatch(
             Ok(Value::Null)
         }
         "changeDeck" => change_deck(store, params),
-        _ => Err(format!("unsupported action: {action}").into()),
+        _ => Err(InterfaceError::new(
+            ErrorCode::Unsupported,
+            format!("unsupported action: {action}"),
+        )
+        .into()),
     }
 }
 
@@ -385,6 +423,7 @@ fn cards_info(store: &Collection, params: &Value) -> Result<Value, RpcError> {
 fn answer_cards(
     store: &mut Collection,
     params: &Value,
+    scheduler: &dyn Scheduler,
 ) -> Result<Value, RpcError> {
     let answers = member(params, "answers")?
         .as_array()
@@ -404,7 +443,7 @@ fn answer_cards(
             result.push(false);
             continue;
         }
-        answer_card(store, card_id, ease, now)?;
+        answer_card(store, card_id, ease, now, scheduler)?;
         result.push(true);
     }
     Ok(json!(result))
@@ -469,6 +508,9 @@ fn change_deck(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use ranki_core::Scheduler;
     use serde_json::Value;
     use serde_json::json;
     use tempfile::TempDir;
@@ -480,10 +522,16 @@ mod tests {
     use ranki_model::Store;
     use ranki_storage::Collection;
 
+    use super::RpcResponse;
+    use crate::error::ErrorCode;
     fn fixture() -> (TempDir, Collection) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("collection.anki2");
         (dir, Collection::create(&path).unwrap())
+    }
+
+    fn scheduler() -> Arc<dyn Scheduler> {
+        ranki_core::from_settings(&ranki_model::Settings::default())
     }
 
     #[expect(
@@ -495,7 +543,7 @@ mod tests {
             "action": action, "version": 6, "params": params,
         }))
         .unwrap();
-        let response = handle_body(store, &body);
+        let response = handle_body(store, &body, scheduler().as_ref());
         assert_eq!(response.error, None);
         response.result
     }
@@ -582,8 +630,13 @@ mod tests {
         let (_dir, mut store) = fixture();
         let mut payload = note("Default");
         payload["fields"]["Missing"] = json!("x");
-        let error = dispatch(&mut store, "addNote", &json!({"note": payload}))
-            .unwrap_err();
+        let error = dispatch(
+            &mut store,
+            "addNote",
+            &json!({"note": payload}),
+            scheduler().as_ref(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("unknown field"));
     }
 
@@ -600,7 +653,7 @@ mod tests {
                 .copied()
                 .unwrap()])
         );
-        assert!(id > 0);
+        assert!(id > 0, "id was {id}");
     }
 
     #[test]
@@ -643,6 +696,7 @@ mod tests {
             &mut store,
             "answerCards",
             &json!({"answers": [{"cardId": 1, "ease": 9}]}),
+            scheduler().as_ref(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("ease"));
@@ -694,10 +748,12 @@ mod tests {
         let response = handle_body(
             &mut store,
             br#"{"action":"nope","version":6,"params":{}}"#,
+            scheduler().as_ref(),
         );
         assert_eq!(response.result, Value::Null);
         assert_eq!(response.error.as_deref(), Some("unsupported action: nope"));
-        let response = handle_body(&mut store, b"not json");
+        let response =
+            handle_body(&mut store, b"not json", scheduler().as_ref());
         assert!(response.error.unwrap_or_default().contains("invalid JSON"));
     }
 
@@ -711,8 +767,30 @@ mod tests {
             card_id,
             Rating::Good,
             crate::now_secs().unwrap(),
+            scheduler().as_ref(),
         )
         .unwrap();
         assert_eq!(decision.card.id, card_id);
+    }
+
+    #[test]
+    fn transport_errors_keep_a_stable_code() {
+        let (_dir, mut store) = fixture();
+        let error =
+            dispatch(&mut store, "cardInfo", &json!({}), scheduler().as_ref())
+                .unwrap_err();
+        assert_eq!(error.0.code(), ErrorCode::Unsupported);
+
+        let response = RpcResponse::error(ranki_model::StoreError::NotFound(
+            "card".into(),
+        ));
+        assert_eq!(response.error_code, Some("not_found"));
+        let response =
+            RpcResponse::error(ranki_format::FormatError::new("bad"));
+        assert_eq!(response.error_code, Some("format"));
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["errorCode"],
+            json!("format")
+        );
     }
 }

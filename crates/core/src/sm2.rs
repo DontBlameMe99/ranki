@@ -5,8 +5,8 @@ use ranki_model::{
 use crate::Scheduler;
 use crate::shared::{
     ReviewContext, ReviewOutcome, StepConfig, as_f32, as_i32, due_from_days,
-    factor_or_default, finish, is_schedulable, positive_factor, step_outcome,
-    unchanged,
+    factor_or_default, finish, is_schedulable, positive_factor,
+    preview_interval, step_outcome, unchanged, unchanged_outcome,
 };
 
 const DEFAULT_MINIMUM_EASE: u32 = 1_300;
@@ -77,14 +77,14 @@ impl Sm2Scheduler {
         &self,
         ctx: &ReviewContext<'_>,
         prepared: Prepared,
-    ) -> ReviewDecision {
+    ) -> ReviewOutcome {
         let relearning = ctx.card.card_type == CardType::Relearning;
         let steps = if relearning {
             &self.preset.relearning_steps_minutes
         } else {
             &self.preset.learning_steps_minutes
         };
-        let outcome = step_outcome(
+        step_outcome(
             ctx,
             StepConfig {
                 steps,
@@ -93,15 +93,14 @@ impl Sm2Scheduler {
                 factor: prepared.factor,
                 data: prepared.data,
             },
-        );
-        finish(ctx, outcome)
+        )
     }
 
     fn schedule_review(
         &self,
         ctx: &ReviewContext<'_>,
         prepared: Prepared,
-    ) -> ReviewDecision {
+    ) -> ReviewOutcome {
         let steps = &self.preset.relearning_steps_minutes;
         if ctx.rating == Rating::Again && !steps.is_empty() {
             let mut outcome = step_outcome(
@@ -115,10 +114,10 @@ impl Sm2Scheduler {
                 },
             );
             outcome.lapses = 1;
-            return finish(ctx, outcome);
+            return outcome;
         }
         let interval = self.review_interval(ctx.card, ctx.rating);
-        let outcome = ReviewOutcome {
+        ReviewOutcome {
             card_type: CardType::Review,
             queue: CardQueue::Review,
             due: due_from_days(
@@ -137,8 +136,27 @@ impl Sm2Scheduler {
                 RevLogKind::Review
             },
             step_seconds: None,
+        }
+    }
+
+    fn plan(&self, ctx: &ReviewContext<'_>) -> ReviewOutcome {
+        if !is_schedulable(ctx.card) {
+            return unchanged_outcome(ctx);
+        }
+        let prepared = Prepared {
+            factor: adjusted_factor(
+                ctx.card.factor,
+                self.preset.minimum_ease,
+                ctx.rating,
+            ),
+            data: ctx.card.data.clone(),
         };
-        finish(ctx, outcome)
+        match ctx.card.card_type {
+            CardType::New | CardType::Learning | CardType::Relearning => {
+                self.schedule_steps(ctx, prepared)
+            }
+            CardType::Review => self.schedule_review(ctx, prepared),
+        }
     }
 }
 
@@ -165,20 +183,23 @@ impl Scheduler for Sm2Scheduler {
         if !is_schedulable(card) {
             return unchanged(&ctx);
         }
-        let prepared = Prepared {
-            factor: adjusted_factor(
-                card.factor,
-                self.preset.minimum_ease,
-                rating,
-            ),
-            data: card.data.clone(),
+        finish(&ctx, self.plan(&ctx))
+    }
+
+    fn preview(
+        &self,
+        card: &Card,
+        rating: Rating,
+        now_secs: i64,
+        collection_start_secs: i64,
+    ) -> i32 {
+        let ctx = ReviewContext {
+            card,
+            rating,
+            now_secs,
+            collection_start_secs,
         };
-        match card.card_type {
-            CardType::New | CardType::Learning | CardType::Relearning => {
-                self.schedule_steps(&ctx, prepared)
-            }
-            CardType::Review => self.schedule_review(&ctx, prepared),
-        }
+        preview_interval(&self.plan(&ctx))
     }
 
     fn name(&self) -> &'static str {

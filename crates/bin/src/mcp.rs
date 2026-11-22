@@ -10,15 +10,14 @@ use std::fs;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 
-use ranki_core::FsrsScheduler;
 use ranki_core::Scheduler;
 use ranki_model::Id;
 use ranki_model::Rating;
 use ranki_model::Store;
-use ranki_model::StoreError;
 use ranki_storage::Collection;
 use rmcp::ErrorData;
 use rmcp::Json;
@@ -39,13 +38,20 @@ use tokio::runtime::Builder;
 
 use crate::CliError;
 use crate::CliResult;
+use crate::error::{ErrorCode, InterfaceError};
 
 const MAX_DUE_LIMIT: usize = 200;
 
 /// Protocol errors stay protocol errors; operational failures become tool errors.
 enum ToolError {
     Protocol(ErrorData),
-    Call(String),
+    Call(InterfaceError),
+}
+
+impl ToolError {
+    fn call(message: impl Into<String>) -> Self {
+        Self::Call(InterfaceError::message(message))
+    }
 }
 
 impl From<ErrorData> for ToolError {
@@ -54,21 +60,21 @@ impl From<ErrorData> for ToolError {
     }
 }
 
-impl From<StoreError> for ToolError {
-    fn from(error: StoreError) -> Self {
-        Self::Call(error.to_string())
+impl From<ranki_model::StoreError> for ToolError {
+    fn from(error: ranki_model::StoreError) -> Self {
+        Self::Call(error.into())
     }
 }
 
 impl From<CliError> for ToolError {
     fn from(error: CliError) -> Self {
-        Self::Call(error.to_string())
+        Self::Call(error.into())
     }
 }
 
 impl From<ranki_format::FormatError> for ToolError {
     fn from(error: ranki_format::FormatError) -> Self {
-        Self::Call(error.to_string())
+        Self::Call(error.into())
     }
 }
 
@@ -76,11 +82,20 @@ impl IntoCallToolResult for ToolError {
     fn into_call_tool_result(self) -> Result<CallToolResponse, ErrorData> {
         match self {
             Self::Protocol(error) => Err(error),
-            Self::Call(message) => {
-                Ok(CallToolResult::error(vec![ContentBlock::text(message)])
-                    .into())
+            Self::Call(error) => {
+                let (code, message) = error.into_parts();
+                let text = tool_message(code, message);
+                Ok(CallToolResult::error(vec![ContentBlock::text(text)]).into())
             }
         }
+    }
+}
+
+fn tool_message(code: ErrorCode, message: String) -> String {
+    if code == ErrorCode::Message {
+        message
+    } else {
+        format!("[{}] {message}", code.as_str())
     }
 }
 
@@ -91,9 +106,7 @@ fn invalid(message: impl Into<String>) -> ErrorData {
 }
 
 fn confirm_failure() -> ToolError {
-    ToolError::Call(String::from(
-        "this tool requires confirm: true to make changes",
-    ))
+    ToolError::call("this tool requires confirm: true to make changes")
 }
 
 fn validate_limit(limit: usize) -> Result<usize, ErrorData> {
@@ -490,41 +503,47 @@ struct RankiMcp {
     collection: Mutex<Collection>,
     collection_path: PathBuf,
     root: PathBuf,
+    scheduler: Arc<dyn Scheduler>,
 }
 
 impl RankiMcp {
-    fn new(collection: Collection, root: PathBuf) -> Self {
+    fn new(
+        collection: Collection,
+        root: PathBuf,
+        scheduler: Arc<dyn Scheduler>,
+    ) -> Self {
         let collection_path = collection.path().to_path_buf();
         Self {
             collection: Mutex::new(collection),
             collection_path,
             root,
+            scheduler,
         }
     }
 
     fn store(&self) -> Result<MutexGuard<'_, Collection>, ToolError> {
-        self.collection.lock().map_err(|_| {
-            ToolError::Call(String::from("collection lock poisoned"))
-        })
+        self.collection
+            .lock()
+            .map_err(|_| ToolError::call("collection lock poisoned"))
     }
 
     fn file(&self, raw: &str) -> Result<PathBuf, ToolError> {
         let relative = validate_path(raw)?;
         let candidate = self.root.join(relative);
-        let parent = candidate.parent().ok_or_else(|| {
-            ToolError::Call(String::from("path has no parent directory"))
-        })?;
+        let parent = candidate
+            .parent()
+            .ok_or_else(|| ToolError::call("path has no parent directory"))?;
         let canonical_parent = parent.canonicalize().map_err(|error| {
-            ToolError::Call(format!("cannot resolve path: {error}"))
+            ToolError::call(format!("cannot resolve path: {error}"))
         })?;
-        let name = candidate.file_name().ok_or_else(|| {
-            ToolError::Call(String::from("path must name a file"))
-        })?;
+        let name = candidate
+            .file_name()
+            .ok_or_else(|| ToolError::call("path must name a file"))?;
         let resolved = canonical_parent.join(name);
         if !resolved.starts_with(&self.root) {
-            return Err(ToolError::Call(String::from(
+            return Err(ToolError::call(
                 "path is outside the collection directory",
-            )));
+            ));
         }
         Ok(resolved)
     }
@@ -675,16 +694,13 @@ impl RankiMcp {
         }
         let now = crate::now_secs()?;
         let mut store = self.store()?;
-        let card = store.card(input.card_id)?.ok_or_else(|| {
-            ToolError::Call(format!("card not found: {}", input.card_id))
-        })?;
-        let collection_start_secs = store.collection_created()?;
-        let mut decision = FsrsScheduler::default().schedule(
-            &card,
+        let mut decision = crate::answer_card(
+            &mut *store,
+            input.card_id,
             Rating::from(input.rating),
             now,
-            collection_start_secs,
-        );
+            self.scheduler.as_ref(),
+        )?;
         decision.revlog.time_ms =
             u32::try_from(input.elapsed_ms).unwrap_or(u32::MAX);
         store.apply_review(&decision)?;
@@ -738,7 +754,7 @@ impl RankiMcp {
         }
         let path = self.file(&input.path)?;
         if !path.is_file() {
-            return Err(ToolError::Call(format!(
+            return Err(ToolError::call(format!(
                 "package not found: {}",
                 input.path
             )));
@@ -773,7 +789,7 @@ impl RankiMcp {
         }
         let path = self.file(&input.path)?;
         if path.exists() {
-            return Err(ToolError::Call(format!(
+            return Err(ToolError::call(format!(
                 "export target already exists: {}",
                 input.path
             )));
@@ -788,7 +804,7 @@ impl RankiMcp {
             &path,
         )?;
         let bytes = fs::metadata(&path)
-            .map_err(|error| ToolError::Call(error.to_string()))?
+            .map_err(|error| ToolError::call(error.to_string()))?
             .len();
         Ok(Json(ExportResult {
             path: input.path,
@@ -803,7 +819,8 @@ pub fn collection_path(argument: Option<&Path>) -> CliResult<PathBuf> {
         .or_else(|| env::var_os("RANKI_COLLECTION").map(PathBuf::from))
         .ok_or_else(|| {
             CliError::Message(
-                "mcp requires --collection PATH or RANKI_COLLECTION".into(),
+                "mcp requires --collection PATH, RANKI_COLLECTION, or [general].collection"
+                    .into(),
             )
         })?;
     let path = if requested.is_absolute() {
@@ -819,7 +836,10 @@ pub fn collection_path(argument: Option<&Path>) -> CliResult<PathBuf> {
     })
 }
 
-pub fn serve(argument: Option<&Path>) -> CliResult<()> {
+pub fn serve(
+    argument: Option<&Path>,
+    scheduler: Arc<dyn Scheduler>,
+) -> CliResult<()> {
     let path = collection_path(argument)?;
     let parent_dir = path.parent().ok_or_else(|| {
         CliError::Message("collection has no parent directory".into())
@@ -831,7 +851,7 @@ pub fn serve(argument: Option<&Path>) -> CliResult<()> {
         .map_err(|error| CliError::Message(error.to_string()))?;
     runtime.block_on(async move {
         let collection = Collection::open(&path)?;
-        let server = RankiMcp::new(collection, root_dir);
+        let server = RankiMcp::new(collection, root_dir, scheduler);
         let service = server.serve(stdio()).await.map_err(|error| {
             CliError::Message(format!("mcp server: {error}"))
         })?;
@@ -854,9 +874,22 @@ mod tests {
     use super::FindCardsInput;
     use super::ListDecksInput;
     use super::PackageInput;
+    use super::ToolError;
     use super::validate_limit;
     use super::validate_path;
     use super::validate_query;
+    use crate::error::ErrorCode;
+
+    #[test]
+    fn tool_errors_keep_the_source_error_code() {
+        let error = ToolError::from(ranki_model::StoreError::NotFound(
+            String::from("card"),
+        ));
+        let ToolError::Call(mapped) = error else {
+            panic!("store failure must be a tool call error");
+        };
+        assert_eq!(mapped.code(), ErrorCode::NotFound);
+    }
 
     #[test]
     fn input_schemas_close_unknown_fields() {

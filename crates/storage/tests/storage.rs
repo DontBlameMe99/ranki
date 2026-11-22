@@ -571,3 +571,30 @@ fn reads_a_real_anki_collection_without_touching_the_original() {
         original_hash
     );
 }
+
+#[test]
+fn ids_are_unique_across_storage_core_and_manual_logs() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let note_ids = store
+        .add_note(&note(&["front", "back"], &[]))
+        .expect("add note");
+    let card_id = note_ids.last().copied().expect("card id");
+    let card = store.card(card_id).expect("card").expect("card exists");
+    let start = store.collection_created().expect("collection start");
+    let decision = FsrsScheduler::default().schedule(
+        &card,
+        Rating::Good,
+        now_secs(),
+        start,
+    );
+    let manual_id = ranki_model::next_id(now_secs().saturating_mul(1_000));
+
+    let mut ids = note_ids;
+    ids.push(decision.revlog.id);
+    ids.push(manual_id);
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), ids.len());
+}

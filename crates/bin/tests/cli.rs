@@ -135,3 +135,69 @@ fn invalid_rating_fails_without_creating_a_collection() {
     assert!(!output.status.success());
     assert!(!Path::new(&path).exists());
 }
+
+#[test]
+fn collection_works_without_home_when_supplied_by_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("env.anki2");
+    let output = Command::new(env!("CARGO_BIN_EXE_ranki"))
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env("RANKI_COLLECTION", path.to_str().unwrap())
+        .args(["decks"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(path.is_file());
+}
+
+#[test]
+fn collection_works_without_home_when_supplied_by_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_home = dir.path().join("config");
+    fs::create_dir_all(config_home.join("ranki")).unwrap();
+    let path = dir.path().join("configured.anki2");
+    fs::write(
+        config_home.join("ranki/config.toml"),
+        format!("[general]\ncollection = '{}'\n", path.display()),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ranki"))
+        .env_remove("HOME")
+        .env_remove("RANKI_COLLECTION")
+        .env("XDG_CONFIG_HOME", config_home.to_str().unwrap())
+        .args(["decks"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(path.is_file());
+}
+
+#[test]
+fn unknown_config_keys_are_reported_by_full_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_home = dir.path().join("config");
+    fs::create_dir_all(config_home.join("ranki")).unwrap();
+    fs::write(
+        config_home.join("ranki/config.toml"),
+        "[ui]\nthem = 'dark'\n",
+    )
+    .unwrap();
+    let (_path, collection) = collection_arg(&dir, "collection.anki2");
+    let output = Command::new(env!("CARGO_BIN_EXE_ranki"))
+        .env("XDG_CONFIG_HOME", config_home.to_str().unwrap())
+        .args(["--collection", &collection, "decks"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ui.them"), "{stderr}");
+}

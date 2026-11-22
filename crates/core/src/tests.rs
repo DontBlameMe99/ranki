@@ -387,3 +387,59 @@ fn fsrs_same_day_good_and_easy_do_not_shrink() {
         assert!(same_day.card.interval >= later.card.interval);
     }
 }
+
+#[test]
+fn previews_are_pure_and_match_scheduling() {
+    let fsrs = FsrsScheduler::new(fsrs_preset(false, 0.9));
+    let sm2 = Sm2Scheduler::default();
+    for (scheduler, card) in [
+        (&fsrs as &dyn Scheduler, fsrs_card()),
+        (&sm2 as &dyn Scheduler, new_card()),
+    ] {
+        for rating in [Rating::Again, Rating::Hard, Rating::Good, Rating::Easy]
+        {
+            let preview =
+                scheduler.preview(&card, rating, NOW, COLLECTION_START);
+            assert_eq!(
+                preview,
+                scheduler.preview(&card, rating, NOW, COLLECTION_START)
+            );
+            let decision =
+                scheduler.schedule(&card, rating, NOW, COLLECTION_START);
+            assert_eq!(decision.revlog.interval, preview);
+        }
+    }
+}
+
+#[test]
+fn scheduler_is_built_from_settings() {
+    let settings = ranki_model::Settings {
+        scheduler: ranki_model::SchedulerKind::Sm2,
+        ..ranki_model::Settings::default()
+    };
+    assert_eq!(super::from_settings(&settings).name(), "sm2");
+
+    let card = fsrs_card();
+    let standard = ranki_model::Settings {
+        scheduler: ranki_model::SchedulerKind::Fsrs,
+        desired_retention: 0.9,
+        ..ranki_model::Settings::default()
+    };
+    let easy = ranki_model::Settings {
+        desired_retention: 0.8,
+        ..standard.clone()
+    };
+    let standard_interval = super::from_settings(&standard).preview(
+        &card,
+        Rating::Good,
+        NOW,
+        COLLECTION_START,
+    );
+    let easy_interval = super::from_settings(&easy).preview(
+        &card,
+        Rating::Good,
+        NOW,
+        COLLECTION_START,
+    );
+    assert_ne!(standard_interval, easy_interval);
+}
