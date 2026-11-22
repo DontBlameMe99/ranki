@@ -915,7 +915,11 @@ fn insert_cards(
         // Review dues stay day numbers even while suspended or buried.
         let day_delta = state.source_day_delta;
         let due = shifted_due(row.due, row, day_delta)?;
-        let original_due = shifted_due(row.original_due, row, day_delta)?;
+        let original_due = if row.original_due == 0 {
+            0
+        } else {
+            shifted_due(row.original_due, row, day_delta)?
+        };
         transaction
             .execute(
                 "INSERT INTO main.cards (id, nid, did, ord, mod, usn, type, queue, due, ivl,

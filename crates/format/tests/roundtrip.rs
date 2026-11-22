@@ -412,6 +412,7 @@ fn write_review_shift_source(path: &Path, crt: i64, due: i64) {
         ("odue-review", "odue\u{001f}answer"),
         ("new-card", "new\u{001f}answer"),
         ("learning-card", "learning\u{001f}answer"),
+        ("no-original-due", "no-original\u{001f}answer"),
     ];
     let seed = Seed {
         notes: notes
@@ -424,7 +425,7 @@ fn write_review_shift_source(path: &Path, crt: i64, due: i64) {
                 fields: (*fields).to_owned(),
             })
             .collect(),
-        cards: (1_i64..=4)
+        cards: (1_i64..=5)
             .map(|id| TestCard {
                 id: id.saturating_add(99),
                 note_id: id,
@@ -461,6 +462,12 @@ fn write_review_shift_source(path: &Path, crt: i64, due: i64) {
         .execute(
             "UPDATE cards SET type = 1, queue = 1, due = 999999, odue = 888888 WHERE id = 103",
             [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE cards SET type = 2, queue = 2, due = ?1, odue = 0 WHERE id = 104",
+            [due],
         )
         .unwrap();
 }
@@ -516,6 +523,7 @@ fn existing_import_shifts_suspended_and_original_due_for_reviews() {
             (101, 2, 2, 5, 10),
             (102, 0, 0, 42, 99),
             (103, 1, 1, 999_999, 888_888),
+            (104, 2, 2, 5, 0),
         ]
     );
 }
