@@ -801,13 +801,16 @@ impl RankiMcp {
         }
         let now = crate::now_secs()?;
         let mut store = self.store()?;
-        let mut decision = crate::answer_card(
-            &mut *store,
-            input.card_id,
+        let card = store.card(input.card_id)?.ok_or_else(|| {
+            ToolError::call(format!("card not found: {}", input.card_id))
+        })?;
+        let collection_start_secs = store.collection_created()?;
+        let mut decision = self.scheduler.schedule(
+            &card,
             Rating::from(input.rating),
             now,
-            self.scheduler.as_ref(),
-        )?;
+            collection_start_secs,
+        );
         decision.revlog.time_ms =
             u32::try_from(input.elapsed_ms).unwrap_or(u32::MAX);
         store.apply_review(&decision)?;
@@ -971,6 +974,9 @@ pub fn serve(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use super::IntoCallToolResult;
     use rmcp::schemars::schema_for;
     use serde_json::json;
     use std::path::PathBuf;
@@ -980,11 +986,14 @@ mod tests {
     use super::CreateDeckInput;
     use super::DueCardsInput;
     use super::FindCardsInput;
+    use super::GetCardInput;
     use super::ListDecksInput;
     use super::PackageInput;
     use super::RankiMcp;
+    use super::RatingInput;
     use super::RemoveDeckInput;
     use super::RenameDeckInput;
+    use super::StatsInput;
     use super::ToolError;
     use super::ToolOutcome;
     use super::validate_deck_name;
@@ -1178,5 +1187,224 @@ mod tests {
         assert_eq!(removed.id, created.id);
         let decks = ok(server.list_decks(Parameters(ListDecksInput {}))).decks;
         assert!(!decks.iter().any(|deck| deck.id == created.id));
+    }
+
+    #[test]
+    fn note_tools_create_read_answer_and_report_cards() {
+        let (_directory, server) = mcp_server();
+        let added = ok(server.add_note(Parameters(AddNoteInput {
+            model_id: 1,
+            deck_id: 1,
+            fields: vec![String::from("Front"), String::from("Back")],
+            tags: vec![String::from("reviewed")],
+            confirm: true,
+        })));
+        assert_eq!(added.card_ids.len(), 1);
+        let card_id = added.card_ids[0];
+
+        let found = ok(server.find_cards(Parameters(FindCardsInput {
+            query: String::from("Front"),
+        })));
+        assert_eq!(found.card_ids, vec![card_id]);
+
+        let due = ok(server.due_cards(Parameters(DueCardsInput {
+            deck_id: None,
+            limit: 20,
+            now_secs: Some(1_000_000),
+        })));
+        assert_eq!(due.now_secs, 1_000_000);
+        assert_eq!(due.cards[0].id, card_id);
+
+        let read =
+            ok(server.get_card(Parameters(GetCardInput { id: card_id })));
+        let note = read.note.unwrap();
+        assert_eq!(note.fields, vec!["Front", "Back"]);
+        assert_eq!(note.tags, vec!["reviewed"]);
+        assert_eq!(read.card.unwrap().id, card_id);
+
+        let reviewed = ok(server.answer_card(Parameters(AnswerCardInput {
+            card_id,
+            rating: RatingInput::Good,
+            elapsed_ms: 1234,
+            confirm: true,
+        })));
+        assert_eq!(reviewed.card.id, card_id);
+        assert_eq!(
+            serde_json::to_value(reviewed.revlog.ease).unwrap(),
+            json!("good")
+        );
+        assert_eq!(reviewed.revlog.time_ms, 1234);
+
+        let stats = ok(server.stats(Parameters(StatsInput {
+            deck_id: None,
+            now_secs: Some(1_000_000),
+        })));
+        assert_eq!(stats.stats.total_cards, 1);
+        assert_eq!(stats.stats.new_cards, 0);
+    }
+
+    #[test]
+    fn write_tools_reject_invalid_arguments_without_writing() {
+        let (_directory, server) = mcp_server();
+        let refused = server
+            .add_note(Parameters(AddNoteInput {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![String::from("Front")],
+                tags: vec![],
+                confirm: false,
+            }))
+            .err()
+            .unwrap();
+        let ToolError::Call(error) = refused else {
+            panic!("unconfirmed writes must be tool errors");
+        };
+        assert_eq!(error.code(), ErrorCode::Message);
+
+        assert!(
+            server
+                .add_note(Parameters(AddNoteInput {
+                    model_id: 1,
+                    deck_id: 1,
+                    fields: vec![String::new()],
+                    tags: vec![],
+                    confirm: true,
+                }))
+                .is_err()
+        );
+        assert!(
+            server
+                .find_cards(Parameters(FindCardsInput {
+                    query: String::new(),
+                }))
+                .is_err()
+        );
+        assert!(
+            server
+                .due_cards(Parameters(DueCardsInput {
+                    deck_id: None,
+                    limit: 0,
+                    now_secs: None,
+                }))
+                .is_err()
+        );
+
+        let missing = server
+            .answer_card(Parameters(AnswerCardInput {
+                card_id: 999,
+                rating: RatingInput::Good,
+                elapsed_ms: 0,
+                confirm: true,
+            }))
+            .err()
+            .unwrap();
+        let ToolError::Call(error) = missing else {
+            panic!("missing cards must be tool errors");
+        };
+        assert!(error.to_string().contains("card not found"));
+    }
+
+    #[test]
+    fn package_tools_export_and_import_inside_the_collection_directory() {
+        let (directory, server) = mcp_server();
+        ok(server.add_note(Parameters(AddNoteInput {
+            model_id: 1,
+            deck_id: 1,
+            fields: vec![String::from("Front"), String::from("Back")],
+            tags: vec![],
+            confirm: true,
+        })));
+        let export = PackageInput {
+            path: String::from("backup.apkg"),
+            confirm: true,
+        };
+        let exported = ok(server.export_apkg(Parameters(PackageInput {
+            path: export.path.clone(),
+            confirm: true,
+        })));
+        assert!(exported.bytes > 0);
+        assert!(directory.path().join("backup.apkg").is_file());
+        assert!(server.export_apkg(Parameters(export)).err().is_some());
+
+        let path = directory.path().join("other.anki2");
+        let collection = Collection::create(&path).unwrap();
+        let scheduler =
+            ranki_core::from_settings(&ranki_model::Settings::default());
+        let other = RankiMcp::new(
+            collection,
+            directory.path().to_path_buf(),
+            scheduler,
+        );
+        let imported = ok(other.import_apkg(Parameters(PackageInput {
+            path: String::from("backup.apkg"),
+            confirm: true,
+        })));
+        assert_eq!(imported.notes_added, 1);
+        assert_eq!(imported.cards_added, 1);
+        let found = ok(other.find_cards(Parameters(FindCardsInput {
+            query: String::from("Front"),
+        })));
+        assert_eq!(found.card_ids.len(), 1);
+
+        let missing = other
+            .import_apkg(Parameters(PackageInput {
+                path: String::from("missing.apkg"),
+                confirm: true,
+            }))
+            .err()
+            .unwrap();
+        let ToolError::Call(error) = missing else {
+            panic!("missing packages must be tool errors");
+        };
+        assert!(error.to_string().contains("package not found"));
+    }
+    #[test]
+    fn protocol_errors_and_call_errors_stay_distinct() {
+        let protocol = ToolError::from(super::invalid("bad input"));
+        assert!(protocol.into_call_tool_result().is_err());
+
+        let call = ToolError::from(crate::CliError::Store(
+            ranki_model::StoreError::NotFound(String::from("card")),
+        ));
+        let response = call.into_call_tool_result().unwrap();
+        let super::CallToolResponse::Complete(result) = response else {
+            panic!("call errors must be complete tool responses");
+        };
+        let response = serde_json::to_value(result).unwrap();
+        assert_eq!(response["isError"], json!(true));
+        assert!(
+            response["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("[not_found]")
+        );
+
+        let format = ToolError::from(ranki_format::FormatError::new("bad"));
+        let ToolError::Call(mapped) = format else {
+            panic!("format failures must be tool errors");
+        };
+        assert_eq!(mapped.code(), ErrorCode::Format);
+
+        let plain = ToolError::call("plain message");
+        let response = plain.into_call_tool_result().unwrap();
+        let super::CallToolResponse::Complete(result) = response else {
+            panic!("plain errors must be complete tool responses");
+        };
+        let response = serde_json::to_value(result).unwrap();
+        assert_eq!(response["content"][0]["text"], json!("plain message"));
+    }
+
+    #[test]
+    fn collection_path_resolves_existing_files_and_reports_missing_ones() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("collection.anki2");
+        fs::write(&path, b"").unwrap();
+        assert_eq!(
+            super::collection_path(Some(&path)).unwrap(),
+            fs::canonicalize(&path).unwrap()
+        );
+
+        let missing = directory.path().join("missing.anki2");
+        assert!(super::collection_path(Some(&missing)).is_err());
     }
 }

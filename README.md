@@ -156,3 +156,10 @@ is not implemented, and AnkiConnect support is a subset of the upstream API.
 ```bash
 nix build .#checks.x86_64-linux.nextest --print-build-logs
 ```
+
+Coverage must stay at or above 80%. The floor is set in `.tarpaulin.toml` and
+applies to local runs and CI:
+
+```bash
+nix build .#checks.x86_64-linux.tarpaulin --print-build-logs
+```

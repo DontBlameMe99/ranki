@@ -174,7 +174,7 @@
             // {
               inherit src cargoArtifacts;
               pname = "${binName}-tarpaulin";
-              buildPhaseCargoCommand = "cargo tarpaulin --fail-under 80";
+              buildPhaseCargoCommand = "cargo tarpaulin";
               installPhase = "mkdir -p $out";
               nativeBuildInputs = [pkgs.cargo-tarpaulin];
             }

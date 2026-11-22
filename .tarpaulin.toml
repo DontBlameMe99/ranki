@@ -1,4 +1,5 @@
 [test_config]
+fail-under = 80.0
 exclude-files = [
   "crates/bin/src/main.rs",
   "crates/ui/src/app.rs",
