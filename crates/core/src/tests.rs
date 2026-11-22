@@ -1,6 +1,11 @@
 use ranki_model::{Card, CardQueue, CardType, Rating, RevLogKind};
 
-use super::{FsrsPreset, FsrsScheduler, Scheduler, Sm2Preset, Sm2Scheduler};
+use super::{
+    ANKI_DEFAULT_PARAMS, DEFAULT_DECAY, FsrsParams, FsrsPreset, FsrsScheduler,
+    MAX_DESIRED_RETENTION, MIN_DESIRED_RETENTION, Scheduler, Sm2Preset,
+    Sm2Scheduler, clamp_desired_retention, interval_days_for_stability,
+    raw_interval_days_for_stability,
+};
 
 const NOW: i64 = 1_700_000_000;
 
@@ -373,7 +378,10 @@ fn revlog_ids_are_unique_within_one_second() {
 
 #[test]
 fn fsrs_same_day_good_and_easy_do_not_shrink() {
-    let scheduler = FsrsScheduler::new(fsrs_preset(false, 0.9));
+    let params =
+        FsrsParams::from_fsrs5(&LEGACY_FSRS5_WEIGHTS).unwrap_or_default();
+    let scheduler =
+        FsrsScheduler::new(fsrs_preset(false, 0.9)).with_params(params);
     let card = fsrs_card();
     for rating in [Rating::Good, Rating::Easy] {
         let same_day = scheduler.schedule(&card, rating, NOW, COLLECTION_START);
@@ -442,4 +450,176 @@ fn scheduler_is_built_from_settings() {
         COLLECTION_START,
     );
     assert_ne!(standard_interval, easy_interval);
+}
+
+const LEGACY_FSRS5_WEIGHTS: [f32; 19] = [
+    0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046, 1.54575,
+    0.1192, 1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315, 2.9898, 0.51655,
+    0.6621,
+];
+
+#[test]
+fn interval_matches_anki_fsrs5_reference_vectors() {
+    for (retention, expected_raw, expected_days) in
+        [(0.9, 10.0, 10), (0.8, 23.9803, 24), (0.95, 4.6056, 5)]
+    {
+        let raw =
+            raw_interval_days_for_stability(10.0, retention, DEFAULT_DECAY);
+        assert!((f64::from(raw) - expected_raw).abs() < 0.001);
+        assert_eq!(
+            interval_days_for_stability(10.0, retention, DEFAULT_DECAY, 36_500),
+            expected_days
+        );
+    }
+}
+
+#[test]
+fn interval_matches_anki_fsrs6_reference_vectors() {
+    let decay = ANKI_DEFAULT_PARAMS[20];
+    assert!(
+        (raw_interval_days_for_stability(10.0, 0.9, decay) - 10.0).abs()
+            < 0.001
+    );
+    assert!(
+        (raw_interval_days_for_stability(10.0, 0.95, decay) - 4.0256).abs()
+            < 0.001
+    );
+    assert_eq!(interval_days_for_stability(10.0, 0.95, decay, 36_500), 4);
+}
+
+#[test]
+fn interval_matches_fsrs_rs_test_next_interval() {
+    let decay = ANKI_DEFAULT_PARAMS[20];
+    assert_eq!(interval_days_for_stability(1.0, 0.8, decay, 36_500), 3);
+    assert_eq!(interval_days_for_stability(1.0, 0.9, decay, 36_500), 1);
+}
+
+#[test]
+fn interval_is_bounded_and_handles_extreme_inputs() {
+    assert_eq!(interval_days_for_stability(1e6, 0.7, 0.1542, 7), 7);
+    assert_eq!(interval_days_for_stability(10.0, 0.9, 0.1542, i32::MIN), 1);
+    assert_eq!(
+        interval_days_for_stability(f32::NAN, 0.9, 0.1542, 36_500),
+        1
+    );
+    assert_eq!(interval_days_for_stability(10.0, 0.9, f32::NAN, 36_500), 10);
+}
+
+#[test]
+fn fsrs_params_defaults_match_anki() {
+    let params = FsrsParams::default();
+    assert_eq!(params.weights(), &ANKI_DEFAULT_PARAMS);
+    assert_eq!(params.decay(), 0.1542);
+}
+
+#[test]
+fn fsrs_params_from_fsrs45_matches_fsrs_rs_conversion() {
+    let weights = [
+        0.4, 0.6, 2.4, 5.8, 4.93, 0.94, 0.86, 0.01, 1.49, 0.14, 0.94, 2.18,
+        0.05, 0.34, 1.26, 0.29, 2.61,
+    ];
+    let expected = [
+        0.4,
+        0.6,
+        2.4,
+        5.8,
+        6.81,
+        0.446_750_13,
+        1.36,
+        0.01,
+        1.49,
+        0.14,
+        0.94,
+        2.18,
+        0.05,
+        0.34,
+        1.26,
+        0.29,
+        2.61,
+        0.0,
+        0.0,
+        0.0,
+        0.5,
+    ];
+    let params = FsrsParams::from_fsrs45(&weights).unwrap_or_default();
+    for (index, expected_weight) in expected.iter().enumerate() {
+        assert!(
+            (params.weights()[index] - expected_weight).abs() < 1e-5,
+            "weight {index} differs"
+        );
+    }
+    assert_eq!(params.decay(), 0.5);
+}
+
+#[test]
+fn fsrs_params_from_fsrs5_appends_short_term_and_decay() {
+    let params =
+        FsrsParams::from_fsrs5(&LEGACY_FSRS5_WEIGHTS).unwrap_or_default();
+    assert_eq!(&params.weights()[..19], &LEGACY_FSRS5_WEIGHTS);
+    assert_eq!(params.weights()[19], 0.0);
+    assert_eq!(params.decay(), 0.5);
+}
+
+#[test]
+fn fsrs_params_from_fsrs6_uses_weights_directly() {
+    let params =
+        FsrsParams::from_slice(&ANKI_DEFAULT_PARAMS).unwrap_or_default();
+    assert_eq!(params, FsrsParams::default());
+    assert_eq!(params.decay(), ANKI_DEFAULT_PARAMS[20]);
+}
+
+#[test]
+fn fsrs_params_rejects_invalid_weights() {
+    assert_eq!(FsrsParams::from_slice(&[]), Some(FsrsParams::default()));
+    assert!(FsrsParams::from_slice(&[1.0]).is_none());
+    let mut zero_decay = ANKI_DEFAULT_PARAMS;
+    zero_decay[20] = 0.0;
+    assert!(FsrsParams::from_fsrs6(&zero_decay).is_none());
+    let mut non_finite = ANKI_DEFAULT_PARAMS;
+    non_finite[3] = f32::NAN;
+    assert!(FsrsParams::from_fsrs6(&non_finite).is_none());
+}
+
+#[test]
+fn desired_retention_is_clamped_to_anki_range() {
+    assert_eq!(clamp_desired_retention(0.5), MIN_DESIRED_RETENTION);
+    assert_eq!(clamp_desired_retention(0.999), MAX_DESIRED_RETENTION);
+    assert_eq!(clamp_desired_retention(f32::NAN), 0.9);
+    assert_eq!(clamp_desired_retention(0.85), 0.85);
+    let low = FsrsScheduler::new(fsrs_preset(false, 0.1));
+    assert_eq!(low.preset().desired_retention, MIN_DESIRED_RETENTION);
+    let high = FsrsScheduler::new(fsrs_preset(false, 10.0));
+    assert_eq!(high.preset().desired_retention, MAX_DESIRED_RETENTION);
+}
+
+#[test]
+fn desired_retention_changes_intervals_in_both_directions() {
+    let low = interval_days_for_stability(30.0, 0.7, 0.1542, 36_500);
+    let middle = interval_days_for_stability(30.0, 0.9, 0.1542, 36_500);
+    let high = interval_days_for_stability(30.0, 0.99, 0.1542, 36_500);
+    assert!(low > middle && middle > high);
+}
+
+#[test]
+fn scheduler_applies_parameter_decay_to_intervals() {
+    let legacy =
+        FsrsParams::from_fsrs5(&LEGACY_FSRS5_WEIGHTS).unwrap_or_default();
+    let anki = FsrsScheduler::new(fsrs_preset(false, 0.95));
+    let old = anki.clone().with_params(legacy);
+    let card = fsrs_card();
+    let anki_interval =
+        anki.preview(&card, Rating::Good, NOW, COLLECTION_START);
+    let old_interval = old.preview(&card, Rating::Good, NOW, COLLECTION_START);
+    assert_ne!(anki_interval, old_interval);
+}
+
+#[test]
+fn scheduler_exposes_params_without_changing_its_preset() {
+    let mut scheduler = FsrsScheduler::default();
+    assert_eq!(scheduler.params(), &FsrsParams::default());
+    let legacy =
+        FsrsParams::from_fsrs5(&LEGACY_FSRS5_WEIGHTS).unwrap_or_default();
+    scheduler.set_params(legacy.clone());
+    assert_eq!(scheduler.params(), &legacy);
+    assert_eq!(scheduler.preset(), &FsrsPreset::default());
 }
