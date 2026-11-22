@@ -8,9 +8,13 @@ license.workspace = true
 [dependencies]
 ranki-model.workspace = true
 ranki-storage.workspace = true
+rusqlite = { workspace = true, features = ["backup"] }
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
 zip.workspace = true
+zstd = "0.13"
 
 [dev-dependencies]
 tempfile.workspace = true
