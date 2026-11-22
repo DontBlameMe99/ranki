@@ -285,6 +285,13 @@ fn write_review_source(path: &Path, crt: i64, due: i64) {
         .unwrap();
 }
 
+fn set_collection_crt(path: &Path, crt: i64) {
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute("UPDATE col SET crt = ?1 WHERE id = 1", [crt])
+        .unwrap();
+}
+
 #[test]
 fn roundtrip_notes_cards_and_review_log() {
     let fixture = Fixture::new();
@@ -362,6 +369,155 @@ fn existing_import_shifts_review_due_to_destination_scale() {
     assert_eq!(card.due, 5);
     let due = store.due_cards(None, 10, destination_crt).unwrap();
     assert_eq!(due.as_slice(), &[]);
+}
+
+#[test]
+fn existing_import_uses_day_indices_when_crt_times_differ() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("existing.anki2");
+    let created = AnkiCollection::create(&destination).unwrap();
+    drop(created);
+
+    let now = unix_seconds();
+    let half_day = DAY_SECS.saturating_div(2);
+    let destination_crt = now.saturating_sub(half_day);
+    let source_crt = now
+        .saturating_sub(DAY_SECS.saturating_mul(20))
+        .saturating_sub(half_day.saturating_add(DAY_SECS.saturating_div(4)));
+    set_collection_crt(&destination, destination_crt);
+
+    let source = dir.path().join("source.anki2");
+    write_review_source(&source, source_crt, 20);
+
+    let package = dir.path().join("review.apkg");
+    export_apkg(&source, &dir.path().join("media"), &package).unwrap();
+    import_apkg(&package, &destination, &dir.path().join("shifted-media"))
+        .unwrap();
+
+    let connection = Connection::open(&destination).unwrap();
+    let due: i64 = connection
+        .query_row("SELECT due FROM cards WHERE id = 100", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(due, 0);
+    drop(connection);
+
+    let store = AnkiCollection::open(&destination).unwrap();
+    let due_cards = store.due_cards(None, 10, now).unwrap();
+    assert!(due_cards.iter().any(|card| card.id == 100));
+}
+
+fn write_review_shift_source(path: &Path, crt: i64, due: i64) {
+    let notes = [
+        ("suspended-review", "suspended\u{001f}answer"),
+        ("odue-review", "odue\u{001f}answer"),
+        ("new-card", "new\u{001f}answer"),
+        ("learning-card", "learning\u{001f}answer"),
+    ];
+    let seed = Seed {
+        notes: notes
+            .iter()
+            .enumerate()
+            .map(|(index, (guid, fields))| TestNote {
+                id: i64::try_from(index).unwrap().saturating_add(1),
+                guid: (*guid).to_owned(),
+                mid: 1,
+                fields: (*fields).to_owned(),
+            })
+            .collect(),
+        cards: (1_i64..=4)
+            .map(|id| TestCard {
+                id: id.saturating_add(99),
+                note_id: id,
+                deck_id: 1,
+                ordinal: 0,
+            })
+            .collect(),
+        revlog: false,
+    };
+    write_collection(path, &seed);
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute("UPDATE col SET crt = ?1 WHERE id = 1", [crt])
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE cards SET type = 2, queue = -1, due = ?1, odue = ?2 WHERE id = 100",
+            params![due, due.saturating_add(2)],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE cards SET type = 2, queue = 2, due = ?1, odue = ?2 WHERE id = 101",
+            params![due, due.saturating_add(5)],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE cards SET type = 0, queue = 0, due = 42, odue = 99 WHERE id = 102",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE cards SET type = 1, queue = 1, due = 999999, odue = 888888 WHERE id = 103",
+            [],
+        )
+        .unwrap();
+}
+
+type CardRowData = (i64, i64, i64, i64, i64);
+
+fn card_rows(path: &Path) -> Vec<CardRowData> {
+    let connection = Connection::open(path).unwrap();
+    let mut statement = connection
+        .prepare("SELECT id, type, queue, due, odue FROM cards ORDER BY id")
+        .unwrap();
+    statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
+}
+
+#[test]
+fn existing_import_shifts_suspended_and_original_due_for_reviews() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("existing.anki2");
+    let created = AnkiCollection::create(&destination).unwrap();
+    drop(created);
+
+    let now = unix_seconds();
+    let destination_crt = now.saturating_sub(DAY_SECS.saturating_div(2));
+    set_collection_crt(&destination, destination_crt);
+    let source_crt =
+        destination_crt.saturating_sub(DAY_SECS.saturating_mul(20));
+    let source_due = 20_i64.saturating_add(5);
+
+    let source = dir.path().join("source.anki2");
+    write_review_shift_source(&source, source_crt, source_due);
+
+    let package = dir.path().join("reviews.apkg");
+    export_apkg(&source, &dir.path().join("media"), &package).unwrap();
+    import_apkg(&package, &destination, &dir.path().join("shifted-media"))
+        .unwrap();
+
+    assert_eq!(
+        card_rows(&destination),
+        vec![
+            (100, 2, -1, 5, 7),
+            (101, 2, 2, 5, 10),
+            (102, 0, 0, 42, 99),
+            (103, 1, 1, 999_999, 888_888),
+        ]
+    );
 }
 
 #[test]

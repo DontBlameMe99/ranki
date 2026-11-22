@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -32,7 +34,7 @@ pub struct ColJson {
 
 struct MergeState {
     next_id: i64,
-    day_shift: i64,
+    source_day_delta: i64,
     model_map: BTreeMap<i64, i64>,
     deck_map: BTreeMap<i64, i64>,
     dconf_map: BTreeMap<i64, i64>,
@@ -99,14 +101,11 @@ pub fn merge_collection(
         .map_err(db_error("cannot start import transaction"))?;
     let destination = read_col(&transaction, "main")?;
     let incoming = read_col(&transaction, "incoming")?;
-    let day_shift = incoming
-        .crt
-        .checked_sub(destination.crt)
-        .map(|delta| delta.div_euclid(DAY_SECS))
-        .ok_or_else(|| FormatError::new("invalid collection creation time"))?;
+    let now_secs = current_unix_seconds()?;
+    let day_delta = source_day_delta(now_secs, incoming.crt, destination.crt)?;
     let mut state = MergeState::new(
         global_next_id(&transaction, &destination, &incoming)?,
-        day_shift,
+        day_delta,
     );
     let mut merged = destination;
     merge_col_json(&mut merged, &incoming, &mut state)?;
@@ -126,11 +125,41 @@ pub fn merge_collection(
     })
 }
 
+fn current_unix_seconds() -> Result<i64, FormatError> {
+    let elapsed =
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| {
+                FormatError::with_source("cannot read system clock", error)
+            })?;
+    i64::try_from(elapsed.as_secs())
+        .map_err(|_| FormatError::new("system clock out of range"))
+}
+
+fn day_number(now_secs: i64, crt: i64) -> Result<i64, FormatError> {
+    now_secs
+        .checked_sub(crt)
+        .map(|elapsed| elapsed.div_euclid(DAY_SECS))
+        .ok_or_else(|| FormatError::new("invalid collection creation time"))
+}
+
+fn source_day_delta(
+    now_secs: i64,
+    incoming_crt: i64,
+    destination_crt: i64,
+) -> Result<i64, FormatError> {
+    let incoming_day = day_number(now_secs, incoming_crt)?;
+    let destination_day = day_number(now_secs, destination_crt)?;
+    incoming_day
+        .checked_sub(destination_day)
+        .ok_or_else(|| FormatError::new("invalid collection creation time"))
+}
+
 impl MergeState {
-    const fn new(next_id: i64, day_shift: i64) -> Self {
+    const fn new(next_id: i64, source_day_delta: i64) -> Self {
         Self {
             next_id,
-            day_shift,
+            source_day_delta,
             model_map: BTreeMap::new(),
             deck_map: BTreeMap::new(),
             dconf_map: BTreeMap::new(),
@@ -883,8 +912,10 @@ fn insert_cards(
             let _ = used.insert(row.id);
             row.id
         };
-        // Review and day-learning dues are days; the other queues are not.
-        let due = shifted_due(row.due, row.queue, state.day_shift)?;
+        // Review dues stay day numbers even while suspended or buried.
+        let day_delta = state.source_day_delta;
+        let due = shifted_due(row.due, row, day_delta)?;
+        let original_due = shifted_due(row.original_due, row, day_delta)?;
         transaction
             .execute(
                 "INSERT INTO main.cards (id, nid, did, ord, mod, usn, type, queue, due, ivl,
@@ -905,7 +936,7 @@ fn insert_cards(
                     row.reps,
                     row.lapses,
                     row.left,
-                    row.original_due,
+                    original_due,
                     original_deck_id,
                     row.flags,
                     row.data,
@@ -919,14 +950,14 @@ fn insert_cards(
 }
 
 fn shifted_due(
-    due: i64,
-    queue: i32,
-    day_shift: i64,
+    value: i64,
+    row: &CardRow,
+    source_day_delta: i64,
 ) -> Result<i64, FormatError> {
-    if !matches!(queue, 2 | 3) {
-        return Ok(due);
+    if !matches!(row.queue, 2 | 3) && row.kind != 2 {
+        return Ok(value);
     }
-    due.checked_add(day_shift).ok_or_else(|| {
+    value.checked_sub(source_day_delta).ok_or_else(|| {
         FormatError::new("card due overflow while importing package")
     })
 }
