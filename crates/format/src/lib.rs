@@ -70,6 +70,20 @@ pub fn export_apkg(
     package::write_apkg(collection, media_dir, destination)
 }
 
+/// Export a collection into a `.colpkg` backup Anki can import.
+///
+/// # Errors
+///
+/// Returns an error when the collection or media cannot be read, or the
+/// destination package cannot be written.
+pub fn export_colpkg(
+    collection: &Path,
+    media_dir: &Path,
+    destination: &Path,
+) -> Result<(), FormatError> {
+    package::write_colpkg(collection, media_dir, destination)
+}
+
 /// Extract a `.colpkg` backup without overwriting existing files.
 ///
 /// # Errors

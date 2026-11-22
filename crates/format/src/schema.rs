@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS col (
     mod INTEGER NOT NULL,
     scm INTEGER NOT NULL,
     ver INTEGER NOT NULL,
-    dt REAL NOT NULL,
+    dty INTEGER NOT NULL,
     usn INTEGER NOT NULL,
     ls INTEGER NOT NULL,
     conf TEXT NOT NULL,
@@ -114,8 +114,8 @@ pub fn open_or_create(path: &Path) -> Result<Connection, FormatError> {
 fn insert_default_col(connection: &Connection) -> Result<(), FormatError> {
     connection
         .execute(
-            "INSERT INTO col (id, crt, mod, scm, ver, dt, usn, ls, conf, models, decks, dconf, tags)
-             VALUES (1, 0, 0, 0, 11, 0.0, 0, 0, ?, ?, ?, ?, ?)",
+            "INSERT INTO col (id, crt, mod, scm, ver, dty, usn, ls, conf, models, decks, dconf, tags)
+             VALUES (1, 0, 0, 0, 11, 0, 0, 0, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 encode_json(&default_conf())?,
                 encode_json(&default_models())?,

@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use ranki_format::ImportReport;
 use ranki_format::export_apkg;
+use ranki_format::export_colpkg;
 use ranki_format::import_apkg;
 use ranki_format::import_colpkg;
 use rusqlite::Connection;
@@ -23,7 +24,7 @@ use zip::write::SimpleFileOptions;
 const TEST_SCHEMA: &str = "
 CREATE TABLE col (
     id INTEGER PRIMARY KEY, crt INTEGER NOT NULL, mod INTEGER NOT NULL,
-    scm INTEGER NOT NULL, ver INTEGER NOT NULL, dt REAL NOT NULL,
+    scm INTEGER NOT NULL, ver INTEGER NOT NULL, dty INTEGER NOT NULL,
     usn INTEGER NOT NULL, ls INTEGER NOT NULL, conf TEXT NOT NULL,
     models TEXT NOT NULL, decks TEXT NOT NULL, dconf TEXT NOT NULL,
     tags TEXT NOT NULL
@@ -160,8 +161,8 @@ fn write_collection(path: &Path, seed: &Seed) {
     let tags = json!({}).to_string();
     connection
         .execute(
-            "INSERT INTO col (id, crt, mod, scm, ver, dt, usn, ls, conf, models, decks, dconf, tags)
-             VALUES (1, 0, 0, 0, 11, 0.0, 0, 0, ?, ?, ?, ?, ?)",
+            "INSERT INTO col (id, crt, mod, scm, ver, dty, usn, ls, conf, models, decks, dconf, tags)
+             VALUES (1, 0, 0, 0, 11, 0, 0, 0, ?, ?, ?, ?, ?)",
             params![conf, models, decks, dconf, tags],
         )
         .unwrap();
@@ -268,6 +269,19 @@ fn roundtrip_notes_cards_and_review_log() {
 }
 
 #[test]
+fn created_collection_uses_anki_dty_column() {
+    let fixture = Fixture::new();
+    let package = fixture.package();
+    let (collection, _, _) = fixture.import(&package, "created");
+
+    let connection = Connection::open(collection).unwrap();
+    let columns =
+        strings(&connection, "SELECT name FROM pragma_table_info('col')");
+    assert!(columns.iter().any(|name| name == "dty"));
+    assert!(!columns.iter().any(|name| name == "dt"));
+}
+
+#[test]
 fn export_uses_expected_zip_entries() {
     let fixture = Fixture::new();
     fs::write(fixture.media.join("photo.png"), b"image").unwrap();
@@ -282,6 +296,11 @@ fn export_uses_expected_zip_entries() {
     for expected in ["collection.anki21", "media", "0", "meta"] {
         assert!(names.contains(expected), "missing entry {expected}");
     }
+
+    assert_eq!(entry_bytes(&mut archive, "meta"), vec![0x08, 0x02]);
+    assert!(archive.by_name("collection.anki21").is_ok());
+    assert!(!names.contains("collection.anki2"));
+    assert!(!names.contains("collection.anki21b"));
     let mapping: BTreeMap<String, String> =
         serde_json::from_slice(&entry_bytes(&mut archive, "media")).unwrap();
     assert_eq!(mapping.get("0").map(String::as_str), Some("photo.png"));
@@ -495,7 +514,7 @@ fn id_collisions_do_not_lose_existing_notes() {
 fn colpkg_extracts_without_overwriting() {
     let fixture = Fixture::new();
     let package = fixture.dir.path().join("backup.colpkg");
-    let meta = br#"{"version": 1}"#.to_vec();
+    let meta = vec![0x08, 0x02];
     build_zip(
         &package,
         &[
@@ -520,6 +539,58 @@ fn colpkg_extracts_without_overwriting() {
     assert_eq!(
         fs::read(destination.join("media/photo.png")).unwrap(),
         b"changed".to_vec()
+    );
+}
+
+#[test]
+fn colpkg_extracts_numbered_media_mapping() {
+    let fixture = Fixture::new();
+    let package = fixture.dir.path().join("mapped.colpkg");
+    let mapping = json!({"0": "photo.png", "1": "../bad:name?.png"})
+        .to_string()
+        .into_bytes();
+    build_zip(
+        &package,
+        &[
+            ("collection.anki21", fs::read(&fixture.source).unwrap()),
+            ("0", b"image".to_vec()),
+            ("1", b"pixel".to_vec()),
+            ("media", mapping),
+            ("meta", vec![0x08, 0x02]),
+        ],
+    );
+
+    let destination = fixture.dir.path().join("mapped");
+    let collection = import_colpkg(&package, &destination).unwrap();
+    assert_eq!(collection, destination.join("collection.anki21"));
+    assert_eq!(
+        fs::read(destination.join("media/photo.png")).unwrap(),
+        b"image".to_vec()
+    );
+    assert_eq!(
+        fs::read(destination.join("media/bad_name_.png")).unwrap(),
+        b"pixel".to_vec()
+    );
+}
+
+#[test]
+fn colpkg_roundtrip_preserves_notes_cards_and_media() {
+    let fixture = Fixture::new();
+    fs::write(fixture.media.join("photo.png"), b"image").unwrap();
+    let package = fixture.dir.path().join("backup.colpkg");
+    export_colpkg(&fixture.source, &fixture.media, &package).unwrap();
+
+    let destination = fixture.dir.path().join("restored");
+    let collection = import_colpkg(&package, &destination).unwrap();
+    let connection = Connection::open(collection).unwrap();
+    assert_eq!(count(&connection, "notes"), 2);
+    assert_eq!(count(&connection, "cards"), 2);
+    assert_eq!(count(&connection, "revlog"), 1);
+    let guids = strings(&connection, "SELECT guid FROM notes ORDER BY guid");
+    assert_eq!(guids, vec!["guid-a", "guid-b"]);
+    assert_eq!(
+        fs::read(destination.join("media/photo.png")).unwrap(),
+        b"image".to_vec()
     );
 }
 

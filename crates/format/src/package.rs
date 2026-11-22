@@ -14,7 +14,6 @@ use rusqlite::Connection;
 use rusqlite::MAIN_DB;
 use rusqlite::backup::Progress;
 use serde::Serialize;
-use serde_json::json;
 use tempfile::NamedTempFile;
 use zip::CompressionMethod;
 use zip::ZipArchive;
@@ -32,6 +31,8 @@ use crate::media::MediaFile;
 use crate::media::collect_media_files;
 use crate::media::sanitize_filename;
 use crate::schema;
+
+const PACKAGE_META_LEGACY_2: &[u8] = &[0x08, 0x02];
 
 pub struct ApkgPackage {
     pub collection: NamedTempFile,
@@ -88,8 +89,7 @@ pub fn write_apkg(
         )))?;
         write_zip_entry(&mut writer, &index.to_string(), &bytes)?;
     }
-    let meta = json!({"version": 1, "minVersion": 0});
-    write_json_entry(&mut writer, "meta", &meta)?;
+    write_zip_entry(&mut writer, "meta", PACKAGE_META_LEGACY_2)?;
 
     let output = writer
         .finish()
@@ -101,6 +101,14 @@ pub fn write_apkg(
         )
     })?;
     Ok(())
+}
+
+pub fn write_colpkg(
+    collection: &Path,
+    media_dir: &Path,
+    destination: &Path,
+) -> Result<(), FormatError> {
+    write_apkg(collection, media_dir, destination)
 }
 
 pub fn extract_colpkg(
@@ -142,20 +150,13 @@ pub fn extract_colpkg(
         "cannot create media directory {}",
         media_dir.display()
     )))?;
-    for name in names.iter().filter(|name| is_media_entry(name)) {
-        let relative = name.trim_start_matches("media/");
-        let filename = sanitize_filename(relative);
-        if filename.is_empty() {
-            return Err(FormatError::new(format!(
-                "invalid media filename in package: '{relative}'"
-            )));
-        }
-        let target = media_dir.join(filename);
-        if target.exists() {
-            continue;
-        }
-        let bytes = maybe_decompress(read_bytes(&mut archive, name)?)?;
-        write_new_file(&target, &bytes)?;
+    let mapping = read_media_mapping(&mut archive, &names)?;
+    for (entry, name) in &mapping {
+        extract_media_file(&mut archive, &media_dir, (entry, name))?;
+    }
+    for entry in names.iter().filter(|name| is_media_entry(name)) {
+        let relative = entry.trim_start_matches("media/");
+        extract_media_file(&mut archive, &media_dir, (entry, relative))?;
     }
 
     if names.contains("meta") {
@@ -194,6 +195,25 @@ fn choose_collection(names: &BTreeSet<String>) -> Option<&'static str> {
 
 fn is_media_entry(name: &str) -> bool {
     name.starts_with("media/") && !name.ends_with('/')
+}
+
+fn extract_media_file(
+    archive: &mut ZipArchive<File>,
+    media_dir: &Path,
+    (entry, name): (&str, &str),
+) -> Result<(), FormatError> {
+    let filename = sanitize_filename(name);
+    if filename.is_empty() {
+        return Err(FormatError::new(format!(
+            "invalid media filename in package: '{name}'"
+        )));
+    }
+    let target = media_dir.join(filename);
+    if target.exists() {
+        return Ok(());
+    }
+    let bytes = maybe_decompress(read_bytes(archive, entry)?)?;
+    write_new_file(&target, &bytes)
 }
 
 fn is_numbered_entry(name: &str) -> bool {
