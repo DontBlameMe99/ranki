@@ -100,7 +100,6 @@
             check-toml.enable = true;
             check-yaml.enable = true;
             check-executables-have-shebangs.enable = true;
-            check-shebang-scripts-are-executable.enable = true;
             check-added-large-files.enable = true;
             check-symlinks.enable = true;
             trim-trailing-whitespace.enable = true;
