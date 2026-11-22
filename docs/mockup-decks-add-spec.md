@@ -10,7 +10,7 @@ There are no `box-shadow`, `filter`, `opacity`, or `transition` declarations.
 Hover and press rules below are proposed derived states using existing palette
 roles.
 
-## 1. Shared measured tokens
+## 1\. Shared measured tokens
 
 | Role | Mocha hex | Source use |
 | --- | --- | --- |
@@ -43,7 +43,7 @@ Derived interaction rules: hover uses accent at 16% alpha or `surface0`.
 Active uses accent at 22% alpha, pressed darkens the fill by 15%, and focus uses
 a 1.5 px accent stroke. No control changes size on state change.
 
-## 2. Decks view layout
+## 2\. Decks view layout
 
 Artboard: 1280x800. Root is a horizontal flex with a 232 px fixed sidebar and
 a main column padded `32px 40px` with 24 px vertical gaps.
@@ -103,7 +103,7 @@ start studying", and a 44 px accent "Create deck" action. Search with no match:
 cards keeps its row and replaces Study with a muted "0 due". Study all is
 disabled when the leaf sum is zero.
 
-## 3. Add-card view layout
+## 3\. Add-card view layout
 
 The sidebar is identical except that "Add card" is active and "Decks" is
 inactive. Main content is a column. The scrollable region has `32px 40px 0`
@@ -157,13 +157,13 @@ a 13 px red line below it, and keep focus. Store failures use the existing
 5 second toast. Success closes the view unless Keep open is on, clears only the
 field values, adds a history row, refreshes stats, and reports "Added N cards".
 
-## 4. egui 0.37 implementation plan
+## 4\. egui 0.37 implementation plan
 
 In `crates/ui/src/app.rs`, add `View { Decks, Review, AddCard }` and a `view`
 field. Keep `store: Box<dyn Store>` private and unchanged. Add UI state for
 `deck_query: String`, `expanded_decks: HashSet<String>`, `deck_rows: Vec<DeckRow>`,
 `add_draft`, `field_errors`, and `added_this_session`. `DeckRow` is a pure view
-model with id, depth, name, counts, has_children, and virtual flag. Add actions
+model with id, depth, name, counts, has\_children, and virtual flag. Add actions
 for OpenDecks, OpenAdd, SetDeckQuery, ToggleDeck, CreateDeck, SelectDeck,
 SetModel, SetDeck, SaveNote, and ToggleKeepOpen to the existing `dispatch`.
 Replace `sidebar()` with a two-part layout: a shared `nav::render` and a
@@ -193,7 +193,7 @@ system sans, then `Noto Sans JP` for Japanese text. Reuse `accent_fill` and
 `accent_ink` for all primary buttons. At 800x600, use the current min window
 size and collapse the forecast card and preview rail.
 
-## 5. Standing requirements reconciliation
+## 5\. Standing requirements reconciliation
 
 Palette: no conflict. Every mockup color is an exact Catppuccin Mocha role.
 For Latte map canvas to `base`, rail and footer to `mantle`, panels and inputs
@@ -209,9 +209,10 @@ nested deck records. Replace sync with a local collection timestamp, leave the
 forecast slot without data, drop the streak, and render `::` names as a view
 only. Do not add a sync feature, revlog query, or deck hierarchy write.
 
-## 6. Acceptance criteria
+## 6\. Acceptance criteria
 
 Must:
+
 1. At 1280x800, the app shows the 232 px rail, Decks active, the 64 px due
    number, both summary cards, and the five-column deck table. Test visually.
 2. Counts equal `Store::stats` for each real deck and leaf counts equal the
@@ -233,6 +234,7 @@ Must:
    Font first in the candidate list. Unit test palette and font helpers.
 
 Should:
+
 1. `::` deck names render as indented rows with 35 px margin, 2 px rule, and
    18 px padding. Virtual parents show aggregate counts and no Study button.
    Unit test row depth and virtual flag.
@@ -246,6 +248,7 @@ Should:
    why in a tooltip. Verify visually.
 
 Nice:
+
 1. Ctrl+Enter or Cmd+Enter saves from any field. A and D switch Add and Decks
    outside text fields. Unit test key routing.
 2. The forecast card gains real bars and streak when a revlog query reaches
