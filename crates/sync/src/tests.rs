@@ -304,6 +304,39 @@ fn sync_refuses_conflict_without_writing() -> TestResult {
 }
 
 #[test]
+fn empty_local_collection_downloads_a_populated_remote() -> TestResult {
+    let directory = TempDir::new()?;
+    let source = directory.path().join("source.anki2");
+    let collection = directory.path().join("collection.anki2");
+    let media = directory.path().join("media");
+    let state_path = directory.path().join("sync.json");
+    make_collection(&source, (900, 500, 1))?;
+    make_collection(&collection, (100, 100, 0))?;
+    write_state(&state_path, &seeded_state("host-key"))?;
+    let transport = MockTransport::new()
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((900, 500, false, now_secs()?))?,
+        )
+        .with_response(
+            SyncMethod::Download,
+            MockResponse::ok_bytes(fs::read(&source)?)?,
+        );
+    let mut client =
+        SyncClient::new(transport, &collection, &media, &state_path)?;
+
+    let outcome = client.sync(None)?;
+
+    assert_eq!(outcome, SyncOutcome::Downloaded);
+    let connection = Connection::open(&collection)?;
+    let cards: i64 =
+        connection
+            .query_row("SELECT count(*) FROM cards", [], |row| row.get(0))?;
+    assert_eq!(cards, 1);
+    Ok(())
+}
+
+#[test]
 fn offline_meta_failure_is_retried() -> TestResult {
     let directory = TempDir::new()?;
     let collection = directory.path().join("collection.anki2");

@@ -328,6 +328,9 @@ impl<T: SyncTransport> SyncClient<T> {
         let last_mod = self.state.last_mod;
         let last_scm = self.state.last_scm;
 
+        let Some(last) = last_mod else {
+            return self.sync_without_stamp(&status, local);
+        };
         let schema_matches = match last_scm {
             Some(scm) => scm == status.schema_mod_time,
             None => local.scm == status.schema_mod_time,
@@ -337,10 +340,6 @@ impl<T: SyncTransport> SyncClient<T> {
                 "schema changed; choose full_upload or full_download",
             ));
         }
-        let Some(last) = last_mod else {
-            return self.sync_without_stamp(&status, local);
-        };
-
         let local_changed = local.mod_time != last;
         let remote_changed = status.mod_time != last;
         if local_changed && remote_changed {
