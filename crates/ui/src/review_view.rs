@@ -7,10 +7,7 @@ use gpui::{
 use ranki_model::{CardType, Note, NoteModel};
 
 use crate::{
-    app::{
-        Phase, Root, UiAction, due_total, duration_label, leaf_deck_totals,
-        queue_counts, rating_name,
-    },
+    app::{Phase, Root, UiAction, duration_label, queue_counts, rating_name},
     card_view,
     components::{ClickHandler, chip, fade_in, icon, keycap, progress_bar},
     theme::{
@@ -32,14 +29,20 @@ impl Root {
         let theme = self.theme();
         let session =
             queue_counts(self.review.current.as_ref(), &self.review.queue);
-        let deck_due = if self.review.scope_all {
-            due_total(leaf_deck_totals(&self.decks, &self.stats))
+        // Ask the store the same question a restart asks, and only once the
+        // session has stopped, so reviewing never pays for an extra query.
+        let scope = if self.review.scope_all {
+            None
         } else {
             self.selected
-                .and_then(|index| self.stats.get(index))
-                .copied()
-                .map_or(0, due_total)
+                .and_then(|index| self.decks.get(index))
+                .map(|deck| deck.id)
         };
+        let more_due = self.review.current.is_none()
+            && self
+                .store
+                .due_cards(scope, 1, Self::now())
+                .is_ok_and(|cards| !cards.is_empty());
         let fraction = self.progress_fraction();
         let from = self.review.progress_from;
         let current = self.review.current.clone();
@@ -280,10 +283,12 @@ impl Root {
                             div()
                                 .text_size(px(14.))
                                 .text_color(colors.subtext)
-                                .child(if deck_due == 0 {
-                                    String::from("Nothing else is due here.")
+                                .child(if more_due {
+                                    String::from("More cards are due now.")
                                 } else {
-                                    format!("{deck_due} cards are still due.")
+                                    String::from(
+                                        "Nothing else is due right now.",
+                                    )
                                 }),
                         )
                         .child(
@@ -296,7 +301,7 @@ impl Root {
                                     false,
                                     back,
                                 ))
-                                .children((deck_due > 0).then(|| {
+                                .children(more_due.then(|| {
                                     footer_button(
                                         "Study again",
                                         colors,

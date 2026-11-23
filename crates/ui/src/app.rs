@@ -206,6 +206,13 @@ pub struct UndoEntry {
     pub spent: Duration,
 }
 
+/// Rendered halves of one card, prepared before a session transition.
+struct LoadedCard {
+    note: Option<Note>,
+    question: Option<RenderedCard>,
+    answer: Option<RenderedCard>,
+}
+
 /// Review-session state owned by the root entity.
 #[derive(Default)]
 pub struct ReviewState {
@@ -1065,6 +1072,21 @@ impl Root {
     /// Renders one card into the review session. Returns false when its note
     /// cannot be loaded, so the caller can try the next queued card.
     fn load_card(&mut self, card: &Card, cx: &mut Context<Self>) -> bool {
+        let Some(loaded) = self.render_state(card, cx) else {
+            return false;
+        };
+        self.apply_loaded(card, loaded, cx);
+        true
+    }
+
+    /// Reads and renders a card without touching the session. Callers prepare
+    /// the next stage before a write, so a failed read cannot leave storage
+    /// and the visible card disagreeing.
+    fn render_state(
+        &mut self,
+        card: &Card,
+        cx: &mut Context<Self>,
+    ) -> Option<LoadedCard> {
         let note = match self.store.note(card.note_id) {
             Ok(note) => note,
             Err(error) => {
@@ -1073,7 +1095,7 @@ impl Root {
                     format!("Could not load card: {error}"),
                     cx,
                 );
-                return false;
+                return None;
             }
         };
         let model = note.as_ref().and_then(|note| {
@@ -1094,19 +1116,33 @@ impl Root {
             ),
             _ => (None, None),
         };
+        let _ = cx;
+        Some(LoadedCard {
+            note,
+            question,
+            answer,
+        })
+    }
+
+    /// Puts a prepared card on the stage and restarts its timers.
+    fn apply_loaded(
+        &mut self,
+        card: &Card,
+        loaded: LoadedCard,
+        cx: &mut Context<Self>,
+    ) {
         self.review.phase = if self.dev_reveal {
             Phase::Answer
         } else {
             Phase::Question
         };
         self.review.current = Some(card.clone());
-        self.review.note = note;
-        self.review.question = question;
-        self.review.answer = answer;
+        self.review.note = loaded.note;
+        self.review.question = loaded.question;
+        self.review.answer = loaded.answer;
         self.review.last_tick = Some(Instant::now());
         self.review.last_grade_at = Some(Instant::now());
         let _ = cx;
-        true
     }
 
     pub(crate) fn reveal(&mut self, cx: &mut Context<Self>) {
@@ -1201,6 +1237,9 @@ impl Root {
         let Some(entry) = self.review.last_grade.clone() else {
             return;
         };
+        let Some(loaded) = self.render_state(&entry.card, cx) else {
+            return;
+        };
         match self.store.undo_review(&entry.card, entry.revlog_id) {
             Ok(false) => {
                 self.review.last_grade = None;
@@ -1225,10 +1264,12 @@ impl Root {
                     rating_name(entry.rating)
                 ));
                 if let Some(current) = self.review.current.clone() {
+                    let _ = self.review.seen.remove(&current.id);
                     self.review.queue.push_front(current);
                 }
                 let _ = self.review.seen.remove(&entry.card.id);
-                let _ = self.load_card(&entry.card, cx);
+                self.apply_loaded(&entry.card, loaded, cx);
+                self.review.focused_elapsed = entry.spent;
                 self.review.studied =
                     self.review.studied.saturating_sub(entry.spent);
                 self.refresh_stats();
@@ -1467,6 +1508,7 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.tick_focus(window);
         let had_dialog = self.confirmation.is_some();
         match action {
             UiAction::Reveal => self.reveal(cx),

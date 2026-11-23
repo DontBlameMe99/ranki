@@ -187,6 +187,7 @@ fn system_reduced_motion() -> bool {
             return value;
         }
         dconf_animations_disabled()
+            || gtk_settings_animations_disabled()
             || std::fs::read_to_string(kdeglobals_path())
                 .is_ok_and(|text| kde_animations_disabled(&text))
     })
@@ -230,15 +231,71 @@ fn dconf_animations_disabled() -> bool {
             == Some(false)
 }
 
-fn kdeglobals_path() -> std::path::PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map_or_else(
+/// GTK falls back to `settings.ini` when no settings portal or dconf value is
+/// available, so read both toolkit generations.
+fn gtk_settings_animations_disabled() -> bool {
+    ["gtk-4.0", "gtk-3.0"].iter().any(|version| {
+        std::fs::read_to_string(config_home("gtk", version))
+            .is_ok_and(|text| gtk_animations_disabled(&text))
+    })
+}
+
+fn config_home(toolkit: &str, version: &str) -> std::path::PathBuf {
+    let xdg = std::env::var("XDG_CONFIG_HOME").ok();
+    let home = std::env::var("HOME").ok();
+    xdg_config_dir(xdg.as_deref(), home.as_deref())
+        .join(toolkit)
+        .join(version)
+        .join("settings.ini")
+}
+
+/// `XDG_CONFIG_HOME` wins when it is a non-empty path; otherwise the
+/// specification puts user configuration under `$HOME/.config`.
+#[must_use]
+pub fn xdg_config_dir(
+    xdg_config_home: Option<&str>,
+    home: Option<&str>,
+) -> std::path::PathBuf {
+    let explicit = xdg_config_home
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    explicit.map_or_else(
         || {
-            std::env::var_os("HOME")
-                .map_or_else(std::path::PathBuf::new, std::path::PathBuf::from)
+            home.map_or_else(std::path::PathBuf::new, |home| {
+                std::path::Path::new(home).join(".config")
+            })
         },
         std::path::PathBuf::from,
-    );
-    base.join("kdeglobals")
+    )
+}
+
+/// Reads the `gtk-enable-animations` key from a GTK `settings.ini` body.
+#[must_use]
+pub fn gtk_animations_disabled(contents: &str) -> bool {
+    let mut in_settings = false;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_settings = line.eq_ignore_ascii_case("[Settings]");
+            continue;
+        }
+        if !in_settings {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("gtk-enable-animations") {
+            return parse_flag_bool(value) == Some(false);
+        }
+    }
+    false
+}
+
+fn kdeglobals_path() -> std::path::PathBuf {
+    let xdg = std::env::var("XDG_CONFIG_HOME").ok();
+    let home = std::env::var("HOME").ok();
+    xdg_config_dir(xdg.as_deref(), home.as_deref()).join("kdeglobals")
 }
 /// Palette plus resolved theme, passed by value to shared element helpers.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -466,9 +523,9 @@ mod tests {
         LATTE, MOCHA, MOTION_PROGRESS_MS, MOTION_QUICK_MS, PROGRESS_HEIGHT,
         PROGRESS_WIDTH, STAGE_HEIGHT, STAGE_RADIUS, STAGE_WIDTH, Theme,
         accent_hover, accent_press, alpha, blend, font_candidates,
-        interval_label, kde_animations_disabled, keycap_ink, palette,
-        parse_flag_bool, placeholder_color, rating_fill, rating_label,
-        reduced_motion, resolve_theme,
+        gtk_animations_disabled, interval_label, kde_animations_disabled,
+        keycap_ink, palette, parse_flag_bool, placeholder_color, rating_fill,
+        rating_label, reduced_motion, resolve_theme, xdg_config_dir,
     };
     use crate::ThemeChoice;
 
@@ -619,6 +676,40 @@ mod tests {
         assert_eq!(parse_flag_bool("1"), Some(true));
         assert_eq!(parse_flag_bool("off"), Some(false));
         assert_eq!(parse_flag_bool("maybe"), None);
+    }
+
+    #[test]
+    fn config_home_follows_the_xdg_specification() {
+        assert_eq!(
+            xdg_config_dir(Some("/tmp/xdg"), Some("/home/u")),
+            std::path::PathBuf::from("/tmp/xdg")
+        );
+        assert_eq!(
+            xdg_config_dir(Some("  "), Some("/home/u")),
+            std::path::PathBuf::from("/home/u/.config")
+        );
+        assert_eq!(
+            xdg_config_dir(None, Some("/home/u")),
+            std::path::PathBuf::from("/home/u/.config")
+        );
+        assert_eq!(xdg_config_dir(None, None), std::path::PathBuf::new());
+    }
+
+    #[test]
+    fn gtk_settings_ini_can_disable_animation() {
+        assert!(gtk_animations_disabled(
+            "[Settings]\ngtk-enable-animations=false\n"
+        ));
+        assert!(gtk_animations_disabled(
+            "[settings]\ngtk-enable-animations = 0\n"
+        ));
+        assert!(!gtk_animations_disabled(
+            "[Settings]\ngtk-enable-animations=true\n"
+        ));
+        assert!(!gtk_animations_disabled(
+            "[Other]\ngtk-enable-animations=false\n"
+        ));
+        assert!(!gtk_animations_disabled("gtk-enable-animations=false"));
     }
 
     #[test]
