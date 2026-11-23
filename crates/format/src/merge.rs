@@ -40,6 +40,9 @@ struct MergeState {
     dconf_map: BTreeMap<i64, i64>,
     note_map: BTreeMap<i64, Option<i64>>,
     card_map: BTreeMap<i64, Option<i64>>,
+    imported_decks: Vec<(i64, i64)>,
+    imported_deck_configs: Vec<(i64, i64)>,
+    imported_notetypes: Vec<(i64, i64)>,
 }
 
 struct NoteRow {
@@ -109,6 +112,7 @@ pub fn merge_collection(
     let mut merged = destination;
     merge_col_json(&mut merged, &incoming, &mut state)?;
     write_col(&transaction, &merged)?;
+    write_modern_rows(&transaction, &merged, &state)?;
 
     let notes = merge_notes(&transaction, &mut state)?;
     let cards = merge_cards(&transaction, &mut state)?;
@@ -164,6 +168,9 @@ impl MergeState {
             dconf_map: BTreeMap::new(),
             note_map: BTreeMap::new(),
             card_map: BTreeMap::new(),
+            imported_decks: Vec::new(),
+            imported_deck_configs: Vec::new(),
+            imported_notetypes: Vec::new(),
         }
     }
 
@@ -207,38 +214,29 @@ fn read_col(
     let decks = decode_json(row.3, "decks")?;
     let dconf = decode_json(row.4, "dconf")?;
     let tags = decode_json(row.5, "tags")?;
-    if prefix == "incoming" {
-        return Ok(ColJson {
-            crt: row.0,
-            conf: if is_empty_object(&conf) {
-                modern_conf(connection)
-            } else {
-                conf
-            },
-            models: if is_empty_object(&models) {
-                modern_id_map(connection, "notetypes")
-            } else {
-                models
-            },
-            decks: if is_empty_object(&decks) {
-                modern_id_map(connection, "decks")
-            } else {
-                decks
-            },
-            dconf: if is_empty_object(&dconf) {
-                modern_id_map(connection, "deck_config")
-            } else {
-                dconf
-            },
-            tags,
-        });
-    }
+    let incoming = prefix == "incoming";
     Ok(ColJson {
         crt: row.0,
-        conf,
-        models,
-        decks,
-        dconf,
+        conf: if incoming && is_empty_object(&conf) {
+            modern_conf(connection, prefix)
+        } else {
+            conf
+        },
+        models: if is_empty_object(&models) {
+            modern_models(connection, prefix)?
+        } else {
+            models
+        },
+        decks: if is_empty_object(&decks) {
+            modern_id_map(connection, prefix, "decks")
+        } else {
+            decks
+        },
+        dconf: if incoming && is_empty_object(&dconf) {
+            modern_id_map(connection, prefix, "deck_config")
+        } else {
+            dconf
+        },
         tags,
     })
 }
@@ -261,10 +259,10 @@ fn is_empty_object(value: &Value) -> bool {
     value.as_object().is_some_and(Map::is_empty)
 }
 
-fn modern_conf(connection: &Connection) -> Value {
+fn modern_conf(connection: &Connection, prefix: &str) -> Value {
     let mut conf = Map::new();
     let Ok(mut statement) =
-        connection.prepare("SELECT KEY, val FROM incoming.config")
+        connection.prepare(&format!("SELECT KEY, val FROM {prefix}.config"))
     else {
         return Value::Object(conf);
     };
@@ -288,8 +286,8 @@ fn modern_conf(connection: &Connection) -> Value {
     Value::Object(conf)
 }
 
-fn modern_id_map(connection: &Connection, table: &str) -> Value {
-    let sql = format!("SELECT id, name FROM incoming.{table}");
+fn modern_id_map(connection: &Connection, prefix: &str, table: &str) -> Value {
+    let sql = format!("SELECT id, name FROM {prefix}.{table}");
     let mut map = Map::new();
     let Ok(mut statement) = connection.prepare(&sql) else {
         return Value::Object(map);
@@ -307,12 +305,31 @@ fn modern_id_map(connection: &Connection, table: &str) -> Value {
             "notetypes" => {
                 json!({"id": id, "name": name, "did": 1, "flds": [], "tmpls": []})
             }
-            "decks" => json!({"id": id, "name": name, "conf": 1}),
+            "decks" => json!({
+                "id": id,
+                "name": ranki_storage::decode_deck_name(&name),
+                "conf": 1
+            }),
             _ => json!({"id": id, "name": name}),
         };
         map.insert(id.to_string(), entry);
     }
     Value::Object(map)
+}
+
+fn modern_models(
+    connection: &Connection,
+    prefix: &str,
+) -> Result<Value, FormatError> {
+    if !has_table(connection, prefix, "notetypes")? {
+        return Ok(Value::Object(Map::new()));
+    }
+    let models =
+        ranki_storage::models_from_tables_with_prefix(connection, prefix)
+            .map_err(|error| {
+                FormatError::with_source("cannot decode note types", error)
+            })?;
+    Ok(ranki_storage::models_to_json(&models))
 }
 
 fn write_col(
@@ -332,6 +349,175 @@ fn write_col(
         )
         .map_err(db_error("cannot write collection metadata"))?;
     Ok(())
+}
+
+/// Copies decks and note types that were added to the merged metadata into a
+/// schema-18 destination, which reads those rows instead of the `col` blobs.
+fn write_modern_rows(
+    transaction: &Transaction<'_>,
+    merged: &ColJson,
+    state: &MergeState,
+) -> Result<(), FormatError> {
+    write_deck_rows(transaction, merged, state)?;
+    write_note_type_rows(transaction, state)
+}
+
+fn write_deck_rows(
+    transaction: &Transaction<'_>,
+    merged: &ColJson,
+    state: &MergeState,
+) -> Result<(), FormatError> {
+    if !has_table(transaction, "main", "decks")? {
+        return Ok(());
+    }
+    let copy = has_table(transaction, "incoming", "decks")?;
+    for (old_id, new_id) in &state.imported_decks {
+        if copy {
+            let _ = copy_deck_row(transaction, *old_id, *new_id)?;
+        } else {
+            insert_deck_row(transaction, &merged.decks, *new_id)?;
+        }
+    }
+    if has_table(transaction, "main", "deck_config")?
+        && has_table(transaction, "incoming", "deck_config")?
+    {
+        for (old_id, new_id) in &state.imported_deck_configs {
+            let _ = copy_config_row(
+                transaction,
+                "deck_config",
+                (*old_id, *new_id),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn write_note_type_rows(
+    transaction: &Transaction<'_>,
+    state: &MergeState,
+) -> Result<(), FormatError> {
+    if !has_table(transaction, "main", "notetypes")?
+        || !has_table(transaction, "incoming", "notetypes")?
+    {
+        return Ok(());
+    }
+    for (old_id, new_id) in &state.imported_notetypes {
+        let inserted =
+            copy_config_row(transaction, "notetypes", (*old_id, *new_id))?;
+        if inserted == 0 {
+            continue;
+        }
+        let _ = copy_notetype_fields(transaction, *old_id, *new_id)?;
+        let _ = copy_notetype_templates(transaction, *old_id, *new_id)?;
+    }
+    Ok(())
+}
+
+fn has_table(
+    connection: &Connection,
+    prefix: &str,
+    table: &str,
+) -> Result<bool, FormatError> {
+    let sql = format!(
+        "SELECT 1 FROM {prefix}.sqlite_master WHERE type = 'table' AND name = ?1"
+    );
+    connection
+        .query_row(&sql, [table], |_| Ok(()))
+        .optional()
+        .map(|row| row.is_some())
+        .map_err(db_error(format!("cannot inspect {prefix} schema")))
+}
+
+fn copy_deck_row(
+    transaction: &Transaction<'_>,
+    old_id: i64,
+    new_id: i64,
+) -> Result<usize, FormatError> {
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO main.decks (id, name, mtime_secs, usn, common, kind)
+             SELECT ?2, name, mtime_secs, usn, common, kind FROM incoming.decks WHERE id = ?1",
+            params![old_id, new_id],
+        )
+        .map_err(db_error("cannot copy imported deck"))
+}
+
+fn copy_config_row(
+    transaction: &Transaction<'_>,
+    table: &str,
+    (old_id, new_id): (i64, i64),
+) -> Result<usize, FormatError> {
+    let sql = format!(
+        "INSERT OR IGNORE INTO main.{table} (id, name, mtime_secs, usn, config)
+         SELECT ?2, name, mtime_secs, usn, config FROM incoming.{table} WHERE id = ?1"
+    );
+    transaction
+        .execute(&sql, params![old_id, new_id])
+        .map_err(db_error(format!("cannot copy imported {table}")))
+}
+
+fn copy_notetype_fields(
+    transaction: &Transaction<'_>,
+    old_id: i64,
+    new_id: i64,
+) -> Result<usize, FormatError> {
+    transaction
+        .execute(
+            "INSERT INTO main.fields (ntid, ord, name, config)
+             SELECT ?2, ord, name, config FROM incoming.fields WHERE ntid = ?1",
+            params![old_id, new_id],
+        )
+        .map_err(db_error("cannot copy imported note type fields"))
+}
+
+fn copy_notetype_templates(
+    transaction: &Transaction<'_>,
+    old_id: i64,
+    new_id: i64,
+) -> Result<usize, FormatError> {
+    transaction
+        .execute(
+            "INSERT INTO main.templates (ntid, ord, name, mtime_secs, usn, config)
+             SELECT ?2, ord, name, mtime_secs, usn, config FROM incoming.templates WHERE ntid = ?1",
+            params![old_id, new_id],
+        )
+        .map_err(db_error("cannot copy imported note type templates"))
+}
+
+fn insert_deck_row(
+    transaction: &Transaction<'_>,
+    decks: &Value,
+    id: i64,
+) -> Result<(), FormatError> {
+    let entries = as_object(decks, "decks")?;
+    let entry = entries.get(&id.to_string()).ok_or_else(|| {
+        FormatError::new("merged deck is missing from collection metadata")
+    })?;
+    let name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let usn = entry
+        .get("usn")
+        .and_then(Value::as_i64)
+        .and_then(|usn| i32::try_from(usn).ok())
+        .unwrap_or_default();
+    let modified = entry.get("mod").and_then(Value::as_i64).unwrap_or_default();
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO main.decks (id, name, mtime_secs, usn, common, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                id,
+                ranki_storage::encode_deck_name(name),
+                modified,
+                usn,
+                ranki_storage::deck_common(usn, modified),
+                Vec::<u8>::new(),
+            ],
+        )
+        .map(|_| ())
+        .map_err(db_error("cannot write imported deck"))
 }
 
 fn global_next_id(
@@ -449,6 +635,7 @@ fn merge_dconf(
         };
         set_id(&mut value, new_id, "deck config")?;
         mapping.insert(old_id, new_id);
+        state.imported_deck_configs.push((old_id, new_id));
         configs.insert(new_id.to_string(), value);
     }
 
@@ -463,6 +650,13 @@ fn merge_decks(
 ) -> Result<BTreeMap<i64, i64>, FormatError> {
     let mut decks = as_object(destination, "decks")?;
     let incoming_decks = as_object(incoming, "decks")?;
+    let mut named = BTreeMap::new();
+    for (key, value) in &decks {
+        let id = entry_id(key, value, "deck")?;
+        if let Some(name) = deck_name(value) {
+            let _ = named.entry(name).or_insert(id);
+        }
+    }
     let dconf_map = state.dconf_map.clone();
     let mut remapper = DeckRemapper {
         used: collect_ids(&decks),
@@ -473,17 +667,28 @@ fn merge_decks(
 
     for (key, mut value) in incoming_decks {
         let old_id = entry_id(&key, &value, "deck")?;
-        remapper.visit(&mut value)?;
+        let merged =
+            deck_name(&value).and_then(|name| named.get(&name).copied());
+        remapper.visit(&mut value, merged)?;
         let new_id = value
             .get("id")
             .and_then(Value::as_i64)
             .ok_or_else(|| FormatError::new("deck has no identifier"))?;
         remapper.mapping.insert(old_id, new_id);
-        decks.insert(new_id.to_string(), value);
+        if merged.is_none() {
+            decks.insert(new_id.to_string(), value);
+        }
     }
 
     *destination = Value::Object(decks);
     Ok(remapper.mapping)
+}
+
+fn deck_name(value: &Value) -> Option<String> {
+    value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_lowercase)
 }
 
 struct DeckRemapper<'a> {
@@ -494,9 +699,13 @@ struct DeckRemapper<'a> {
 }
 
 impl DeckRemapper<'_> {
-    fn visit(&mut self, value: &mut Value) -> Result<(), FormatError> {
+    fn visit(
+        &mut self,
+        value: &mut Value,
+        merged: Option<i64>,
+    ) -> Result<(), FormatError> {
         if let Some(object) = value.as_object_mut() {
-            self.remap_object(object)?;
+            self.remap_object(object, merged)?;
         }
         self.visit_children(value)
     }
@@ -508,9 +717,12 @@ impl DeckRemapper<'_> {
     fn remap_object(
         &mut self,
         object: &mut Map<String, Value>,
+        merged: Option<i64>,
     ) -> Result<(), FormatError> {
         if let Some(old_id) = object.get("id").and_then(Value::as_i64) {
-            let new_id = if self.used.contains(&old_id) {
+            let new_id = if let Some(id) = merged {
+                id
+            } else if self.used.contains(&old_id) {
                 allocate(&mut self.used, self.state)?
             } else {
                 let _ = self.used.insert(old_id);
@@ -518,6 +730,7 @@ impl DeckRemapper<'_> {
             };
             object.insert("id".to_owned(), Value::from(new_id));
             self.mapping.insert(old_id, new_id);
+            self.state.imported_decks.push((old_id, new_id));
         }
         remap_number(object, "conf", &self.dconf_map);
         Ok(())
@@ -530,7 +743,7 @@ impl DeckRemapper<'_> {
             return Ok(());
         };
         for child in children.iter_mut() {
-            self.visit(child)?;
+            self.visit(child, None)?;
         }
         Ok(())
     }
@@ -544,11 +757,25 @@ fn merge_models(
     let mut models = as_object(destination, "models")?;
     let incoming_models = as_object(incoming, "models")?;
     let deck_map = state.deck_map.clone();
+    let mut named = BTreeMap::new();
+    for (key, value) in &models {
+        let id = entry_id(key, value, "model")?;
+        if let Some(name) = model_name(value) {
+            let _ = named.entry((name, field_names(value))).or_insert(id);
+        }
+    }
     let mut used = collect_ids(&models);
     let mut mapping = BTreeMap::new();
 
     for (key, mut value) in incoming_models {
         let old_id = entry_id(&key, &value, "model")?;
+        if let Some(id) = model_name(&value)
+            .and_then(|name| named.get(&(name, field_names(&value))))
+        {
+            mapping.insert(old_id, *id);
+            state.imported_notetypes.push((old_id, *id));
+            continue;
+        }
         let new_id = if used.contains(&old_id) {
             allocate(&mut used, state)?
         } else {
@@ -558,11 +785,38 @@ fn merge_models(
         set_id(&mut value, new_id, "model")?;
         remap_model_decks(&mut value, &deck_map);
         mapping.insert(old_id, new_id);
+        state.imported_notetypes.push((old_id, new_id));
         models.insert(new_id.to_string(), value);
     }
 
     *destination = Value::Object(models);
     Ok(mapping)
+}
+
+fn model_name(value: &Value) -> Option<String> {
+    value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_lowercase)
+}
+
+fn field_names(value: &Value) -> Vec<String> {
+    value
+        .get("flds")
+        .and_then(Value::as_array)
+        .map(|fields| {
+            fields
+                .iter()
+                .map(|field| {
+                    field
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[expect(
@@ -1030,4 +1284,43 @@ fn merge_revlog(
         inserted = increment(inserted)?;
     }
     Ok(inserted)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{MergeState, merge_models};
+
+    fn basic(id: i64, fields: &[&str]) -> Value {
+        json!({
+            "id": id,
+            "name": "Basic",
+            "flds": fields
+                .iter()
+                .map(|name| json!({ "name": name }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    fn reimport_matches_models_by_name_and_fields() {
+        let mut destination = json!({
+            "1": basic(1, &["Front", "Back"]),
+            "2": basic(2, &["Front", "Back", "Extra"]),
+        });
+        let incoming = json!({
+            "50": basic(50, &["Front", "Back", "Extra"]),
+            "51": basic(51, &["Front", "Back"]),
+        });
+        let mut state = MergeState::new(1_000, 0);
+
+        let mapping = merge_models(&mut destination, &incoming, &mut state)
+            .expect("merge models");
+
+        assert_eq!(mapping.get(&50), Some(&2));
+        assert_eq!(mapping.get(&51), Some(&1));
+        let models = destination.as_object().expect("models");
+        assert_eq!(models.len(), 2);
+    }
 }

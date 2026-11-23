@@ -3,13 +3,25 @@
 //! Step delays use Unix milliseconds, while review intervals use day numbers.
 
 mod fsrs;
+mod optimizer;
 mod shared;
 mod sm2;
 
 #[cfg(test)]
 mod tests;
 
-pub use fsrs::{FsrsPreset, FsrsScheduler};
+pub use fsrs::{
+    ANKI_DEFAULT_PARAMS, DEFAULT_DECAY, FsrsParams, FsrsPreset, FsrsScheduler,
+    MAX_DESIRED_RETENTION, MIN_DESIRED_RETENTION, clamp_desired_retention,
+    interval_days_for_stability, raw_interval_days_for_stability,
+};
+pub use optimizer::{
+    AUTO_OPTIMIZE_MIN_DAYS, AUTO_OPTIMIZE_MIN_REVIEWS, BATCH_SIZE, EPOCHS,
+    HEALTH_CHECK_ITEMS, L2_GAMMA, LEARNING_RATE, MAX_SEQUENCE_LENGTH,
+    MIN_TRAINING_ITEMS, OptimizationInput, OptimizationReport,
+    OptimizationTrigger, RANDOM_SEED, ReviewRecord, day_gate, optimize,
+    should_auto_optimize,
+};
 pub use sm2::{Sm2Preset, Sm2Scheduler};
 
 use std::sync::Arc;

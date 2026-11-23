@@ -11,18 +11,177 @@ use crate::shared::{
     step_outcome, unchanged, unchanged_outcome,
 };
 
-/// FSRS-5 model weights and the fixed forgetting curve constants.
-const WEIGHTS: [f32; 19] = [
-    0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046, 1.54575,
-    0.1192, 1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315, 2.9898, 0.51655,
-    0.6621,
+/// Anki's default FSRS-6 parameters (21 weights, positive `w20` decay).
+pub const ANKI_DEFAULT_PARAMS: [f32; 21] = [
+    0.212, 1.2931, 2.3065, 8.2956, 6.4133, 0.8334, 3.0194, 0.001, 1.8722,
+    0.1666, 0.796, 1.4835, 0.0614, 0.2629, 1.6483, 0.6014, 1.8729, 0.5425,
+    0.0912, 0.0658, 0.1542,
 ];
-const DECAY: f32 = -0.5;
-const FACTOR: f32 = 19.0 / 81.0;
+
+/// Decay used by FSRS-5 and the 17-weight FSRS-4.5 conversion.
+pub const DEFAULT_DECAY: f32 = 0.5;
+pub const DEFAULT_DESIRED_RETENTION: f32 = 0.9;
+pub const MIN_DESIRED_RETENTION: f32 = 0.7;
+pub const MAX_DESIRED_RETENTION: f32 = 0.99;
+
+const FSRS4_PARAMS_LEN: usize = 17;
+const FSRS5_PARAMS_LEN: usize = 19;
+const FSRS6_PARAMS_LEN: usize = 21;
 const S_MIN: f32 = 0.001;
 const S_MAX: f32 = 36_500.0;
 const D_MIN: f32 = 1.0;
 const D_MAX: f32 = 10.0;
+
+/// FSRS weights with the decay Anki derives from `w20`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FsrsParams {
+    weights: [f32; FSRS6_PARAMS_LEN],
+    decay: f32,
+}
+
+impl Default for FsrsParams {
+    fn default() -> Self {
+        Self::from_weights(ANKI_DEFAULT_PARAMS)
+    }
+}
+
+impl FsrsParams {
+    /// Accepts 0 (defaults), 17 (FSRS-4.5), 19 (FSRS-5) or 21 (FSRS-6) weights.
+    #[must_use]
+    pub fn from_slice(values: &[f32]) -> Option<Self> {
+        match values.len() {
+            0 => Some(Self::default()),
+            FSRS4_PARAMS_LEN => Self::from_fsrs45(values.try_into().ok()?),
+            FSRS5_PARAMS_LEN => Self::from_fsrs5(values.try_into().ok()?),
+            FSRS6_PARAMS_LEN => Self::from_fsrs6(values.try_into().ok()?),
+            _ => None,
+        }
+    }
+
+    /// Converts fsrs-rs 17-weight FSRS-4.5 parameters to 21 weights.
+    #[must_use]
+    pub fn from_fsrs45(weights: &[f32; FSRS4_PARAMS_LEN]) -> Option<Self> {
+        let w4 = *weights.get(4)?;
+        let w5 = *weights.get(5)?;
+        let w6 = *weights.get(6)?;
+        let mut converted = [0.0_f32; FSRS6_PARAMS_LEN];
+        converted
+            .iter_mut()
+            .zip(weights)
+            .for_each(|(slot, value)| *slot = *value);
+        *converted.get_mut(4)? = w4 + 2.0 * w5;
+        *converted.get_mut(5)? = (3.0 * w5 + 1.0).ln() / 3.0;
+        *converted.get_mut(6)? = w6 + 0.5;
+        *converted.get_mut(20)? = DEFAULT_DECAY;
+        Self::from_valid(converted)
+    }
+
+    /// Converts fsrs-rs 19-weight FSRS-5 parameters to 21 weights.
+    #[must_use]
+    pub fn from_fsrs5(weights: &[f32; FSRS5_PARAMS_LEN]) -> Option<Self> {
+        let mut converted = [0.0_f32; FSRS6_PARAMS_LEN];
+        converted
+            .iter_mut()
+            .zip(weights)
+            .for_each(|(slot, value)| *slot = *value);
+        *converted.get_mut(20)? = DEFAULT_DECAY;
+        Self::from_valid(converted)
+    }
+
+    /// Uses fsrs-rs 21-weight FSRS-6 parameters directly.
+    #[must_use]
+    pub fn from_fsrs6(weights: &[f32; FSRS6_PARAMS_LEN]) -> Option<Self> {
+        Self::from_valid(*weights)
+    }
+
+    #[must_use]
+    pub const fn weights(&self) -> &[f32; FSRS6_PARAMS_LEN] {
+        &self.weights
+    }
+
+    /// Positive decay derived from `w20` (0.5 for 17 and 19 weight models).
+    #[must_use]
+    pub const fn decay(&self) -> f32 {
+        self.decay
+    }
+
+    fn from_weights(weights: [f32; FSRS6_PARAMS_LEN]) -> Self {
+        let decay = weights.get(20).copied().unwrap_or(DEFAULT_DECAY);
+        Self { weights, decay }
+    }
+
+    fn from_valid(weights: [f32; FSRS6_PARAMS_LEN]) -> Option<Self> {
+        if weights.iter().any(|weight| !weight.is_finite()) {
+            return None;
+        }
+        let decay = weights.get(20).copied()?;
+        if decay <= 0.0 {
+            return None;
+        }
+        Some(Self::from_weights(weights))
+    }
+}
+
+/// Keeps desired retention inside Anki's preset range, falling back to 0.9.
+#[must_use]
+pub const fn clamp_desired_retention(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(MIN_DESIRED_RETENTION, MAX_DESIRED_RETENTION)
+    } else {
+        DEFAULT_DESIRED_RETENTION
+    }
+}
+
+fn forgetting_factor(decay: f32) -> f32 {
+    (-0.9_f32.ln() / decay).exp() - 1.0
+}
+
+/// Raw Anki interval in days: `S / F * (DR^(-1/d) - 1)`.
+#[must_use]
+pub fn raw_interval_days_for_stability(
+    stability: f32,
+    desired_retention: f32,
+    decay: f32,
+) -> f32 {
+    let effective_decay = positive_factor(decay, DEFAULT_DECAY);
+    let factor = forgetting_factor(effective_decay);
+    if !factor.is_finite() || factor <= 0.0 {
+        return 0.0;
+    }
+    let bounded_stability = if stability.is_finite() {
+        stability.clamp(S_MIN, S_MAX)
+    } else {
+        S_MIN
+    };
+    let retention = clamp_desired_retention(desired_retention);
+    bounded_stability / factor * (retention.powf(-1.0 / effective_decay) - 1.0)
+}
+
+/// Rounded and bounded Anki interval without fuzz.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the interval formula takes four scalar inputs"
+)]
+#[must_use]
+pub fn interval_days_for_stability(
+    stability: f32,
+    desired_retention: f32,
+    decay: f32,
+    maximum_interval: i32,
+) -> i32 {
+    let raw =
+        raw_interval_days_for_stability(stability, desired_retention, decay);
+    let maximum = maximum_interval.max(1);
+    if raw.is_nan() {
+        return 1;
+    }
+    let rounded = if raw.is_infinite() {
+        maximum
+    } else {
+        as_i32(raw.round())
+    };
+    rounded.clamp(1, maximum)
+}
 
 /// Settings for the FSRS-5 scheduler.
 #[derive(Clone, Debug, PartialEq)]
@@ -46,10 +205,11 @@ impl Default for FsrsPreset {
     }
 }
 
-/// FSRS-5 scheduler with deterministic interval fuzzing.
+/// FSRS scheduler with model-driven memory state and deterministic fuzzing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FsrsScheduler {
     preset: FsrsPreset,
+    params: FsrsParams,
 }
 
 struct Prepared {
@@ -68,8 +228,17 @@ struct IntervalInput {
 
 impl FsrsScheduler {
     #[must_use]
-    pub const fn new(preset: FsrsPreset) -> Self {
-        Self { preset }
+    pub fn new(preset: FsrsPreset) -> Self {
+        let clamped = FsrsPreset {
+            desired_retention: clamp_desired_retention(
+                preset.desired_retention,
+            ),
+            ..preset
+        };
+        Self {
+            preset: clamped,
+            params: FsrsParams::default(),
+        }
     }
 
     #[must_use]
@@ -82,13 +251,28 @@ impl FsrsScheduler {
         &self.preset
     }
 
+    #[must_use]
+    pub const fn params(&self) -> &FsrsParams {
+        &self.params
+    }
+
+    pub const fn set_params(&mut self, params: FsrsParams) {
+        self.params = params;
+    }
+
+    #[must_use]
+    pub const fn with_params(mut self, params: FsrsParams) -> Self {
+        self.params = params;
+        self
+    }
+
     fn interval_days(&self, input: IntervalInput) -> i32 {
-        let retention = positive_factor(self.preset.desired_retention, 0.9)
-            .clamp(0.5, 0.999);
-        let raw =
-            input.stability / FACTOR * (retention.powf(1.0 / DECAY) - 1.0);
-        let maximum = self.preset.maximum_interval.max(1);
-        let interval = as_i32(raw.round()).clamp(1, maximum);
+        let interval = interval_days_for_stability(
+            input.stability,
+            self.preset.desired_retention,
+            self.params.decay(),
+            self.preset.maximum_interval,
+        );
         fuzz_interval(FuzzInput {
             interval,
             maximum_interval: self.preset.maximum_interval,
@@ -101,16 +285,16 @@ impl FsrsScheduler {
 
     fn prepare(&self, ctx: &ReviewContext<'_>) -> Prepared {
         let memory = read_memory(&ctx.card.data).map_or_else(
-            || initial_memory(ctx.rating),
+            || initial_memory(&self.params, ctx.rating),
             |current| {
                 update_memory(
+                    &self.params,
                     current,
                     elapsed_days(ctx.card, ctx.now_secs),
                     ctx.rating,
                 )
             },
         );
-        let raw_retention = positive_factor(self.preset.desired_retention, 0.9);
         let graduation = self.interval_days(IntervalInput {
             stability: memory.stability,
             card_id: ctx.card.id,
@@ -118,7 +302,11 @@ impl FsrsScheduler {
             rating: ctx.rating,
         });
         Prepared {
-            data: write_memory(&ctx.card.data, memory, raw_retention),
+            data: write_memory(
+                &ctx.card.data,
+                memory,
+                clamp_desired_retention(self.preset.desired_retention),
+            ),
             factor: factor_or_default(ctx.card.factor),
             graduation,
         }
@@ -256,72 +444,98 @@ struct Memory {
     difficulty: f32,
 }
 
-fn weight(index: usize) -> f32 {
-    WEIGHTS.get(index).copied().unwrap_or(0.0)
+fn weight(params: &FsrsParams, index: usize) -> f32 {
+    params.weights().get(index).copied().unwrap_or(0.0)
 }
 
-fn initial_difficulty(rating: Rating) -> f32 {
+fn initial_difficulty(params: &FsrsParams, rating: Rating) -> f32 {
     let grade = f32::from(rating.code().saturating_sub(1));
-    (weight(4) - (weight(5) * grade).exp() + 1.0).clamp(D_MIN, D_MAX)
-}
-
-fn initial_memory(rating: Rating) -> Memory {
-    let index = usize::from(rating.code()).saturating_sub(1);
-    Memory {
-        stability: weight(index).clamp(S_MIN, S_MAX),
-        difficulty: initial_difficulty(rating),
-    }
-}
-
-fn next_difficulty(difficulty: f32, rating: Rating) -> f32 {
-    let grade = f32::from(rating.code());
-    let delta = -weight(6) * (grade - 3.0);
-    let damped = difficulty + delta * (10.0 - difficulty) / 9.0;
-    (weight(7) * initial_difficulty(Rating::Easy) + (1.0 - weight(7)) * damped)
+    (weight(params, 4) - (weight(params, 5) * grade).exp() + 1.0)
         .clamp(D_MIN, D_MAX)
 }
 
-fn retention(stability: f32, days: u32) -> f32 {
-    let elapsed = as_f32(i32::try_from(days).unwrap_or(i32::MAX)).max(0.0);
-    (1.0 + FACTOR * elapsed / stability).powf(DECAY)
+fn initial_memory(params: &FsrsParams, rating: Rating) -> Memory {
+    let index = usize::from(rating.code()).saturating_sub(1);
+    Memory {
+        stability: weight(params, index).clamp(S_MIN, S_MAX),
+        difficulty: initial_difficulty(params, rating),
+    }
 }
 
+fn next_difficulty(
+    params: &FsrsParams,
+    difficulty: f32,
+    rating: Rating,
+) -> f32 {
+    let grade = f32::from(rating.code());
+    let delta = -weight(params, 6) * (grade - 3.0);
+    let damped = difficulty + delta * (10.0 - difficulty) / 9.0;
+    (weight(params, 7) * initial_difficulty(params, Rating::Easy)
+        + (1.0 - weight(params, 7)) * damped)
+        .clamp(D_MIN, D_MAX)
+}
+
+fn retention(params: &FsrsParams, stability: f32, days: u32) -> f32 {
+    let elapsed = as_f32(i32::try_from(days).unwrap_or(i32::MAX)).max(0.0);
+    let decay = positive_factor(params.decay(), DEFAULT_DECAY);
+    let factor = forgetting_factor(decay);
+    if !factor.is_finite() || factor <= 0.0 || stability <= 0.0 {
+        return 1.0;
+    }
+    (1.0 + factor * elapsed / stability).powf(-decay)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "memory update needs the model, state, elapsed days and rating"
+)]
 fn recall_stability(
+    params: &FsrsParams,
     memory: Memory,
     retrievability: f32,
     rating: Rating,
 ) -> f32 {
     let hard = if rating == Rating::Hard {
-        weight(15)
+        weight(params, 15)
     } else {
         1.0
     };
     let easy = if rating == Rating::Easy {
-        weight(16)
+        weight(params, 16)
     } else {
         1.0
     };
-    let increase = weight(8).exp()
+    let increase = weight(params, 8).exp()
         * (11.0 - memory.difficulty)
-        * memory.stability.powf(-weight(9))
-        * ((1.0 - retrievability) * weight(10)).exp_m1()
+        * memory.stability.powf(-weight(params, 9))
+        * ((1.0 - retrievability) * weight(params, 10)).exp_m1()
         * hard
         * easy;
     memory.stability * (1.0 + increase)
 }
 
-fn forget_stability(memory: Memory, retrievability: f32) -> f32 {
-    let long_term = weight(11)
-        * memory.difficulty.powf(-weight(12))
-        * ((memory.stability + 1.0).powf(weight(13)) - 1.0)
-        * ((1.0 - retrievability) * weight(14)).exp();
-    let short_term_cap = memory.stability / (weight(17) * weight(18)).exp();
+fn forget_stability(
+    params: &FsrsParams,
+    memory: Memory,
+    retrievability: f32,
+) -> f32 {
+    let long_term = weight(params, 11)
+        * memory.difficulty.powf(-weight(params, 12))
+        * ((memory.stability + 1.0).powf(weight(params, 13)) - 1.0)
+        * ((1.0 - retrievability) * weight(params, 14)).exp();
+    let short_term_cap =
+        memory.stability / (weight(params, 17) * weight(params, 18)).exp();
     long_term.min(short_term_cap)
 }
 
-fn same_day_stability(stability: f32, rating: Rating) -> f32 {
+fn same_day_stability(
+    params: &FsrsParams,
+    stability: f32,
+    rating: Rating,
+) -> f32 {
     let grade = f32::from(rating.code());
-    let raw_factor = (weight(17) * (grade - 3.0 + weight(18))).exp();
+    let raw_factor =
+        (weight(params, 17) * (grade - 3.0 + weight(params, 18))).exp();
     let factor = if rating.code() >= 2 {
         raw_factor.max(1.0)
     } else {
@@ -330,16 +544,25 @@ fn same_day_stability(stability: f32, rating: Rating) -> f32 {
     (stability * factor).clamp(S_MIN, S_MAX)
 }
 
-fn update_memory(memory: Memory, days: u32, rating: Rating) -> Memory {
-    let difficulty = next_difficulty(memory.difficulty, rating);
+#[expect(
+    clippy::too_many_arguments,
+    reason = "memory update needs the model, state, elapsed days and rating"
+)]
+fn update_memory(
+    params: &FsrsParams,
+    memory: Memory,
+    days: u32,
+    rating: Rating,
+) -> Memory {
+    let difficulty = next_difficulty(params, memory.difficulty, rating);
     let stability = if days == 0 {
-        same_day_stability(memory.stability, rating)
+        same_day_stability(params, memory.stability, rating)
     } else {
-        let retrievability = retention(memory.stability, days);
+        let retrievability = retention(params, memory.stability, days);
         let next = if rating == Rating::Again {
-            forget_stability(memory, retrievability)
+            forget_stability(params, memory, retrievability)
         } else {
-            recall_stability(memory, retrievability, rating)
+            recall_stability(params, memory, retrievability, rating)
         };
         next.clamp(S_MIN, S_MAX)
     };
@@ -376,7 +599,6 @@ fn json_number(value: f32) -> Value {
         Number::from_f64(f64::from(value)).unwrap_or_else(|| Number::from(0)),
     )
 }
-
 fn write_memory(data: &str, memory: Memory, desired_retention: f32) -> String {
     let mut object: Map<String, Value> =
         serde_json::from_str(data).ok().unwrap_or_default();
@@ -384,7 +606,10 @@ fn write_memory(data: &str, memory: Memory, desired_retention: f32) -> String {
     object.insert(String::from("d"), json_number(memory.difficulty));
     object.insert(
         String::from("dr"),
-        json_number(desired_retention.clamp(0.5, 0.999)),
+        json_number(
+            desired_retention
+                .clamp(MIN_DESIRED_RETENTION, MAX_DESIRED_RETENTION),
+        ),
     );
     serde_json::to_string(&object).unwrap_or_default()
 }

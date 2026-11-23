@@ -71,8 +71,15 @@ jobs:
             git worktree add --detach "$dir" "$sha"
             # Older commits without the headless GUI hook run the same harness
             # with the GUI feature off, leaving their own review code untouched.
+            # The head harness is copied below, so a variant only builds the GUI
+            # workloads when it exposes the type that harness uses. That keeps a
+            # UI rewrite on the head measurable against an older base.
             skip_gui=0
-            grep -q 'pub struct BenchApp' "$dir/crates/ui/src/app.rs" || skip_gui=1
+            if grep -q 'ranki_ui::BenchKey' "$GITHUB_WORKSPACE/crates/bench/src/measure.rs"; then
+              grep -q 'pub enum BenchKey' "$dir/crates/ui/src/bench.rs" 2>/dev/null || skip_gui=1
+            else
+              grep -q 'pub struct BenchApp' "$dir/crates/ui/src/app.rs" || skip_gui=1
+            fi
             # The harness comes from the head so every variant runs exactly the
             # same workloads and sampling rules.
             mkdir -p "$dir/crates/bench"

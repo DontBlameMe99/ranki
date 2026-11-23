@@ -22,22 +22,35 @@ mod records;
 mod schema;
 mod search;
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::path::Path;
 use std::path::PathBuf;
+use std::slice;
+use std::str;
 
 pub use ranki_model::StoreError;
+pub use ranki_model::stock_models;
+
+pub use anki::deck_common;
+pub use anki::decode_deck_name;
+pub use anki::encode_deck_name;
+
+pub use records::models_from_tables_with_prefix;
+pub use records::models_to_json;
 
 use ranki_model::Card;
 use ranki_model::DEFAULT_DECK_ID;
 use ranki_model::Deck;
 use ranki_model::DeckStats;
+use ranki_model::DeckTotals;
 use ranki_model::Id;
 use ranki_model::NewNote;
 use ranki_model::NoteModel;
 use ranki_model::RevLog;
 use ranki_model::ReviewDecision;
+use ranki_model::StockModelKind;
 use ranki_model::Store;
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -46,10 +59,9 @@ use rusqlite::Transaction;
 use rusqlite::params;
 use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
+use serde_json::Map;
 use serde_json::Value as Json;
 use serde_json::json;
-
-/// Human-readable summary of the supported [`Store::find_cards`] syntax.
 pub const SEARCH_SYNTAX: &str = "deck:, tag:, note:, is:new/learn/review/suspended/buried, plain field text, * wildcard";
 
 /// An Anki collection backed by a SQLite file.
@@ -139,6 +151,54 @@ impl Collection {
         &self.path
     }
 
+    /// Installs a stock note type and returns the stored model.
+    ///
+    /// The existing model is returned when the collection already has that
+    /// stock type. Schema-18 collections that keep note types in normalized
+    /// tables get rows there instead of `col.models`.
+    fn install_model(
+        &mut self,
+        kind: StockModelKind,
+    ) -> Result<NoteModel, StoreError> {
+        let existing = self.model_list()?;
+        if let Some(model) = existing
+            .iter()
+            .find(|model| StockModelKind::of(model) == Some(kind))
+        {
+            return Ok(model.clone());
+        }
+        let mut model = kind.definition();
+        model.id = fresh_model_id(&existing)?;
+        let col = records::read_col(&self.conn)?;
+        let stamp = col_stamp(&col)?;
+        let tables = models_in_tables(&self.conn, &col)?;
+        let models = if tables {
+            None
+        } else {
+            Some(models_json_installing(&col.models, &model)?)
+        };
+        let transaction = self.conn.transaction().map_err(backend)?;
+        if let Some(json) = models.as_deref() {
+            transaction
+                .execute(
+                    "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4, models = ?5 WHERE id = \
+                     1",
+                    params![stamp.modified, stamp.scm, stamp.usn, stamp.ls, json],
+                )
+                .map_err(backend)?;
+        } else {
+            transaction
+                .execute(
+                    "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
+                    params![stamp.modified, stamp.scm, stamp.usn, stamp.ls],
+                )
+                .map_err(backend)?;
+            insert_model_tables(&transaction, &model, &stamp)?;
+        }
+        transaction.commit().map_err(backend)?;
+        Ok(model)
+    }
+
     /// Returns the collection creation time in Unix seconds.
     ///
     /// # Errors
@@ -194,6 +254,26 @@ impl Collection {
             )
             .optional()
             .map_err(backend)
+    }
+
+    /// Persists several scheduled reviews and their log entries in one
+    /// transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any card does not exist or the write fails. A
+    /// failed batch writes nothing.
+    pub fn apply_reviews(
+        &mut self,
+        decisions: &[ReviewDecision],
+    ) -> Result<(), StoreError> {
+        let transaction = self.conn.transaction().map_err(backend)?;
+        let usn = update_col(&transaction, true)?;
+        for decision in decisions {
+            write_review(&transaction, usn, decision)?;
+        }
+        transaction.commit().map_err(backend)?;
+        Ok(())
     }
 
     fn deck_list(&self) -> Result<Vec<Deck>, StoreError> {
@@ -257,13 +337,8 @@ impl Store for Collection {
             return Err(invalid(format!("deck already exists: {deck_name}")));
         }
         let col = records::read_col(&self.conn)?;
+        let stamp = col_stamp(&col)?;
         let id = anki::next_id()?;
-        let now_secs = anki::now_secs()?;
-        let now_ms = anki::now_ms()?;
-        let usn = col
-            .usn
-            .checked_add(1)
-            .ok_or_else(|| invalid("usn overflow"))?;
         let modern = uses_deck_table(&self.conn, &col)?;
         if modern {
             self.conn
@@ -273,9 +348,9 @@ impl Store for Collection {
                     params![
                         id,
                         anki::encode_deck_name(deck_name),
-                        now_secs,
-                        usn,
-                        anki::deck_common(usn, now_secs),
+                        stamp.now_secs,
+                        stamp.usn,
+                        anki::deck_common(stamp.usn, stamp.now_secs),
                         Vec::<u8>::new(),
                     ],
                 )
@@ -283,7 +358,7 @@ impl Store for Collection {
             self.conn
                 .execute(
                     "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
-                    params![now_ms, now_ms, usn, now_ms],
+                    params![stamp.modified, stamp.scm, stamp.usn, stamp.ls],
                 )
                 .map_err(backend)?;
         } else {
@@ -294,14 +369,14 @@ impl Store for Collection {
                 .ok_or_else(|| invalid("decks is not an object"))?;
             object.insert(
                 id.to_string(),
-                json!({"id": id, "name": deck_name, "usn": usn, "mod": now_secs, "conf": 1, "desc": "", "dyn": 0}),
+                json!({"id": id, "name": deck_name, "usn": stamp.usn, "mod": stamp.now_secs, "conf": 1, "desc": "", "dyn": 0}),
             );
             let decks_json = serde_json::to_string(&value)
                 .map_err(|error| invalid(error.to_string()))?;
             self.conn
                 .execute(
                     "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4, decks = ?5 WHERE id = 1",
-                    params![now_ms, now_ms, usn, now_ms, decks_json],
+                    params![stamp.modified, stamp.scm, stamp.usn, stamp.ls, decks_json],
                 )
                 .map_err(backend)?;
         }
@@ -379,6 +454,13 @@ impl Store for Collection {
 
     fn models(&self) -> Result<Vec<NoteModel>, StoreError> {
         self.model_list()
+    }
+
+    fn ensure_model(
+        &mut self,
+        kind: StockModelKind,
+    ) -> Result<NoteModel, StoreError> {
+        self.install_model(kind)
     }
 
     fn find_cards(&self, query: &str) -> Result<Vec<Id>, StoreError> {
@@ -513,12 +595,12 @@ impl Store for Collection {
                 ],
             )
             .map_err(backend)?;
-        let mut cards: Vec<Id> = Vec::with_capacity(model.templates.len());
-        for position in 0..model.templates.len() {
+        let ordinals = model.card_ordinals(&note.fields);
+        let mut cards: Vec<Id> = Vec::with_capacity(ordinals.len());
+        for (offset, ordinal) in ordinals.into_iter().enumerate() {
             let card_id = anki::next_id()?;
-            let ordinal =
-                anki::as_u16(i64::try_from(position).unwrap_or_default())?;
-            let due = next_position.saturating_add(i64::from(ordinal));
+            let due = next_position
+                .saturating_add(i64::try_from(offset).unwrap_or_default());
             transaction
                 .execute(
                     "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, \
@@ -544,53 +626,7 @@ impl Store for Collection {
     ) -> Result<(), StoreError> {
         let transaction = self.conn.transaction().map_err(backend)?;
         let usn = update_col(&transaction, true)?;
-        let card = &decision.card;
-        let updated = transaction
-            .execute(
-                "UPDATE cards SET did = ?1, mod = ?2, usn = ?3, type = ?4, queue = ?5, due = ?6, \
-                 ivl = ?7, factor = ?8, reps = ?9, lapses = ?10, left = ?11, odue = ?12, odid = \
-                 ?13, flags = ?14, data = ?15 WHERE id = ?16",
-                params![
-                    card.deck_id,
-                    card.modified,
-                    usn,
-                    card.card_type.code(),
-                    card.queue.code(),
-                    card.due,
-                    card.interval,
-                    card.factor,
-                    card.reps,
-                    card.lapses,
-                    card.left,
-                    card.original_due,
-                    card.original_deck_id,
-                    card.flags,
-                    card.data,
-                    card.id,
-                ],
-            )
-            .map_err(backend)?;
-        if updated == 0 {
-            return Err(StoreError::NotFound(format!("card {}", card.id)));
-        }
-        let log = &decision.revlog;
-        transaction
-            .execute(
-                "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type) VALUES \
-                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    log.id,
-                    card.id,
-                    usn,
-                    log.ease.code(),
-                    log.interval,
-                    log.last_interval,
-                    log.factor,
-                    log.time_ms,
-                    log.kind.code(),
-                ],
-            )
-            .map_err(backend)?;
+        write_review(&transaction, usn, decision)?;
         transaction.commit().map_err(backend)?;
         Ok(())
     }
@@ -620,15 +656,41 @@ impl Store for Collection {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })
             .map_err(backend)?;
-        Ok(DeckStats {
-            new_cards: usize::try_from(counts.0.unwrap_or_default())
-                .unwrap_or_default(),
-            learning_cards: usize::try_from(counts.1.unwrap_or_default())
-                .unwrap_or_default(),
-            review_cards: usize::try_from(counts.2.unwrap_or_default())
-                .unwrap_or_default(),
-            total_cards: usize::try_from(counts.3).unwrap_or_default(),
-        })
+        Ok(stats_from_counts(counts))
+    }
+
+    fn deck_stats(&self) -> Result<DeckTotals, StoreError> {
+        let decks = self.deck_list()?;
+        let counts = deck_card_counts(&self.conn)?;
+        let ids_by_name = decks
+            .iter()
+            .map(|deck| (deck.name.as_str(), deck.id))
+            .collect::<HashMap<_, _>>();
+        let mut totals: HashMap<Id, DeckStats> = HashMap::new();
+        for deck in &decks {
+            let subdeck = counts.get(&deck.id).copied().unwrap_or_default();
+            let ids = deck_and_ancestor_ids(deck, &ids_by_name);
+            add_deck_totals(&mut totals, &ids, subdeck);
+        }
+        Ok(decks
+            .iter()
+            .map(|deck| {
+                (deck.id, totals.get(&deck.id).copied().unwrap_or_default())
+            })
+            .collect())
+    }
+    fn review_history(&self) -> Result<Vec<RevLog>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT id, cid, usn, ease, ivl, lastIvl, factor, time, type \
+                 FROM revlog ORDER BY cid, id",
+            )
+            .map_err(backend)?;
+        let rows = statement
+            .query_map([], records::revlog_from_row)
+            .map_err(backend)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(backend)
     }
 
     fn collection_created(&self) -> Result<i64, StoreError> {
@@ -640,7 +702,12 @@ impl Store for Collection {
     }
 }
 
-fn register_collations(conn: &Connection) -> Result<(), StoreError> {
+/// Registers the case-insensitive collation used by schema-18 table indexes.
+///
+/// # Errors
+///
+/// Returns an error when SQLite cannot install the collation.
+pub fn register_collations(conn: &Connection) -> Result<(), StoreError> {
     conn.create_collation("unicase", |left, right| {
         left.to_lowercase().cmp(&right.to_lowercase())
     })
@@ -668,7 +735,9 @@ type CardsAndNotes = (Vec<Id>, Vec<Id>);
 
 struct ColStamp {
     usn: i32,
-    now_ms: i64,
+    modified: i64,
+    scm: i64,
+    ls: i64,
     now_secs: i64,
 }
 
@@ -676,6 +745,121 @@ struct Graves {
     cards: Vec<Id>,
     notes: Vec<Id>,
     decks: Vec<Id>,
+}
+
+fn fresh_model_id(existing: &[NoteModel]) -> Result<Id, StoreError> {
+    loop {
+        let id = anki::next_id()?;
+        if !existing.iter().any(|entry| entry.id == id) {
+            return Ok(id);
+        }
+    }
+}
+
+/// Adds one model to `col.models` JSON and returns the new document.
+fn models_json_installing(
+    json: &str,
+    model: &NoteModel,
+) -> Result<String, StoreError> {
+    let mut object: Map<String, Json> =
+        serde_json::from_str(json).unwrap_or_default();
+    if let Some(entry) = models_to_json(slice::from_ref(model)).as_object() {
+        object.extend(entry.clone());
+    }
+    serde_json::to_string(&Json::Object(object))
+        .map_err(|error| invalid(error.to_string()))
+}
+
+/// True when the collection keeps its note types in schema-18 tables.
+fn models_in_tables(
+    conn: &Connection,
+    col: &records::ColData,
+) -> Result<bool, StoreError> {
+    if !records::table_exists(conn, "notetypes")? {
+        return Ok(false);
+    }
+    Ok(records::models_from_json(&col.models)?.is_empty())
+}
+
+fn column_exists(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, StoreError> {
+    let mut statement = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(backend)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(backend)?;
+    for row in rows {
+        if row.map_err(backend)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Writes one note type into the schema-18 normalized tables.
+fn insert_model_tables(
+    conn: &Connection,
+    model: &NoteModel,
+    stamp: &ColStamp,
+) -> Result<(), StoreError> {
+    conn.execute(
+        "INSERT INTO notetypes (id, name, mtime_secs, usn, config) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            model.id,
+            model.name,
+            stamp.now_secs,
+            stamp.usn,
+            anki::notetype_config(
+                model.kind.code(),
+                model.original_stock_kind,
+                &model.css,
+            ),
+        ],
+    )
+    .map_err(backend)?;
+    for (index, name) in model.fields.iter().enumerate() {
+        let ord = i64::try_from(index).unwrap_or_default();
+        let tag = model.field_tags.get(index).copied().flatten();
+        conn.execute(
+            "INSERT INTO fields (ntid, ord, name, config) VALUES (?1, ?2, ?3, ?4)",
+            params![model.id, ord, name, anki::field_config(tag)],
+        )
+        .map_err(backend)?;
+    }
+    let stamped = column_exists(conn, "templates", "mtime_secs")?;
+    for template in &model.templates {
+        let ord = i64::from(template.ord);
+        let config = anki::template_config(
+            &template.question_format,
+            &template.answer_format,
+        );
+        if stamped {
+            conn.execute(
+                "INSERT INTO templates (ntid, ord, name, mtime_secs, usn, config) VALUES (?1, \
+                 ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    model.id,
+                    ord,
+                    template.name,
+                    stamp.now_secs,
+                    stamp.usn,
+                    config
+                ],
+            )
+            .map_err(backend)?;
+        } else {
+            conn.execute(
+                "INSERT INTO templates (ntid, ord, name, config) VALUES (?1, ?2, ?3, ?4)",
+                params![model.id, ord, template.name, config],
+            )
+            .map_err(backend)?;
+        }
+    }
+    Ok(())
 }
 
 fn placeholders(start: i64, count: usize) -> String {
@@ -696,6 +880,87 @@ fn deck_list_from(conn: &Connection) -> Result<Vec<Deck>, StoreError> {
         return records::decks_from_tables(conn);
     }
     Ok(decks)
+}
+
+/// Counts cards per deck id in one grouped query.
+fn deck_card_counts(
+    conn: &Connection,
+) -> Result<HashMap<Id, DeckStats>, StoreError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT c.did, SUM(CASE WHEN c.queue = 0 THEN 1 ELSE 0 END), \
+             SUM(CASE WHEN c.queue IN (1, 3) THEN 1 ELSE 0 END), \
+             SUM(CASE WHEN c.queue = 2 THEN 1 ELSE 0 END), COUNT(*) FROM cards c GROUP BY \
+             c.did",
+        )
+        .map_err(backend)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Id>(0)?,
+                (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?),
+            ))
+        })
+        .map_err(backend)?;
+    let mut counts = HashMap::new();
+    for row in rows {
+        let (id, tally) = row.map_err(backend)?;
+        let _ = counts.insert(id, stats_from_counts(tally));
+    }
+    Ok(counts)
+}
+
+/// Adds one deck's counts to the deck and each id in `ids`.
+fn add_deck_totals(
+    totals: &mut HashMap<Id, DeckStats>,
+    ids: &[Id],
+    subdeck: DeckStats,
+) {
+    for id in ids {
+        add_deck_stats(totals.entry(*id).or_default(), subdeck);
+    }
+}
+
+/// Ids of a deck followed by each ancestor deck that is named in the map.
+fn deck_and_ancestor_ids(
+    deck: &Deck,
+    ids_by_name: &HashMap<&str, Id>,
+) -> Vec<Id> {
+    let mut ids = vec![deck.id];
+    for (index, _) in deck.name.char_indices() {
+        if !deck
+            .name
+            .get(index..)
+            .is_some_and(|tail| tail.starts_with("::"))
+        {
+            continue;
+        }
+        let Some(&ancestor) = ids_by_name.get(&deck.name[..index]) else {
+            continue;
+        };
+        ids.push(ancestor);
+    }
+    ids
+}
+
+const fn add_deck_stats(total: &mut DeckStats, counts: DeckStats) {
+    total.new_cards = total.new_cards.saturating_add(counts.new_cards);
+    total.learning_cards =
+        total.learning_cards.saturating_add(counts.learning_cards);
+    total.review_cards = total.review_cards.saturating_add(counts.review_cards);
+    total.total_cards = total.total_cards.saturating_add(counts.total_cards);
+}
+
+fn stats_from_counts(counts: Counts) -> DeckStats {
+    DeckStats {
+        new_cards: usize::try_from(counts.0.unwrap_or_default())
+            .unwrap_or_default(),
+        learning_cards: usize::try_from(counts.1.unwrap_or_default())
+            .unwrap_or_default(),
+        review_cards: usize::try_from(counts.2.unwrap_or_default())
+            .unwrap_or_default(),
+        total_cards: usize::try_from(counts.3).unwrap_or_default(),
+    }
 }
 
 fn deck_subtree_ids(decks: &[Deck], deck_id: Id) -> Vec<Id> {
@@ -731,14 +996,24 @@ fn uses_deck_table(
     Ok(records::decks_from_json(&col.decks)?.is_empty())
 }
 
+/// Keeps a stamp at least one past `previous` so writes in the same
+/// millisecond stay ordered. Saturation at [`i64::MAX`] keeps a collection
+/// writable at the end of the range instead of panicking.
+fn next_stamp(previous: i64, now: i64) -> i64 {
+    now.max(previous.saturating_add(1))
+}
+
 fn col_stamp(col: &records::ColData) -> Result<ColStamp, StoreError> {
     let usn = col
         .usn
         .checked_add(1)
         .ok_or_else(|| invalid("usn overflow"))?;
+    let now = anki::now_ms()?;
     Ok(ColStamp {
         usn,
-        now_ms: anki::now_ms()?,
+        modified: next_stamp(col.modified, now),
+        scm: next_stamp(col.scm, now),
+        ls: next_stamp(col.last_sync, now),
         now_secs: anki::now_secs()?,
     })
 }
@@ -751,13 +1026,13 @@ fn write_col_metadata(
     if let Some(decks) = decks_json {
         conn.execute(
             "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4, decks = ?5 WHERE id = 1",
-            params![stamp.now_ms, stamp.now_ms, stamp.usn, stamp.now_ms, decks],
+            params![stamp.modified, stamp.scm, stamp.usn, stamp.ls, decks],
         )
         .map_err(backend)?;
     } else {
         conn.execute(
             "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
-            params![stamp.now_ms, stamp.now_ms, stamp.usn, stamp.now_ms],
+            params![stamp.modified, stamp.scm, stamp.usn, stamp.ls],
         )
         .map_err(backend)?;
     }
@@ -985,24 +1260,96 @@ fn write_graves(
 }
 fn update_col(conn: &Connection, bump_scm: bool) -> Result<i32, StoreError> {
     let col = records::read_col(conn)?;
-    let now = anki::now_ms()?;
-    let usn = col
-        .usn
-        .checked_add(1)
-        .ok_or_else(|| invalid("usn overflow"))?;
-    let scm = if bump_scm { now } else { col.scm };
+    let stamp = col_stamp(&col)?;
+    let scm = if bump_scm { stamp.scm } else { col.scm };
     conn.execute(
         "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
-        params![now, scm, usn, now],
+        params![stamp.modified, scm, stamp.usn, stamp.ls],
     )
     .map_err(backend)?;
-    Ok(usn)
+    Ok(stamp.usn)
 }
 
+/// Writes one scheduled card and its review log entry inside `transaction`.
+fn write_review(
+    transaction: &Transaction<'_>,
+    usn: i32,
+    decision: &ReviewDecision,
+) -> Result<(), StoreError> {
+    let card = &decision.card;
+    let updated = transaction
+        .execute(
+            "UPDATE cards SET did = ?1, mod = ?2, usn = ?3, type = ?4, queue = ?5, due = ?6, \
+             ivl = ?7, factor = ?8, reps = ?9, lapses = ?10, left = ?11, odue = ?12, odid = \
+             ?13, flags = ?14, data = ?15 WHERE id = ?16",
+            params![
+                card.deck_id,
+                card.modified,
+                usn,
+                card.card_type.code(),
+                card.queue.code(),
+                card.due,
+                card.interval,
+                card.factor,
+                card.reps,
+                card.lapses,
+                card.left,
+                card.original_due,
+                card.original_deck_id,
+                card.flags,
+                card.data,
+                card.id,
+            ],
+        )
+        .map_err(backend)?;
+    if updated == 0 {
+        return Err(StoreError::NotFound(format!("card {}", card.id)));
+    }
+    let log = &decision.revlog;
+    transaction
+        .execute(
+            "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type) VALUES \
+             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                log.id,
+                card.id,
+                usn,
+                log.ease.code(),
+                log.interval,
+                log.last_interval,
+                log.factor,
+                log.time_ms,
+                log.kind.code(),
+            ],
+        )
+        .map_err(backend)?;
+    Ok(())
+}
+
+/// Reads the next new-card position.
+///
+/// Schema-18 collections keep configuration in the `config` table and leave
+/// `col.conf` empty, so both paths are supported.
 fn next_position(conn: &Connection) -> Result<i64, StoreError> {
+    if records::table_exists(conn, "config")? {
+        let stored: Option<SqlValue> = conn
+            .query_row(
+                "SELECT val FROM config WHERE key = 'nextPos'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(backend)?;
+        let position = match stored {
+            Some(SqlValue::Blob(bytes)) => parse_position(&bytes),
+            Some(SqlValue::Text(text)) => text.parse().ok(),
+            Some(SqlValue::Integer(value)) => Some(value),
+            _ => None,
+        };
+        return Ok(position.unwrap_or(1));
+    }
     let col = records::read_col(conn)?;
-    let config: Json = serde_json::from_str(&col.conf)
-        .map_err(|error| invalid(error.to_string()))?;
+    let config = parse_conf(&col.conf)?;
     Ok(config.get("nextPos").and_then(Json::as_i64).unwrap_or(1))
 }
 
@@ -1010,9 +1357,20 @@ fn set_next_position(
     transaction: &Transaction<'_>,
     position: i64,
 ) -> Result<(), StoreError> {
+    if records::table_exists(transaction, "config")? {
+        return transaction
+            .execute(
+                "INSERT INTO config (key, usn, mtime_secs, val) \
+                 VALUES ('nextPos', -1, ?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET val = excluded.val, \
+                 mtime_secs = excluded.mtime_secs, usn = excluded.usn",
+                params![anki::now_secs()?, position.to_string().into_bytes()],
+            )
+            .map(|_| ())
+            .map_err(backend);
+    }
     let col = records::read_col(transaction)?;
-    let mut config: Json = serde_json::from_str(&col.conf)
-        .map_err(|error| invalid(error.to_string()))?;
+    let mut config = parse_conf(&col.conf)?;
     let object = config
         .as_object_mut()
         .ok_or_else(|| invalid("conf is not an object"))?;
@@ -1023,4 +1381,67 @@ fn set_next_position(
         .execute("UPDATE col SET conf = ?1 WHERE id = 1", [config_json])
         .map(|_| ())
         .map_err(backend)
+}
+
+/// Parses `col.conf`, treating an empty blob as an empty object.
+fn parse_conf(conf: &str) -> Result<Json, StoreError> {
+    if conf.trim().is_empty() {
+        return Ok(Json::Object(serde_json::Map::new()));
+    }
+    serde_json::from_str(conf).map_err(|error| invalid(error.to_string()))
+}
+
+/// Reads a decimal position stored as UTF-8 bytes in the config table.
+fn parse_position(bytes: &[u8]) -> Option<i64> {
+    str::from_utf8(bytes).ok()?.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use ranki_model::NewNote;
+    use ranki_model::Rating;
+    use ranki_model::RevLog;
+    use ranki_model::RevLogKind;
+    use ranki_model::ReviewDecision;
+    use ranki_model::Store;
+
+    use super::Collection;
+
+    #[test]
+    fn review_history_returns_logs_in_card_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("collection.anki2");
+        let mut collection = Collection::create(&path).unwrap();
+        let ids = collection
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![String::from("front"), String::from("back")],
+                tags: Vec::new(),
+            })
+            .unwrap();
+        let card = collection.card(ids[0]).unwrap().unwrap();
+        let log = RevLog {
+            id: 1_700_000_000_000,
+            card_id: card.id,
+            usn: 0,
+            ease: Rating::Good,
+            interval: 1,
+            last_interval: 0,
+            factor: 2_500,
+            time_ms: 100,
+            kind: RevLogKind::Review,
+        };
+        collection
+            .apply_review(&ReviewDecision {
+                card,
+                revlog: log.clone(),
+            })
+            .unwrap();
+        let history = collection.review_history().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, log.id);
+        assert_eq!(history[0].card_id, log.card_id);
+        assert_eq!(history[0].kind, RevLogKind::Review);
+    }
 }

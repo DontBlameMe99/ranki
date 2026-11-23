@@ -1,731 +1,1285 @@
-//! Small, safe renderer for Anki-style note templates.
+//! Anki template parsing, cloze and occlusion rendering, and bounded media cache.
 
 use std::{
-    collections::HashMap,
-    iter::Peekable,
-    mem,
-    path::{Path, PathBuf},
-    str::Chars,
+    collections::{HashMap, VecDeque},
+    sync::Arc,
 };
 
-use egui::{
-    FontId, Image, Label, TextWrapMode, TextureHandle, TextureOptions,
-    load::SizedTexture,
-    text::{LayoutJob, TextFormat},
+use futures::FutureExt;
+use gpui::{
+    AnyElement, App, AppContext, Asset, AssetLogger, Div, Entity,
+    ImageAssetLoader, ImageCache, ImageCacheError, ImageCacheItem,
+    InteractiveElement, IntoElement, ParentElement, RenderImage, Resource,
+    Rgba, SharedString, Styled, StyledImage, Window, div, hash, img, px,
+    relative,
 };
-const MAX_ENTITY_LEN: usize = 12;
+use ranki_model::{
+    Note, NoteModel, cloze_ordinal,
+    image_occlusion::{ImageOcclusionField, ShapeKind},
+    parse_image_occlusion_field,
+};
 
+use crate::theme::{Palette, alpha};
+
+/// Side of the card being rendered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Emphasis {
-    Plain,
-    Bold,
-    Italic,
-    BoldItalic,
+pub enum Side {
+    Question,
+    Answer,
 }
 
+/// Parsed template node. Anki templates are a tiny language, not general HTML.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Segment {
-    pub text: String,
-    pub emphasis: Emphasis,
+pub enum TemplateNode {
+    Text(String),
+    Field {
+        key: String,
+        filters: Vec<String>,
+    },
+    Conditional {
+        key: String,
+        negated: bool,
+        children: Vec<Self>,
+    },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MediaKind {
-    Sound,
-    Image,
-}
-
+/// A media reference extracted from a field value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaRef {
     pub kind: MediaKind,
     pub name: String,
-    pub path: Option<PathBuf>,
 }
 
-/// Replaces `{{Field}}` placeholders, matching names case-insensitively.
-#[expect(
-    clippy::excessive_nesting,
-    reason = "the template scan replaces placeholders in one pass"
-)]
-pub fn substitute_fields(
-    template: &str,
-    field_names: &[String],
-    values: &[String],
-) -> String {
-    let mut parts = template.split("{{");
-    let Some(first) = parts.next() else {
-        return String::new();
-    };
-    let mut output = String::with_capacity(template.len());
-    output.push_str(first);
-    for part in parts {
-        if let Some((raw_key, tail)) = part.split_once("}}") {
-            let key = raw_key.trim();
-            let replacement = field_names
-                .iter()
-                .zip(values.iter())
-                .find(|(field, _)| field.eq_ignore_ascii_case(key))
-                .map(|(_, field_value)| field_value.as_str());
-            if let Some(field_value) = replacement {
-                output.push_str(field_value);
-            } else {
-                output.push_str("{{");
-                output.push_str(key);
-                output.push_str("}}");
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKind {
+    Image,
+    Sound,
+}
+
+/// One rendered cloze span.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClozeSegment {
+    pub text: String,
+    pub kind: ClozeKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClozeKind {
+    Plain,
+    ActiveQuestion,
+    ActiveAnswer,
+    Inactive,
+}
+
+/// Occlusion overlay with image-relative coordinates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaskOverlay {
+    pub shape: ShapeKind,
+    pub ordinals: Vec<u32>,
+    pub left: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+    pub points: Vec<(f32, f32)>,
+    pub occlude_inactive: bool,
+    pub active: bool,
+}
+
+/// Result of rendering a template for one card side.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RenderedCard {
+    pub text: String,
+    pub media: Vec<MediaRef>,
+    pub clozes: Vec<ClozeSegment>,
+    pub masks: Vec<MaskOverlay>,
+}
+
+/// Parses `{{Field}}`, `{{cloze:Text}}` and `{{#Field}}` sections.
+#[must_use]
+pub fn parse_template(template: &str) -> Vec<TemplateNode> {
+    let mut roots = Vec::new();
+    let mut stack: Vec<(String, bool, Vec<TemplateNode>)> = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(relative) =
+        template.get(cursor..).and_then(|rest| rest.find("{{"))
+    {
+        let start = cursor.saturating_add(relative);
+        let text = template.get(cursor..start).unwrap_or("");
+        if !text.is_empty() {
+            push_node(
+                &mut stack,
+                &mut roots,
+                TemplateNode::Text(text.to_owned()),
+            );
+        }
+        let Some(after) = template.get(start.saturating_add(2)..) else {
+            break;
+        };
+        let Some(end) = after.find("}}") else {
+            push_node(
+                &mut stack,
+                &mut roots,
+                TemplateNode::Text(
+                    template.get(start..).unwrap_or("").to_owned(),
+                ),
+            );
+            cursor = template.len();
+            break;
+        };
+        let raw = after.get(..end).unwrap_or("").trim();
+        cursor = start
+            .saturating_add(2)
+            .saturating_add(end)
+            .saturating_add(2);
+        if let Some(key) = raw.strip_prefix('/') {
+            if let Some((owner, negated, children)) = stack.pop() {
+                if owner == key {
+                    push_node(
+                        &mut stack,
+                        &mut roots,
+                        TemplateNode::Conditional {
+                            key: owner,
+                            negated,
+                            children,
+                        },
+                    );
+                } else {
+                    push_node(
+                        &mut stack,
+                        &mut roots,
+                        TemplateNode::Conditional {
+                            key: owner,
+                            negated,
+                            children,
+                        },
+                    );
+                    if let Some((outer, outer_negated, outer_children)) =
+                        stack.pop()
+                    {
+                        stack.push((outer, outer_negated, outer_children));
+                    }
+                }
             }
-            output.push_str(tail);
-        } else {
-            output.push_str("{{");
-            output.push_str(part);
+            continue;
+        }
+        if let Some(key) = raw.strip_prefix('#') {
+            stack.push((key.to_owned(), false, Vec::new()));
+            continue;
+        }
+        if let Some(key) = raw.strip_prefix('^') {
+            stack.push((key.to_owned(), true, Vec::new()));
+            continue;
+        }
+        let mut parts = raw.split(':');
+        let key = parts.next().unwrap_or("").trim().to_owned();
+        let filters = parts.map(str::trim).map(str::to_owned).collect();
+        push_node(&mut stack, &mut roots, TemplateNode::Field { key, filters });
+    }
+    if let Some(rest) = template.get(cursor..)
+        && !rest.is_empty()
+    {
+        push_node(&mut stack, &mut roots, TemplateNode::Text(rest.to_owned()));
+    }
+    while let Some((key, negated, children)) = stack.pop() {
+        push_node(
+            &mut stack,
+            &mut roots,
+            TemplateNode::Conditional {
+                key,
+                negated,
+                children,
+            },
+        );
+    }
+    roots
+}
+
+fn push_node(
+    stack: &mut [(String, bool, Vec<TemplateNode>)],
+    roots: &mut Vec<TemplateNode>,
+    node: TemplateNode,
+) {
+    if let Some((_, _, children)) = stack.last_mut() {
+        children.push(node);
+    } else {
+        roots.push(node);
+    }
+}
+
+/// Field names and values, parallel slices straight from the note.
+#[derive(Clone, Copy, Debug)]
+pub struct FieldValues<'a> {
+    pub names: &'a [String],
+    pub values: &'a [String],
+}
+
+impl<'a> FieldValues<'a> {
+    #[must_use]
+    pub const fn new(names: &'a [String], values: &'a [String]) -> Self {
+        Self { names, values }
+    }
+}
+
+/// Renders a template with field values, conditionals, and `FrontSide` support.
+#[must_use]
+pub fn render_template(
+    template: &str,
+    fields: FieldValues<'_>,
+    front_side: &str,
+) -> String {
+    render_nodes(&parse_template(template), fields, front_side)
+}
+
+fn render_nodes(
+    nodes: &[TemplateNode],
+    fields: FieldValues<'_>,
+    front_side: &str,
+) -> String {
+    let mut output = String::new();
+    for node in nodes {
+        match node {
+            TemplateNode::Text(text) => output.push_str(text),
+            TemplateNode::Field { key, .. } => {
+                if key.eq_ignore_ascii_case("FrontSide") {
+                    output.push_str(front_side);
+                } else if let Some(value) = find_field(fields, key) {
+                    output.push_str(value);
+                }
+            }
+            TemplateNode::Conditional {
+                key,
+                negated,
+                children,
+            } => {
+                let value = find_field(fields, key).unwrap_or("");
+                let present = !value.trim().is_empty() && !is_empty_html(value);
+                if present != *negated {
+                    output
+                        .push_str(&render_nodes(children, fields, front_side));
+                }
+            }
         }
     }
     output
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the answer needs the question and note fields"
-)]
-/// Renders an answer template, resolving `{{FrontSide}}` to the question HTML.
-pub fn render_answer(
-    template: &str,
-    question_html: &str,
-    field_names: &[String],
-    values: &[String],
-) -> String {
-    let with_front_side = substitute_fields(
-        template,
-        &[String::from("FrontSide")],
-        &[question_html.to_owned()],
-    );
-    substitute_fields(&with_front_side, field_names, values)
+fn find_field<'a>(fields: FieldValues<'a>, key: &str) -> Option<&'a str> {
+    fields
+        .names
+        .iter()
+        .zip(fields.values.iter())
+        .find(|(name, _)| name.eq_ignore_ascii_case(key))
+        .map(|(_, value)| value.as_str())
 }
 
-/// Converts the supported markup subset into styled text segments.
-#[expect(
-    clippy::excessive_nesting,
-    reason = "the HTML subset is parsed in a single scanning loop"
-)]
-pub fn parse_markup(input: &str) -> Vec<Segment> {
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut bold = false;
-    let mut italic = false;
-    let mut chars = input.chars().peekable();
+fn is_empty_html(value: &str) -> bool {
+    strip_tags(value).trim().is_empty() && media_refs(value).is_empty()
+}
 
-    while let Some(ch) = chars.next() {
-        match ch {
-            '<' => {
-                let mut raw_tag = String::new();
-                for next in chars.by_ref() {
-                    if next == '>' {
-                        break;
+/// Converts the supported markup subset to plain text with line breaks.
+#[must_use]
+pub fn strip_tags(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+    while cursor < input.len() {
+        let rest = input.get(cursor..).unwrap_or("");
+        if rest.starts_with("<script") || rest.starts_with("<style") {
+            let closing = if rest.starts_with("<script") {
+                "</script>"
+            } else {
+                "</style>"
+            };
+            if let Some(end) = rest.find(closing) {
+                cursor =
+                    cursor.saturating_add(end).saturating_add(closing.len());
+            } else {
+                break;
+            }
+            continue;
+        }
+        if rest.starts_with('<') {
+            let Some(end) = rest.find('>') else {
+                break;
+            };
+            let tag = rest.get(..end.saturating_add(1)).unwrap_or("");
+            if tag.starts_with("<br")
+                || tag.starts_with("<hr")
+                || tag.starts_with("</div")
+                || tag.starts_with("</p")
+            {
+                output.push('\n');
+            }
+            cursor = cursor.saturating_add(end).saturating_add(1);
+            continue;
+        }
+        let Some(character) = rest.chars().next() else {
+            break;
+        };
+        output.push(character);
+        cursor = cursor.saturating_add(character.len_utf8());
+    }
+    normalize_newlines(&decode_entities(&output))
+}
+
+/// Decodes the HTML entities Anki fields use for displayed characters.
+fn decode_entities(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+    while let Some(rest) = input.get(cursor..) {
+        let Some(at) = rest.find('&') else {
+            output.push_str(rest);
+            break;
+        };
+        output.push_str(rest.get(..at).unwrap_or(""));
+        cursor = cursor.saturating_add(at).saturating_add(1);
+        let tail = input.get(cursor..).unwrap_or("");
+        let Some(end) = tail.find(';').filter(|end| *end <= 10) else {
+            output.push('&');
+            continue;
+        };
+        let entity = tail.get(..end).unwrap_or("");
+        if let Some(decoded) = decode_entity(entity) {
+            output.push_str(&decoded);
+            cursor = cursor.saturating_add(end).saturating_add(1);
+        } else {
+            output.push('&');
+        }
+    }
+    output
+}
+
+fn decode_entity(entity: &str) -> Option<String> {
+    match entity {
+        "amp" => return Some(String::from("&")),
+        "lt" => return Some(String::from("<")),
+        "gt" => return Some(String::from(">")),
+        "quot" => return Some(String::from("\"")),
+        "apos" | "#39" => return Some(String::from("'")),
+        "nbsp" => return Some(String::from(" ")),
+        _ => {}
+    }
+    let digits = entity.strip_prefix('#')?;
+    let code = digits.strip_prefix(['x', 'X']).map_or_else(
+        || digits.parse::<u32>().ok(),
+        |hex| u32::from_str_radix(hex, 16).ok(),
+    )?;
+    char::from_u32(code).map(String::from)
+}
+
+fn normalize_newlines(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut previous_newline = false;
+    for character in text.chars() {
+        if character == '\n' {
+            if !previous_newline {
+                result.push(character);
+            }
+            previous_newline = true;
+        } else {
+            result.push(character);
+            previous_newline = false;
+        }
+    }
+    result.trim().to_owned()
+}
+
+/// Extracts `<img src>` and `[sound:...]` references without changing fields.
+#[must_use]
+pub fn media_refs(input: &str) -> Vec<MediaRef> {
+    let mut refs = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rest) = input.get(cursor..) {
+        let image = rest.find("<img ").map(|at| (at, MediaKind::Image));
+        let sound = rest.find("[sound:").map(|at| (at, MediaKind::Sound));
+        let chosen = match (image, sound) {
+            (Some(left), Some(right)) => {
+                Some(if left.0 <= right.0 { left } else { right })
+            }
+            (Some(image), None) => Some(image),
+            (None, Some(sound)) => Some(sound),
+            (None, None) => None,
+        };
+        let Some((at, kind)) = chosen else {
+            break;
+        };
+        cursor = cursor.saturating_add(at);
+        let rest = input.get(cursor..).unwrap_or("");
+        match kind {
+            MediaKind::Image => {
+                let tag_end = rest
+                    .find('>')
+                    .map_or(rest.len(), |end| end.saturating_add(1));
+                let tag = rest.get(..tag_end).unwrap_or(rest);
+                if let Some(after) = tag.find("src=") {
+                    let tail = tag.get(after.saturating_add(4)..).unwrap_or("");
+                    let quote = tail.chars().next();
+                    let name = if quote == Some('"') || quote == Some('\'') {
+                        let mark = quote.unwrap_or('"');
+                        tail.get(1..)
+                            .and_then(|value| {
+                                value.find(mark).map(|end| value.get(..end))
+                            })
+                            .flatten()
+                    } else {
+                        tail.split(|c: char| c.is_whitespace() || c == '>')
+                            .next()
+                    };
+                    if let Some(name) = name {
+                        refs.push(MediaRef {
+                            kind,
+                            name: decode_entities(name),
+                        });
                     }
-                    raw_tag.push(next);
                 }
-                let tag = raw_tag.trim().to_ascii_lowercase();
-                if tag == "br" || tag == "br/" {
-                    current.push('\n');
-                } else if is_tag(&tag, "b") || is_tag(&tag, "strong") {
-                    flush(
-                        &mut segments,
-                        &mut current,
-                        emphasis((bold, italic)),
-                    );
-                    bold = true;
-                } else if is_tag(&tag, "/b") || is_tag(&tag, "/strong") {
-                    flush(
-                        &mut segments,
-                        &mut current,
-                        emphasis((bold, italic)),
-                    );
-                    bold = false;
-                } else if is_tag(&tag, "i") || is_tag(&tag, "em") {
-                    flush(
-                        &mut segments,
-                        &mut current,
-                        emphasis((bold, italic)),
-                    );
-                    italic = true;
-                } else if is_tag(&tag, "/i") || is_tag(&tag, "/em") {
-                    flush(
-                        &mut segments,
-                        &mut current,
-                        emphasis((bold, italic)),
-                    );
-                    italic = false;
-                } else if is_block_tag(&tag) {
-                    current.push('\n');
+                cursor = cursor.saturating_add(tag_end);
+            }
+            MediaKind::Sound => {
+                let tail = rest.get(7..).unwrap_or("");
+                if let Some(end) = tail.find(']') {
+                    let name = tail.get(..end).unwrap_or("");
+                    refs.push(MediaRef {
+                        kind,
+                        name: name.to_owned(),
+                    });
+                    cursor = cursor
+                        .saturating_add(7)
+                        .saturating_add(end)
+                        .saturating_add(1);
+                } else {
+                    break;
                 }
             }
-            '&' => current.push_str(&read_entity(&mut chars)),
-            _ => current.push(ch),
-        }
-    }
-    flush(&mut segments, &mut current, emphasis((bold, italic)));
-    segments
-}
-
-#[cfg(test)]
-pub fn plain_text(input: &str) -> String {
-    parse_markup(input)
-        .into_iter()
-        .map(|segment| segment.text)
-        .collect()
-}
-
-/// Resolves a media file name to an existing path inside `media_dir`.
-pub fn media_path(media_dir: Option<&Path>, name: &str) -> Option<PathBuf> {
-    let trimmed = name.trim();
-    let safe = !trimmed.is_empty()
-        && !trimmed.contains('/')
-        && !trimmed.contains('\\')
-        && trimmed != "."
-        && trimmed != "..";
-    if !safe {
-        return None;
-    }
-    let path = media_dir?.join(trimmed);
-    path.is_file().then_some(path)
-}
-
-/// Collects `[sound:...]` and `<img src="...">` references.
-pub fn media_refs(input: &str, media_dir: Option<&Path>) -> Vec<MediaRef> {
-    let mut refs = Vec::new();
-    for part in input.split("[sound:").skip(1) {
-        if let Some((name, _)) = part.split_once(']')
-            && let Some(media) = make_media(MediaKind::Sound, name, media_dir)
-        {
-            refs.push(media);
-        }
-    }
-    for tag in input.split('<').skip(1) {
-        let Some((body, _)) = tag.split_once('>') else {
-            continue;
-        };
-        let Some(rest) = body.trim_start().strip_prefix("img") else {
-            continue;
-        };
-        if !rest
-            .chars()
-            .next()
-            .is_none_or(|ch| ch.is_ascii_whitespace() || ch == '/')
-        {
-            continue;
-        }
-        let Some(source) = rest
-            .split_whitespace()
-            .find_map(|attribute| attribute.strip_prefix("src="))
-        else {
-            continue;
-        };
-        let name = source.trim_matches(|ch| matches!(ch, '"' | '\'' | '/'));
-        if let Some(media) = make_media(MediaKind::Image, name, media_dir) {
-            refs.push(media);
         }
     }
     refs
 }
 
-const MAX_DISPLAY_WIDTH: f32 = 520.0;
-const MAX_DISPLAY_HEIGHT: f32 = 260.0;
-const MAX_TEXTURE_WIDTH: u32 = 1024;
-const MAX_TEXTURE_HEIGHT: u32 = 512;
-const IMAGE_CACHE_LIMIT: usize = 24;
-
-struct LruCache<V> {
-    entries: HashMap<PathBuf, (V, u64)>,
-    clock: u64,
-    limit: usize,
-}
-
-impl<V> LruCache<V> {
-    fn new(limit: usize) -> Self {
-        Self {
-            entries: HashMap::new(),
-            clock: 0,
-            limit: limit.max(1),
-        }
-    }
-
-    fn get(&mut self, key: &Path) -> Option<&V> {
-        let now = self.clock.wrapping_add(1);
-        self.clock = now;
-        let entry = self.entries.get_mut(key)?;
-        entry.1 = now;
-        Some(&entry.0)
-    }
-
-    fn insert(&mut self, key: PathBuf, value: V) {
-        let now = self.clock.wrapping_add(1);
-        self.clock = now;
-        let victim_path = if self.entries.contains_key(&key)
-            || self.entries.len() < self.limit
-        {
-            None
-        } else {
-            self.entries
-                .iter()
-                .min_by_key(|(_, (_, used))| *used)
-                .map(|(path, _)| path.clone())
+/// Renders a cloze field for a one-based card number and side.
+#[must_use]
+pub fn cloze_segments(
+    text: &str,
+    ordinal: u16,
+    side: Side,
+) -> Vec<ClozeSegment> {
+    let number = ordinal.saturating_add(1);
+    let mut segments = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rest) = text.get(cursor..) {
+        let Some(start) = rest.find("{{c") else {
+            push_plain(&mut segments, rest);
+            break;
         };
-        if let Some(path_to_drop) = victim_path {
-            drop(self.entries.remove(&path_to_drop));
-        }
-        self.entries.insert(key, (value, now));
+        let start = cursor.saturating_add(start);
+        push_plain(&mut segments, text.get(cursor..start).unwrap_or(""));
+        let Some(rest) = text.get(start.saturating_add(2)..) else {
+            break;
+        };
+        let Some(separator) = rest.find("::") else {
+            push_plain(&mut segments, text.get(start..).unwrap_or(""));
+            break;
+        };
+        let numbers = rest
+            .get(..separator)
+            .unwrap_or("")
+            .trim()
+            .trim_start_matches('c');
+        let active = numbers
+            .split(',')
+            .filter_map(|value| value.trim().parse::<u32>().ok())
+            .any(|value| u32::from(number) == value);
+        let body_start = start
+            .saturating_add(2)
+            .saturating_add(separator)
+            .saturating_add(2);
+        let Some(body) =
+            text.get(body_start..).and_then(|value| value.find("}}"))
+        else {
+            break;
+        };
+        let content = text
+            .get(body_start..body_start.saturating_add(body))
+            .unwrap_or("");
+        let (answer, hint) = content.split_once("::").unwrap_or((content, ""));
+        let kind = if active {
+            match side {
+                Side::Question => ClozeKind::ActiveQuestion,
+                Side::Answer => ClozeKind::ActiveAnswer,
+            }
+        } else {
+            ClozeKind::Inactive
+        };
+        let label = match kind {
+            ClozeKind::ActiveQuestion if hint.is_empty() => "[...]".to_owned(),
+            ClozeKind::ActiveQuestion => format!("[{hint}]"),
+            ClozeKind::ActiveAnswer | ClozeKind::Inactive => answer.to_owned(),
+            ClozeKind::Plain => answer.to_owned(),
+        };
+        segments.push(ClozeSegment { text: label, kind });
+        cursor = body_start.saturating_add(body).saturating_add(2);
+    }
+    segments
+}
+
+fn push_plain(segments: &mut Vec<ClozeSegment>, text: &str) {
+    if !text.is_empty() {
+        segments.push(ClozeSegment {
+            text: text.to_owned(),
+            kind: ClozeKind::Plain,
+        });
     }
 }
 
-/// Decoded media, kept in a bounded least-recently-used set.
-pub struct ImageCache {
-    textures: LruCache<Option<TextureHandle>>,
+/// Flattens cloze segments into the text shown on a card.
+#[must_use]
+pub fn cloze_text(text: &str, ordinal: u16, side: Side) -> String {
+    cloze_segments(text, ordinal, side)
+        .into_iter()
+        .map(|segment| segment.text)
+        .collect::<String>()
 }
 
-impl Default for ImageCache {
-    fn default() -> Self {
-        Self {
-            textures: LruCache::new(IMAGE_CACHE_LIMIT),
-        }
-    }
+/// Parses image-occlusion shapes for a card side.
+#[must_use]
+pub fn occlusion_overlays(
+    occlusion: &str,
+    ordinal: u16,
+    side: Side,
+) -> Vec<MaskOverlay> {
+    let ImageOcclusionField { shapes, .. } =
+        parse_image_occlusion_field(occlusion);
+    shapes
+        .into_iter()
+        .map(|mask| {
+            let active = mask
+                .ordinals
+                .iter()
+                .any(|number| cloze_ordinal(*number) == Some(ordinal));
+            let left = parse_ratio(mask.properties.get("left"), 0.0);
+            let top = parse_ratio(mask.properties.get("top"), 0.0);
+            let width = parse_ratio(mask.properties.get("width"), 0.2);
+            let height = parse_ratio(mask.properties.get("height"), 0.1);
+            let points = mask
+                .properties
+                .get("points")
+                .map(|value| parse_points(value, width, height))
+                .unwrap_or_default();
+            let occlude_inactive =
+                mask.properties.get("oi").is_some_and(|v| v == "1");
+            MaskOverlay {
+                shape: mask.shape,
+                ordinals: mask.ordinals,
+                left,
+                top,
+                width,
+                height,
+                points,
+                occlude_inactive,
+                active,
+            }
+        })
+        .filter(|mask| match side {
+            Side::Question => true,
+            Side::Answer => mask.active || mask.occlude_inactive,
+        })
+        .collect()
 }
 
-impl ImageCache {
-    /// Returns a cached texture, decoding the file once per path.
-    pub fn texture(
-        &mut self,
-        ctx: &egui::Context,
-        path: &Path,
-    ) -> Option<TextureHandle> {
-        if let Some(texture) = self.textures.get(path) {
-            return texture.clone();
-        }
-        let texture = decode_texture(ctx, path);
-        self.textures.insert(path.to_path_buf(), texture.clone());
-        texture
-    }
-}
-
-fn decode_texture(ctx: &egui::Context, path: &Path) -> Option<TextureHandle> {
-    let decoded = image::open(path).ok()?;
-    let (width, height) = texture_size(decoded.width(), decoded.height());
-    let sized = if (decoded.width(), decoded.height()) == (width, height) {
-        decoded
-    } else {
-        decoded.thumbnail_exact(width, height)
+fn parse_ratio(value: Option<&String>, fallback: f32) -> f32 {
+    let Some(text) = value else {
+        return fallback;
     };
-    let rgba = sized.into_rgba8();
-    let color = egui::ColorImage::from_rgba_unmultiplied(
-        [
-            usize::try_from(width).unwrap_or(0),
-            usize::try_from(height).unwrap_or(0),
-        ],
-        rgba.as_raw().as_slice(),
-    );
-    Some(ctx.load_texture(
-        path.to_string_lossy(),
-        color,
-        TextureOptions::default(),
-    ))
-}
-
-fn texture_size(input_width: u32, input_height: u32) -> (u32, u32) {
-    if input_width == 0 || input_height == 0 {
-        return (0, 0);
+    let text = text.trim();
+    let (digits, percent) = text
+        .strip_suffix('%')
+        .map_or((text, false), |digits| (digits, true));
+    let Ok(number) = digits.trim().parse::<f32>() else {
+        return fallback;
+    };
+    if !number.is_finite() {
+        return fallback;
     }
-    let width = u64::from(input_width);
-    let height = u64::from(input_height);
-    let max_width = u64::from(MAX_TEXTURE_WIDTH);
-    let max_height = u64::from(MAX_TEXTURE_HEIGHT);
-    if max_width.saturating_mul(height) > max_height.saturating_mul(width) {
-        let scaled_height = height.min(max_height);
-        let scaled_width = width
-            .saturating_mul(scaled_height)
-            .div_euclid(height)
-            .clamp(1, max_width);
-        (
-            to_u32(scaled_width, MAX_TEXTURE_WIDTH),
-            to_u32(scaled_height, MAX_TEXTURE_HEIGHT),
-        )
+    let ratio = if percent || number > 1.0 {
+        number / 100.0
     } else {
-        let scaled_width = width.min(max_width);
-        let scaled_height = height
-            .saturating_mul(scaled_width)
-            .div_euclid(width)
-            .clamp(1, max_height);
-        (
-            to_u32(scaled_width, MAX_TEXTURE_WIDTH),
-            to_u32(scaled_height, MAX_TEXTURE_HEIGHT),
-        )
+        number
+    };
+    ratio.clamp(0.0, 1.0)
+}
+
+fn parse_points(text: &str, width: f32, height: f32) -> Vec<(f32, f32)> {
+    text.split_whitespace()
+        .filter_map(|pair| {
+            let (x, y) = pair.split_once(',')?;
+            let x = x.parse::<f32>().ok()?;
+            let y = y.parse::<f32>().ok()?;
+            Some((
+                (x / width.max(1.0)).clamp(0.0, 1.0),
+                (y / height.max(1.0)).clamp(0.0, 1.0),
+            ))
+        })
+        .collect()
+}
+
+/// One card side plus whether the answer repeats the front.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardRequest {
+    pub ordinal: u16,
+    pub side: Side,
+    pub include_front: bool,
+}
+
+impl CardRequest {
+    #[must_use]
+    pub const fn question(ordinal: u16) -> Self {
+        Self {
+            ordinal,
+            side: Side::Question,
+            include_front: true,
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub const fn answer(ordinal: u16) -> Self {
+        Self {
+            ordinal,
+            side: Side::Answer,
+            include_front: true,
+        }
+    }
+
+    /// Answer template without the repeated front, for the revealed stage.
+    #[must_use]
+    pub const fn answer_only(ordinal: u16) -> Self {
+        Self {
+            ordinal,
+            side: Side::Answer,
+            include_front: false,
+        }
     }
 }
 
-fn to_u32(value: u64, cap: u32) -> u32 {
-    u32::try_from(value).unwrap_or(cap)
+/// Renders the front or back text of a card using the selected template.
+#[must_use]
+pub fn render_card(
+    model: &NoteModel,
+    note: &Note,
+    request: CardRequest,
+) -> RenderedCard {
+    let CardRequest {
+        ordinal,
+        side,
+        include_front,
+    } = request;
+    let Some(template) = model.template_for(ordinal) else {
+        return RenderedCard {
+            text: String::from("This note has no template."),
+            ..RenderedCard::default()
+        };
+    };
+    let source = match side {
+        Side::Question => template.question_format.as_str(),
+        Side::Answer => template.answer_format.as_str(),
+    };
+    let fields = FieldValues::new(&model.fields, &note.fields);
+    let front = if include_front {
+        render_template(&template.question_format, fields, "")
+    } else {
+        String::new()
+    };
+    let rendered = render_template(source, fields, &front);
+    let text = strip_tags(&rendered);
+    let clozes = if model.is_cloze() {
+        cloze_segments(&text, ordinal, side)
+    } else {
+        Vec::new()
+    };
+    let text = if model.is_cloze() {
+        cloze_text(&text, ordinal, side)
+    } else {
+        text
+    };
+    let masks = if model.is_image_occlusion() {
+        note.fields
+            .iter()
+            .find(|field| field.contains("image-occlusion:"))
+            .map(|field| occlusion_overlays(field, ordinal, side))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    RenderedCard {
+        text: normalize_newlines(&text),
+        media: media_refs(&rendered),
+        clozes,
+        masks,
+    }
 }
 
-/// Draws card text and inline images. Returns captions for media that cannot be shown.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the renderer takes the full card context"
-)]
-#[expect(
-    clippy::excessive_nesting,
-    reason = "egui nests media widgets inside the card"
-)]
-pub fn render(
-    ui: &mut egui::Ui,
-    html: &str,
-    media_dir: Option<&Path>,
-    font_size: f32,
-    cache: &mut ImageCache,
-) -> Vec<String> {
-    let color = ui.visuals().text_color();
-    let segments = parse_markup(html);
-    if !segments.is_empty() {
-        let mut job = LayoutJob::default();
-        job.wrap.max_width = ui.available_width().clamp(320.0, 720.0);
-        for segment in segments {
-            let mut format =
-                TextFormat::simple(FontId::proportional(font_size), color);
-            format.italics = matches!(
-                segment.emphasis,
-                Emphasis::Italic | Emphasis::BoldItalic
-            );
-            job.append(&segment.text, 0.0, format);
-        }
-        ui.add(
-            Label::new(job)
-                .selectable(false)
-                .wrap_mode(TextWrapMode::Wrap),
+/// Draws cloze and occlusion content as a compact text block.
+#[must_use]
+pub fn rendered_text(card: &RenderedCard, color: Rgba, size_px: f32) -> Div {
+    let mut block = div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(6.))
+        .text_size(px(size_px))
+        .text_color(color);
+    for line in card.text.lines() {
+        block = block.child(
+            div()
+                .font_family(crate::theme::font_for_text(line))
+                .child(line.to_owned()),
         );
     }
+    block
+}
 
-    let mut notices = Vec::new();
-    for media in media_refs(html, media_dir) {
-        let kind = match media.kind {
-            MediaKind::Sound => "Sound",
-            MediaKind::Image => "Image",
+/// GPUI overlays for parsed image-occlusion masks.
+#[must_use]
+pub fn occlusion_layer(
+    masks: &[MaskOverlay],
+    colors: Palette,
+    answer: bool,
+) -> Div {
+    let mut layer = div().absolute().inset_0();
+    for mask in masks {
+        let fill = if answer {
+            alpha(colors.red, 0.10)
+        } else if mask.active || mask.occlude_inactive {
+            alpha(colors.red, 0.72)
+        } else {
+            continue;
         };
-        match media.path {
-            None => notices.push(format!("{kind}: {} not found", media.name)),
-            Some(path) if media.kind == MediaKind::Image => {
-                match cache.texture(ui.ctx(), &path) {
-                    Some(texture) => {
-                        ui.add_space(8.0);
-                        ui.add(
-                            Image::from_texture(SizedTexture::from_handle(
-                                &texture,
-                            ))
-                            .max_width(MAX_DISPLAY_WIDTH)
-                            .max_height(MAX_DISPLAY_HEIGHT),
-                        );
-                    }
-                    None => notices.push(format!(
-                        "Image: {} cannot be decoded",
-                        media.name
-                    )),
+        let border = if answer {
+            alpha(colors.red, 0.7)
+        } else {
+            colors.crust
+        };
+        let mut shape = div()
+            .absolute()
+            .left(relative(mask.left))
+            .top(relative(mask.top))
+            .w(relative(mask.width))
+            .h(relative(mask.height))
+            .bg(fill)
+            .border_1()
+            .border_color(border);
+        if mask.shape == ShapeKind::Ellipse {
+            shape = shape.rounded_full();
+        } else if mask.shape == ShapeKind::Text {
+            shape = shape.rounded(px(4.));
+        } else {
+            shape = shape.rounded(px(3.));
+        }
+        if mask.shape == ShapeKind::Polygon && !mask.points.is_empty() {
+            shape = shape.border_dashed();
+        }
+        layer = layer.child(shape);
+    }
+    layer
+}
+
+/// Bounded LRU image cache backed by GPUI's async image decoder.
+pub struct LruImageCache {
+    items: HashMap<u64, ImageCacheItem>,
+    order: VecDeque<u64>,
+    capacity: usize,
+}
+
+impl LruImageCache {
+    pub const CAPACITY: usize = 24;
+
+    #[must_use]
+    pub fn new(cx: &mut App) -> Entity<Self> {
+        let entity = cx.new(|_| Self {
+            items: HashMap::new(),
+            order: VecDeque::new(),
+            capacity: Self::CAPACITY,
+        });
+        cx.observe_release(&entity, |cache, cx| {
+            for (_, mut item) in std::mem::take(&mut cache.items) {
+                if let Some(Ok(image)) = item.get() {
+                    cx.drop_image(image, None);
                 }
             }
-            Some(_) => notices.push(format!("Sound: {} available", media.name)),
+        })
+        .detach();
+        entity
+    }
+
+    fn touch(&mut self, key: u64) {
+        self.order.retain(|item| *item != key);
+        self.order.push_back(key);
+    }
+
+    fn evict(&mut self, cx: &mut App) {
+        while self.order.len() > self.capacity
+            && let Some(oldest) = self.order.pop_front()
+        {
+            if let Some(mut item) = self.items.remove(&oldest)
+                && let Some(Ok(image)) = item.get()
+            {
+                cx.drop_image(image, None);
+            }
         }
     }
-    notices
-}
-const fn emphasis(style: (bool, bool)) -> Emphasis {
-    match style {
-        (true, true) => Emphasis::BoldItalic,
-        (true, false) => Emphasis::Bold,
-        (false, true) => Emphasis::Italic,
-        (false, false) => Emphasis::Plain,
-    }
-}
 
-fn flush(
-    segments: &mut Vec<Segment>,
-    current: &mut String,
-    emphasis: Emphasis,
-) {
-    if current.is_empty() {
-        return;
-    }
-    segments.push(Segment {
-        text: mem::take(current),
-        emphasis,
-    });
-}
-
-fn is_tag(tag: &str, name: &str) -> bool {
-    tag == name
-        || tag
-            .strip_prefix(name)
-            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
-}
-
-fn is_block_tag(tag: &str) -> bool {
-    matches!(
-        tag,
-        "p" | "/p"
-            | "div"
-            | "/div"
-            | "li"
-            | "ul"
-            | "/ul"
-            | "ol"
-            | "/ol"
-            | "blockquote"
-            | "/blockquote"
-            | "tr"
-            | "/tr"
-    )
-}
-
-fn read_entity(chars: &mut Peekable<Chars<'_>>) -> String {
-    let mut entity = String::from("&");
-    for _ in 0..MAX_ENTITY_LEN {
-        match chars.peek().copied() {
-            Some(';') => {
-                chars.next();
-                entity.push(';');
-                return decode_entity(&entity)
-                    .map_or(entity, |decoded| decoded.to_string());
+    /// Loads an image resource, keeping at most `capacity` decoded entries.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the ImageCache trait signature"
+    )]
+    pub fn load(
+        &mut self,
+        resource: &Resource,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        let key = hash(resource);
+        if self.items.contains_key(&key) {
+            self.touch(key);
+            if let Some(item) = self.items.get_mut(&key) {
+                return item.get();
             }
-            Some(ch) if ch.is_ascii_alphanumeric() || ch == '#' => {
-                chars.next();
-                entity.push(ch);
-            }
-            _ => return entity,
         }
+        let future =
+            AssetLogger::<ImageAssetLoader>::load(resource.clone(), cx);
+        let task = cx.background_executor().spawn(future).shared();
+        let _ = self
+            .items
+            .insert(key, ImageCacheItem::Loading(task.clone()));
+        self.order.push_back(key);
+        self.evict(cx);
+        let view = window.current_view();
+        window
+            .spawn(cx, async move |cx| {
+                let _ = task.await;
+                cx.on_next_frame(move |_, cx| cx.notify(view));
+            })
+            .detach();
+        None
     }
-    entity
 }
 
-fn decode_entity(entity: &str) -> Option<char> {
-    match entity {
-        "&amp;" => return Some('&'),
-        "&lt;" => return Some('<'),
-        "&gt;" => return Some('>'),
-        "&quot;" => return Some('"'),
-        "&apos;" => return Some('\''),
-        "&nbsp;" => return Some('\u{a0}'),
-        _ => {}
+impl ImageCache for LruImageCache {
+    fn load(
+        &mut self,
+        resource: &Resource,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        Self::load(self, resource, window, cx)
     }
-    if let Some(hex) =
-        entity.strip_prefix("&#x").and_then(|s| s.strip_suffix(';'))
-    {
-        return u32::from_str_radix(hex, 16).ok().and_then(char::from_u32);
-    }
-    if let Some(decimal) =
-        entity.strip_prefix("&#").and_then(|s| s.strip_suffix(';'))
-    {
-        return decimal.parse::<u32>().ok().and_then(char::from_u32);
-    }
-    None
 }
 
-fn make_media(
-    kind: MediaKind,
+/// Resolves a media name inside the collection media directory.
+///
+/// Names come from imported card content, so absolute paths and parent
+/// segments are rejected instead of escaping `media_dir`.
+fn media_path(
+    media_dir: &std::path::Path,
     name: &str,
-    media_dir: Option<&Path>,
-) -> Option<MediaRef> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
+) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(name);
+    let mut components = path.components();
+    let single =
+        matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none();
+    single.then(|| media_dir.join(path))
+}
+
+/// Convenience wrapper for a media image with a missing-file caption.
+#[must_use]
+pub fn media_image(
+    path: Option<std::path::PathBuf>,
+    colors: Palette,
+    height: f32,
+) -> AnyElement {
+    let Some(path) = path else {
+        return unavailable_media(colors, height);
+    };
+    let id = SharedString::from(path.to_string_lossy().into_owned());
+    img(path)
+        .id(id)
+        .h(px(height))
+        .max_w(px(520.))
+        .object_fit(gpui::ObjectFit::Contain)
+        .with_fallback(move || unavailable_media(colors, height))
+        .into_any_element()
+}
+
+fn unavailable_media(colors: Palette, height: f32) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(height))
+        .text_size(px(12.))
+        .text_color(colors.subtext)
+        .child("Media unavailable")
+        .into_any_element()
+}
+
+/// Renders field value media into a column of images and sound captions.
+#[must_use]
+pub fn media_column(
+    refs: &[MediaRef],
+    media_dir: &std::path::Path,
+    colors: Palette,
+) -> Option<Div> {
+    if refs.is_empty() {
         return None;
     }
-    Some(MediaRef {
-        kind,
-        name: trimmed.to_owned(),
-        path: media_path(media_dir, trimmed),
-    })
+    let mut column = div().flex().flex_col().items_center().gap(px(6.));
+    for media in refs {
+        column = column.child(match media.kind {
+            MediaKind::Image => {
+                let path = media_path(media_dir, &media.name);
+                media_image(path, colors, 180.)
+            }
+            MediaKind::Sound => div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(12.))
+                .text_color(colors.mauve)
+                .child(icon_placeholder("[sound]", colors))
+                .child(media.name.clone())
+                .into_any_element(),
+        });
+    }
+    Some(column)
+}
+
+fn icon_placeholder(label: &str, colors: Palette) -> Div {
+    div()
+        .text_size(px(12.))
+        .text_color(colors.subtext)
+        .child(label.to_owned())
+}
+
+/// Renders note fields through the selected template into a preview block.
+#[must_use]
+pub fn preview_card(
+    model: &NoteModel,
+    fields: &[String],
+    side: Side,
+) -> String {
+    let note = Note {
+        id: 0,
+        guid: String::new(),
+        model_id: model.id,
+        modified: 0,
+        usn: 0,
+        tags: Vec::new(),
+        fields: fields.to_vec(),
+        sort_field: String::new(),
+        checksum: 0,
+        flags: 0,
+        data: String::new(),
+    };
+    let request = match side {
+        Side::Question => CardRequest::question(0),
+        Side::Answer => CardRequest::answer_only(0),
+    };
+    render_card(model, &note, request)
+        .text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .to_owned()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use ranki_model::{CardTemplate, NoteKind};
 
     use super::{
-        Emphasis, LruCache, MAX_TEXTURE_HEIGHT, MAX_TEXTURE_WIDTH, MediaKind,
-        Segment, media_path, media_refs, parse_markup, plain_text,
-        render_answer, substitute_fields, texture_size,
+        CardRequest, ClozeKind, MediaKind, Side, TemplateNode, cloze_text,
+        media_refs, occlusion_overlays, parse_template, preview_card,
+        render_card, strip_tags,
     };
 
-    fn names() -> Vec<String> {
-        vec!["Front".to_owned(), "Back".to_owned()]
+    fn model(
+        fields: &[&str],
+        question: &str,
+        answer: &str,
+    ) -> ranki_model::NoteModel {
+        ranki_model::NoteModel {
+            id: 1,
+            name: String::from("Basic"),
+            fields: fields.iter().map(|value| (*value).to_owned()).collect(),
+            templates: vec![CardTemplate {
+                name: String::from("Card 1"),
+                question_format: question.to_owned(),
+                answer_format: answer.to_owned(),
+                ord: 0,
+            }],
+            css: String::new(),
+            kind: NoteKind::Normal,
+            original_stock_kind: None,
+            field_tags: Vec::new(),
+            template_ordinals: vec![0],
+            raw_config: None,
+        }
     }
 
-    fn values() -> Vec<String> {
-        vec!["Question?".to_owned(), "Answer!".to_owned()]
-    }
-
-    fn segment(text: &str, emphasis: Emphasis) -> Segment {
-        Segment {
-            text: text.to_owned(),
-            emphasis,
+    fn note(fields: &[&str]) -> ranki_model::Note {
+        ranki_model::Note {
+            id: 1,
+            guid: String::new(),
+            model_id: 1,
+            modified: 0,
+            usn: 0,
+            tags: Vec::new(),
+            fields: fields.iter().map(|value| (*value).to_owned()).collect(),
+            sort_field: String::new(),
+            checksum: 0,
+            flags: 0,
+            data: String::new(),
         }
     }
 
     #[test]
-    fn substitute_fields_replaces_placeholders() {
-        let result =
-            substitute_fields("{{Front}} / {{Back}}", &names(), &values());
-        assert_eq!(result, "Question? / Answer!");
+    fn parses_fields_and_front_side() {
+        let nodes = parse_template("hi {{Front}} {{FrontSide}}");
+        assert_eq!(nodes.len(), 4);
+        assert!(matches!(nodes[0], TemplateNode::Text(_)));
+        assert!(matches!(
+            nodes[1],
+            TemplateNode::Field { ref key, .. } if key == "Front"
+        ));
     }
 
     #[test]
-    fn answer_template_resolves_front_side() {
-        let template = "{{FrontSide}}\n\n<hr id=answer>\n\n{{Back}}";
-        let answer = render_answer(template, "Question?", &names(), &values());
-        assert!(answer.contains("Question?"));
-        assert!(answer.contains("<hr id=answer>"));
-        assert!(answer.contains("Answer!"));
-        assert!(!answer.contains("{{FrontSide}}"));
+    fn parses_nested_conditionals() {
+        let nodes = parse_template("{{#Front}}{{^Back}}x{{/Back}}{{/Front}}");
+        assert!(matches!(
+            nodes[0],
+            TemplateNode::Conditional { negated: false, .. }
+        ));
+        let TemplateNode::Conditional { children, .. } = &nodes[0] else {
+            panic!("conditional expected");
+        };
+        assert!(matches!(
+            children[0],
+            TemplateNode::Conditional { negated: true, .. }
+        ));
     }
 
     #[test]
-    fn substitute_fields_ignores_case_and_keeps_unknown() {
-        let result =
-            substitute_fields("{{front}} {{Missing}}", &names(), &values());
-        assert_eq!(result, "Question? {{Missing}}");
+    fn renders_basic_question_and_answer() {
+        let form = model(
+            &["Front", "Back"],
+            "{{Front}}",
+            "{{FrontSide}}<hr id=answer>{{Back}}",
+        );
+        let rendered = render_card(
+            &form,
+            &note(&["Question?", "Answer!"]),
+            CardRequest::answer(0),
+        );
+        assert_eq!(rendered.text, "Question?\nAnswer!");
     }
 
     #[test]
-    fn markup_strips_unknown_tags() {
-        assert_eq!(plain_text("a<script>bad()</script>c"), "abad()c");
+    fn reversed_card_uses_ordinal_one() {
+        let mut form = model(
+            &["Front", "Back"],
+            "{{Front}}",
+            "{{Front}}<hr id=answer>{{Back}}",
+        );
+        form.templates.push(CardTemplate {
+            name: String::from("Card 2"),
+            question_format: String::from("{{Back}}"),
+            answer_format: String::from("{{Back}}<hr id=answer>{{Front}}"),
+            ord: 1,
+        });
+        form.template_ordinals.push(1);
+        let rendered = render_card(
+            &form,
+            &note(&["Front text", "Back text"]),
+            CardRequest::question(1),
+        );
+        assert_eq!(rendered.text, "Back text");
     }
 
     #[test]
-    fn markup_decodes_entities() {
+    fn missing_template_has_a_helpful_fallback() {
+        let mut form = model(&["Front"], "{{Front}}", "{{Front}}");
+        form.templates.clear();
+        let rendered =
+            render_card(&form, &note(&["x"]), CardRequest::question(0));
+        assert_eq!(rendered.text, "This note has no template.");
+    }
+
+    #[test]
+    fn conditionals_hide_empty_fields() {
+        let form = model(
+            &["Front", "Add Reverse", "Back"],
+            "{{Front}}{{#Add Reverse}} + {{Back}}{{/Add Reverse}}",
+            "{{Front}}",
+        );
+        let empty = render_card(
+            &form,
+            &note(&["One", "", "Two"]),
+            CardRequest::question(0),
+        );
+        let filled = render_card(
+            &form,
+            &note(&["One", "yes", "Two"]),
+            CardRequest::question(0),
+        );
+        assert_eq!(empty.text, "One");
+        assert_eq!(filled.text, "One + Two");
+    }
+
+    #[test]
+    fn cloze_question_hides_answer_and_shows_hint() {
+        let text = "{{c1::one}} {{c2::two::hint}}";
+        assert_eq!(cloze_text(text, 0, Side::Question), "[...] two");
+        assert_eq!(cloze_text(text, 1, Side::Question), "one [hint]");
+    }
+
+    #[test]
+    fn cloze_answer_reveals_active_and_inactive() {
+        let segments =
+            super::cloze_segments("{{c1::one}} {{c2::two}}", 0, Side::Answer);
+        assert_eq!(segments[0].kind, ClozeKind::ActiveAnswer);
+        assert_eq!(segments[2].kind, ClozeKind::Inactive);
         assert_eq!(
-            plain_text("A &amp; B &lt;C&gt; &#65; &#x42; &quot;D&quot;"),
-            "A & B <C> A B \"D\""
+            cloze_text("{{c1::one}} {{c2::two}}", 0, Side::Answer),
+            "one two"
         );
     }
 
     #[test]
-    fn markup_reports_bold_and_italic_segments() {
+    fn multi_ordinal_cloze_is_active_on_both_cards() {
+        let text = "{{c1,2::shared}}";
+        assert_eq!(cloze_text(text, 0, Side::Question), "[...]");
+        assert_eq!(cloze_text(text, 1, Side::Question), "[...]");
+        assert_eq!(cloze_text("{{c0::never}}", 0, Side::Question), "never");
+    }
+
+    #[test]
+    fn media_refs_are_extracted_from_images_and_sound() {
+        let refs = media_refs("<img src=\"diagram.png\"> and [sound:word.mp3]");
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].kind, MediaKind::Image);
+        assert_eq!(refs[0].name, "diagram.png");
+        assert_eq!(refs[1].kind, MediaKind::Sound);
+        assert_eq!(refs[1].name, "word.mp3");
+    }
+
+    #[test]
+    fn scripts_and_html_tags_are_stripped() {
         assert_eq!(
-            parse_markup("plain <b>bold</b> <i>italic</i>"),
-            vec![
-                segment("plain ", Emphasis::Plain),
-                segment("bold", Emphasis::Bold),
-                segment(" ", Emphasis::Plain),
-                segment("italic", Emphasis::Italic),
-            ]
+            strip_tags("<div>Hello<br>world<script>bad()</script></div>"),
+            "Hello\nworld"
         );
     }
 
     #[test]
-    fn markup_turns_breaks_and_blocks_into_newlines() {
+    fn occlusion_masks_use_normalized_coordinates() {
+        let text = "{{c1::image-occlusion:rect:left=.2:top=.3:width=.4:height=.1}}<br>{{c2::image-occlusion:ellipse:left=.1:top=.1:width=.2:height=.2:oi=1}}";
+        let question = occlusion_overlays(text, 0, Side::Question);
+        let answer = occlusion_overlays(text, 0, Side::Answer);
+        assert_eq!(question.len(), 2);
+        assert!(question[0].active);
+        assert_eq!(question[0].left, 0.2);
+        assert_eq!(question[0].width, 0.4);
+        assert_eq!(answer.len(), 2);
+        assert!(answer[1].occlude_inactive);
+    }
+
+    #[test]
+    fn preview_uses_the_selected_template() {
+        let form = model(&["Front", "Back"], "{{Front}}", "{{Front}} {{Back}}");
         assert_eq!(
-            plain_text("one<br>two<div>three</div>"),
-            "one\ntwo\nthree\n"
+            preview_card(
+                &form,
+                &["Q".to_owned(), "A".to_owned()],
+                Side::Question
+            ),
+            "Q"
+        );
+        assert_eq!(
+            preview_card(
+                &form,
+                &["Q".to_owned(), "A".to_owned()],
+                Side::Answer
+            ),
+            "Q A"
         );
     }
 
     #[test]
-    fn media_path_resolves_existing_files() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert_eq!(
-            media_path(Some(dir), "Cargo.toml"),
-            Some(dir.join("Cargo.toml"))
+    fn percent_suffix_sets_occlusion_units() {
+        let mask = occlusion_overlays(
+            "{{c1::image-occlusion:rect:left=1%:top=50%:width=1:height=.5}}",
+            0,
+            Side::Question,
         );
+        assert_eq!(mask.len(), 1);
+        assert!((mask[0].left - 0.01).abs() < 1e-6);
+        assert!((mask[0].top - 0.5).abs() < 1e-6);
+        assert!((mask[0].width - 1.0).abs() < 1e-6);
+        assert!((mask[0].height - 0.5).abs() < 1e-6);
     }
 
     #[test]
-    fn media_path_rejects_traversal() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert_eq!(media_path(Some(dir), "../Cargo.toml"), None);
-        assert_eq!(media_path(Some(dir), "sub/file.png"), None);
-    }
-
-    #[test]
-    fn media_path_ignores_missing_files() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert_eq!(media_path(Some(dir), "missing.mp3"), None);
-        assert_eq!(media_path(None, "Cargo.toml"), None);
-    }
-
-    #[test]
-    fn media_refs_find_sounds_and_images() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let refs =
-            media_refs("[sound:clip.mp3] <img src=\"Cargo.toml\">", Some(dir));
+    fn image_src_stays_inside_its_own_tag() {
+        let refs = media_refs("<img alt=x>[sound:beep.wav]<img src=\"b.png\">");
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].kind, MediaKind::Sound);
-        assert_eq!(refs[0].name, "clip.mp3");
-        assert_eq!(refs[0].path, None);
+        assert_eq!(refs[0].name, "beep.wav");
         assert_eq!(refs[1].kind, MediaKind::Image);
-        assert_eq!(refs[1].path, Some(dir.join("Cargo.toml")));
-    }
-
-    fn cache_key(name: &str) -> PathBuf {
-        PathBuf::from(name)
+        assert_eq!(refs[1].name, "b.png");
     }
 
     #[test]
-    fn texture_size_preserves_aspect_ratio_and_stays_capped() {
-        let cases = [
-            ((2000, 1000), (1024, 512)),
-            ((1000, 2000), (256, 512)),
-            ((3000, 2000), (768, 512)),
-            ((320, 200), (320, 200)),
-            ((4000, 1), (1024, 1)),
-        ];
-        for (source, expected) in cases {
-            let actual = texture_size(source.0, source.1);
-            assert_eq!(actual, expected);
-            assert!(actual.0 <= MAX_TEXTURE_WIDTH);
-            assert!(actual.1 <= MAX_TEXTURE_HEIGHT);
-        }
-        assert_eq!(texture_size(0, 100), (0, 0));
+    fn entity_encoded_text_and_media_names_are_decoded() {
+        assert_eq!(strip_tags("A &amp; B &#65;"), "A & B A");
+        let refs = media_refs("<img src=\"a&quot;b.png\">");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "a\"b.png");
     }
 
     #[test]
-    fn cache_eviction_drops_least_recently_used() {
-        let mut cache = LruCache::new(2);
-        cache.insert(cache_key("a.png"), 1);
-        cache.insert(cache_key("b.png"), 2);
-        assert_eq!(cache.get(Path::new("a.png")), Some(&1));
-
-        cache.insert(cache_key("c.png"), 3);
-
-        assert_eq!(cache.entries.len(), 2);
-        assert!(!cache.entries.contains_key(&cache_key("b.png")));
-        assert_eq!(cache.get(Path::new("a.png")), Some(&1));
-        assert_eq!(cache.get(Path::new("c.png")), Some(&3));
+    fn unmatched_template_suffix_is_kept_once() {
+        let empty = super::FieldValues {
+            names: &[],
+            values: &[],
+        };
+        assert_eq!(
+            super::render_template("before {{partial", empty, ""),
+            "before {{partial"
+        );
     }
 
     #[test]
-    fn cache_respects_size_bound() {
-        let mut cache = LruCache::new(3);
-        for index in 0..6 {
-            let name = format!("image{index}.png");
-            cache.insert(cache_key(&name), index);
-        }
-        assert_eq!(cache.entries.len(), 3);
-        for index in 0..3 {
-            let name = format!("image{index}.png");
-            assert!(!cache.entries.contains_key(&cache_key(&name)));
-        }
+    fn media_paths_stay_inside_the_media_directory() {
+        let dir = std::path::Path::new("/media");
+        assert_eq!(
+            super::media_path(dir, "a.png"),
+            Some(std::path::PathBuf::from("/media/a.png"))
+        );
+        assert_eq!(super::media_path(dir, "../secret.png"), None);
+        assert_eq!(super::media_path(dir, "/etc/passwd"), None);
+        assert_eq!(super::media_path(dir, "sub/a.png"), None);
     }
 
     #[test]
-    fn repeated_cache_lookup_does_not_reload() {
-        let mut cache = LruCache::new(2);
-        let key = cache_key("flag.png");
-        let mut loads: u32 = 0;
-        assert!(cache.get(&key).is_none());
-        loads = loads.saturating_add(1);
-        cache.insert(key.clone(), loads);
-        assert_eq!(cache.get(&key), Some(&1));
-        assert_eq!(cache.get(&key), Some(&1));
-        assert_eq!(loads, 1);
-    }
-
-    #[test]
-    fn cache_retains_failed_decodes() {
-        let mut cache: LruCache<Option<u8>> = LruCache::new(2);
-        let key = cache_key("missing.png");
-        cache.insert(key.clone(), None);
-        assert!(matches!(cache.get(&key), Some(None)));
+    fn rendered_text_accepts_the_shared_palette() {
+        let card = render_card(
+            &model(&["Front"], "{{Front}}", "{{Front}}"),
+            &note(&["Hello"]),
+            CardRequest::question(0),
+        );
+        let _ = super::rendered_text(&card, crate::theme::MOCHA.text, 84.0);
+        let _ = crate::theme::MOCHA;
     }
 }

@@ -595,7 +595,7 @@ fn measure_gui(fixture: &Fixture, recorder: &mut Recorder) -> BenchResult<()> {
         },
         || {
             let mut revealed = app.borrow_mut();
-            revealed.frame(Some(egui::Key::Space));
+            revealed.frame(Some(ranki_ui::BenchKey::Space));
             revealed.frame(None);
             Ok(())
         },

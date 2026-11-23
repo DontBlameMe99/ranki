@@ -3,14 +3,26 @@
 //! Field names and numeric values mirror Anki's `collection.anki2` schema so
 //! records can be read and written without conversion loss.
 
+pub mod cloze;
 pub mod config;
 mod id;
-
+pub mod image_occlusion;
+pub mod raw;
+pub mod stock;
+pub use cloze::cloze_markers;
+pub use cloze::cloze_ordinal;
+pub use cloze::cloze_ordinals;
 pub use config::{
     Config, GeneralConfig, SchedulerConfig, SchedulerKind, Settings,
-    ThemeChoice, UiConfig, media_dir_for,
+    SyncConfig, SyncSettings, ThemeChoice, UiConfig, media_dir_for,
 };
 pub use id::next_id;
+pub use image_occlusion::parse_image_occlusion_field;
+pub use raw::decode_hex;
+pub use raw::encode_hex;
+use std::collections::BTreeSet;
+pub use stock::StockModelKind;
+pub use stock::stock_models;
 
 use serde::{Deserialize, Serialize};
 
@@ -226,20 +238,135 @@ pub struct Deck {
     pub description: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+pub enum NoteKind {
+    #[default]
+    Normal,
+    Cloze,
+}
+
+impl NoteKind {
+    /// Anki's `type` value for the note kind.
+    #[must_use]
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::Normal => 0,
+            Self::Cloze => 1,
+        }
+    }
+
+    /// Unknown values are treated as normal, matching Anki's tolerant readers.
+    #[must_use]
+    pub const fn from_code(code: i32) -> Self {
+        match code {
+            1 => Self::Cloze,
+            _ => Self::Normal,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardTemplate {
     pub name: String,
     pub question_format: String,
     pub answer_format: String,
+    #[serde(default)]
+    pub ord: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteModel {
     pub id: Id,
     pub name: String,
     pub fields: Vec<String>,
     pub templates: Vec<CardTemplate>,
     pub css: String,
+    #[serde(default)]
+    pub kind: NoteKind,
+    #[serde(default)]
+    pub original_stock_kind: Option<i32>,
+    #[serde(default)]
+    pub field_tags: Vec<Option<u32>>,
+    /// Ordinals parallel to `templates`; missing `ord` values use the position.
+    #[serde(default)]
+    pub template_ordinals: Vec<u16>,
+    /// Raw schema-18 protobuf config kept for export round trips.
+    #[serde(default)]
+    pub raw_config: Option<Vec<u8>>,
+}
+
+impl NoteModel {
+    /// True for cloze note types, including Image Occlusion.
+    #[must_use]
+    pub const fn is_cloze(&self) -> bool {
+        matches!(self.kind, NoteKind::Cloze)
+    }
+
+    /// True when Anki's original stock kind identifies Image Occlusion.
+    #[must_use]
+    pub fn is_image_occlusion(&self) -> bool {
+        self.original_stock_kind
+            == Some(stock::ORIGINAL_STOCK_KIND_IMAGE_OCCLUSION)
+    }
+
+    /// Finds the template for a card ordinal.
+    ///
+    /// Cloze note types use their first template for every ordinal. Older
+    /// models without ordinals fall back to the template position.
+    #[must_use]
+    pub fn template_for(&self, ordinal: u16) -> Option<&CardTemplate> {
+        if self.is_cloze() {
+            return self.templates.first();
+        }
+        self.templates
+            .iter()
+            .find(|template| template.ord == ordinal)
+            .or_else(|| self.templates.get(usize::from(ordinal)))
+    }
+
+    /// Ordinals of the cards Anki generates for a note with these fields.
+    #[must_use]
+    pub fn card_ordinals(&self, fields: &[String]) -> Vec<u16> {
+        if self.is_cloze() {
+            return cloze_ordinals(fields).into_iter().collect();
+        }
+        let mut used = BTreeSet::new();
+        let mut ordinals = self
+            .templates
+            .iter()
+            .enumerate()
+            .map(|(position, template)| {
+                let declared = self
+                    .template_ordinals
+                    .get(position)
+                    .copied()
+                    .unwrap_or(template.ord);
+                unique_ordinal(declared, position, &mut used)
+            })
+            .collect::<Vec<_>>();
+        ordinals.sort_unstable();
+        ordinals
+    }
+}
+fn unique_ordinal(
+    declared: u16,
+    position: usize,
+    used: &mut BTreeSet<u16>,
+) -> u16 {
+    if used.insert(declared) {
+        return declared;
+    }
+    let fallback = u16::try_from(position)
+        .unwrap_or(u16::MAX)
+        .min(u16::MAX.saturating_sub(1));
+    let mut ordinal = fallback;
+    while used.contains(&ordinal) {
+        ordinal = ordinal.saturating_add(1);
+    }
+    let _ = used.insert(ordinal);
+    ordinal
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -256,6 +383,9 @@ pub struct ReviewDecision {
     pub card: Card,
     pub revlog: RevLog,
 }
+
+/// Card counts for every deck in a collection, in deck order.
+pub type DeckTotals = Vec<(Id, DeckStats)>;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DeckStats {
@@ -335,6 +465,25 @@ pub trait Store {
     /// # Errors
     /// Returns [`StoreError`] if the collection cannot be read.
     fn models(&self) -> Result<Vec<NoteModel>, StoreError>;
+    /// Installs a stock note type and returns the stored model.
+    ///
+    /// Returns the collection's existing model when it already has that stock
+    /// type, so the call is safe to repeat.
+    ///
+    /// Implementations that cannot install models return
+    /// [`StoreError::Unsupported`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the write fails.
+    fn ensure_model(
+        &mut self,
+        kind: StockModelKind,
+    ) -> Result<NoteModel, StoreError> {
+        Err(StoreError::Unsupported(format!(
+            "ensure_model is not supported for {}",
+            kind.name()
+        )))
+    }
 
     /// Finds card ids matching an Anki-style search query.
     ///
@@ -384,6 +533,18 @@ pub trait Store {
         decision: &ReviewDecision,
     ) -> Result<(), StoreError>;
 
+    /// Returns every review log, ordered by card and then by log id.
+    ///
+    /// Implementations without a review history return
+    /// [`StoreError::Unsupported`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
+    fn review_history(&self) -> Result<Vec<RevLog>, StoreError> {
+        Err(StoreError::Unsupported(
+            "review_history is not supported by this store".to_owned(),
+        ))
+    }
     /// Returns card counts for a deck.
     ///
     /// # Errors
@@ -393,6 +554,19 @@ pub trait Store {
         deck_id: Option<Id>,
         now_secs: i64,
     ) -> Result<DeckStats, StoreError>;
+
+    /// Returns card counts for every deck, each including its subdecks.
+    ///
+    /// Implementations without a batch query return
+    /// [`StoreError::Unsupported`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
+    fn deck_stats(&self) -> Result<DeckTotals, StoreError> {
+        Err(StoreError::Unsupported(
+            "deck_stats is not supported by this store".to_owned(),
+        ))
+    }
 
     /// Returns the collection modification timestamp in seconds.
     ///
