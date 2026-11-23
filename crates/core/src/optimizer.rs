@@ -33,7 +33,6 @@ pub const MAX_SEQUENCE_LENGTH: usize = 256;
 pub const MIN_TRAINING_ITEMS: usize = 64;
 pub const HEALTH_CHECK_ITEMS: usize = 300;
 pub const HEALTH_LOG_LOSS: f64 = 1.11;
-pub const HEALTH_RMSE: f64 = 1.53;
 pub const AUTO_OPTIMIZE_MIN_DAYS: u32 = 30;
 pub const AUTO_OPTIMIZE_MIN_REVIEWS: u32 = 1000;
 
@@ -215,20 +214,6 @@ fn log_loss(items: &[TrainingItem], weights: &[f32], decay: f64) -> f64 {
     total / count(items)
 }
 
-fn root_mean_square_error(
-    items: &[TrainingItem],
-    weights: &[f32],
-    decay: f64,
-) -> f64 {
-    let mut total = 0.0;
-    for item in items {
-        let difference =
-            retrievability(item, weights, decay) - observed(item.rating);
-        total += difference * difference;
-    }
-    (total / count(items)).sqrt()
-}
-
 fn batch_gradient(
     items: &[TrainingItem],
     weights: &[f32],
@@ -246,9 +231,10 @@ fn batch_gradient(
         let ratio = factor * f64::from(item.elapsed_days) / stability;
         let loss_slope =
             -(actual / predicted - (1.0 - actual) / (1.0 - predicted));
+        // The slope is dR/d(ln S), the space the weights are fit in.
         let curve_slope = decay * predicted * ratio / (1.0 + ratio);
         if let Some(slot) = gradient.get_mut(index) {
-            *slot += loss_slope * curve_slope * stability;
+            *slot += loss_slope * curve_slope;
         }
     }
     let divisor = count(items);
@@ -330,8 +316,7 @@ fn health_check(items: &[TrainingItem], params: &FsrsParams) -> Option<bool> {
     }
     let decay = f64::from(params.decay());
     let loss = log_loss(items, params.weights(), decay);
-    let error = root_mean_square_error(items, params.weights(), decay);
-    Some(loss <= HEALTH_LOG_LOSS || error <= HEALTH_RMSE)
+    Some(loss <= HEALTH_LOG_LOSS)
 }
 
 #[cfg(test)]
@@ -571,6 +556,80 @@ mod tests {
         assert_eq!(report(&paired_dataset(300, 30)).health_check, None);
         let result = report(&paired_dataset(301, 30));
         assert!(result.health_check.is_some());
+    }
+
+    #[test]
+    fn optimizer_health_check_reports_poor_predictions() {
+        let items = (0..=HEALTH_CHECK_ITEMS)
+            .map(|_| TrainingItem {
+                initial_rating: Rating::Good,
+                rating: Rating::Again,
+                elapsed_days: 1,
+                sequence_length: 2,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(health_check(&items, &FsrsParams::default()), Some(false));
+        assert_eq!(
+            health_check(
+                items.get(..HEALTH_CHECK_ITEMS).unwrap_or_default(),
+                &FsrsParams::default()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn batch_gradient_matches_a_finite_difference() {
+        let items = [
+            (Rating::Again, Rating::Good),
+            (Rating::Hard, Rating::Good),
+            (Rating::Good, Rating::Again),
+            (Rating::Easy, Rating::Good),
+        ]
+        .into_iter()
+        .map(|(initial_rating, rating)| TrainingItem {
+            initial_rating,
+            rating,
+            elapsed_days: 10,
+            sequence_length: 2,
+        })
+        .collect::<Vec<_>>();
+        let weights = ANKI_DEFAULT_PARAMS;
+        let decay = f64::from(weights.get(20).copied().unwrap_or_default());
+        let gradient = batch_gradient(&items, &weights, decay);
+        let step = 1e-5;
+        for index in 0..4 {
+            let theta =
+                f64::from(weights.get(index).copied().unwrap_or_default()).ln();
+            let finite = (objective(&items, index, theta + step, decay)
+                - objective(&items, index, theta - step, decay))
+                / (2.0 * step);
+            let analytic = gradient.get(index).copied().unwrap_or_default();
+            assert!(
+                (finite - analytic).abs() < 1e-3,
+                "gradient {index} differs: {analytic} vs {finite}"
+            );
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "finite difference needs the sample, weight and step"
+    )]
+    fn objective(
+        items: &[TrainingItem],
+        index: usize,
+        theta: f64,
+        decay: f64,
+    ) -> f64 {
+        let mut trial = ANKI_DEFAULT_PARAMS;
+        if let Some(slot) = trial.get_mut(index) {
+            *slot = f32_from_f64(theta.exp());
+        }
+        let prior =
+            f64::from(ANKI_DEFAULT_PARAMS.get(index).copied().unwrap_or(0.001));
+        log_loss(items, &trial, decay)
+            + L2_GAMMA * (theta - prior.ln()).powi(2) / count(items)
     }
 
     #[test]

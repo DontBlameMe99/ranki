@@ -563,7 +563,7 @@ fn fsrs_params_from_fsrs5_appends_short_term_and_decay() {
 #[test]
 fn fsrs_params_from_fsrs6_uses_weights_directly() {
     let params =
-        FsrsParams::from_slice(&ANKI_DEFAULT_PARAMS).unwrap_or_default();
+        FsrsParams::from_slice(&ANKI_DEFAULT_PARAMS).expect("default weights");
     assert_eq!(params, FsrsParams::default());
     assert_eq!(params.decay(), ANKI_DEFAULT_PARAMS[20]);
 }
