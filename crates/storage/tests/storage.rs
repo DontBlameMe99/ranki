@@ -357,6 +357,8 @@ fn find_cards_matches_text_wildcards_and_state() {
     assert_eq!(store.find_cards("alpha").expect("find").len(), 1);
     assert_eq!(store.find_cards("question").expect("find").len(), 2);
     assert_eq!(store.find_cards("alpha*").expect("find").len(), 1);
+    assert_eq!(store.find_cards("QUESTION").expect("find").len(), 2);
+    assert_eq!(store.find_cards("ALPHA").expect("find").len(), 1);
     assert_eq!(store.find_cards("is:new").expect("find").len(), 2);
     assert_eq!(store.find_cards("is:review").expect("find"), [] as [i64; 0]);
     assert!(store.find_cards("is:unknown").is_err());
@@ -373,6 +375,7 @@ fn find_cards_matches_deck_tag_and_model() {
     new_note.deck_id = deck.id;
     let ids = store.add_note(&new_note).expect("add");
     assert_eq!(store.find_cards("tag:french").expect("find"), ids);
+    assert_eq!(store.find_cards("tag:FRENCH").expect("find"), ids);
     assert_eq!(store.find_cards("note:Basic").expect("find"), ids);
     assert_eq!(
         store.find_cards("tag:english").expect("find"),
