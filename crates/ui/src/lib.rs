@@ -29,6 +29,7 @@
 mod add_card_view;
 mod app;
 mod assets;
+mod bench;
 mod card_view;
 mod components;
 mod decks_view;
@@ -42,6 +43,7 @@ use gpui::{
 };
 use ranki_model::Store;
 
+pub use bench::{BenchApp, BenchKey};
 pub use ranki_model::{SchedulerKind, Settings, ThemeChoice};
 
 /// Settings for the review window, shared with the command line.

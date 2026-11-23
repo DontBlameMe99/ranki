@@ -4347,7 +4347,6 @@ dependencies = [
 name = "ranki-bench"
 version = "0.1.0"
 dependencies = [
- "egui",
  "ranki-core",
  "ranki-format",
  "ranki-model",
