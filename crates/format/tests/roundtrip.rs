@@ -21,6 +21,7 @@ use ranki_model::Store;
 use ranki_storage::Collection as AnkiCollection;
 use rusqlite::Connection;
 use rusqlite::params;
+use serde_json::Value;
 use serde_json::json;
 use tempfile::TempDir;
 use zip::ZipWriter;
@@ -154,15 +155,32 @@ impl Fixture {
     }
 }
 
+struct SourceMeta {
+    models: Value,
+    decks: Value,
+}
+
+impl SourceMeta {
+    fn fixture() -> Self {
+        Self {
+            models: json!({"1": {"id": 1, "name": "Basic", "did": 1}}),
+            decks: json!({"1": {"id": 1, "name": "Default", "conf": 1}}),
+        }
+    }
+}
+
 fn write_collection(path: &Path, seed: &Seed) {
+    write_collection_with(path, seed, &SourceMeta::fixture());
+}
+
+fn write_collection_with(path: &Path, seed: &Seed, meta: &SourceMeta) {
     let _ = fs::remove_file(path);
     let mut connection = Connection::open(path).unwrap();
     connection.execute_batch(TEST_SCHEMA).unwrap();
     let conf =
         json!({"activeDecks": [1], "curDeck": 1, "curModel": 1}).to_string();
-    let models = json!({"1": {"id": 1, "name": "Basic", "did": 1}}).to_string();
-    let decks =
-        json!({"1": {"id": 1, "name": "Default", "conf": 1}}).to_string();
+    let models = meta.models.to_string();
+    let decks = meta.decks.to_string();
     let dconf = json!({"1": {"id": 1, "name": "Default"}}).to_string();
     let tags = json!({}).to_string();
     connection
@@ -1055,4 +1073,459 @@ fn real_world_apkg_roundtrip_when_available() {
     let second = import_apkg(&exported, &fresh, &fresh_media).unwrap();
     assert_eq!(second.notes, report.notes);
     assert_eq!(second.cards, report.cards);
+}
+
+const PACKAGE_MODEL_ID: i64 = 500;
+const PACKAGE_DECK_ID: i64 = 700;
+
+fn merge_package(directory: &Path, meta: &SourceMeta, seed: &Seed) -> PathBuf {
+    let collection = directory.join("merge-source.anki2");
+    write_collection_with(&collection, seed, meta);
+    let package = directory.join("merge.apkg");
+    build_zip(
+        &package,
+        &[("collection.anki2", fs::read(&collection).unwrap())],
+    );
+    package
+}
+
+fn model_json(id: i64, name: &str, fields: &[&str]) -> Value {
+    let entries = fields
+        .iter()
+        .enumerate()
+        .map(|(ord, field)| json!({"name": field, "ord": ord}))
+        .collect::<Vec<_>>();
+    json!({
+        "id": id,
+        "name": name,
+        "type": 0,
+        "mod": 0,
+        "usn": 0,
+        "sortf": 0,
+        "did": 1,
+        "flds": entries,
+        "tmpls": [{"name": "Card 1", "ord": 0, "qfmt": "{{Front}}", "afmt": "{{FrontSide}}"}],
+        "css": "",
+        "latexPre": "",
+        "latexPost": "",
+        "req": []
+    })
+}
+
+fn deck_json(id: i64, name: &str) -> Value {
+    json!({"id": id, "name": name, "conf": 1, "desc": "", "dyn": 0, "usn": 0})
+}
+
+fn entry_map(entries: &[Value]) -> Value {
+    let mut map = serde_json::Map::new();
+    for entry in entries {
+        let id = entry.get("id").and_then(Value::as_i64).unwrap();
+        let _ = map.insert(id.to_string(), entry.clone());
+    }
+    Value::Object(map)
+}
+
+fn col_column(connection: &Connection, column: &str) -> Value {
+    let sql = format!("SELECT {column} FROM col WHERE id = 1");
+    let text: String =
+        connection.query_row(&sql, [], |row| row.get(0)).unwrap();
+    serde_json::from_str(&text).unwrap()
+}
+
+fn entry_names(value: &Value) -> Vec<String> {
+    let mut names = value
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|entry| {
+            entry
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+fn entry_ids(value: &Value, name: &str) -> Vec<i64> {
+    let mut ids = value
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+        .map(|entry| entry.get("id").and_then(Value::as_i64).unwrap())
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids
+}
+
+fn model_fields(value: &Value, id: i64) -> Vec<String> {
+    value
+        .as_object()
+        .unwrap()
+        .get(&id.to_string())
+        .unwrap()
+        .get("flds")
+        .and_then(Value::as_array)
+        .unwrap()
+        .iter()
+        .map(|field| {
+            field
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect()
+}
+
+fn one_note(guid: &str, mid: i64, deck_id: i64) -> Seed {
+    Seed {
+        notes: vec![TestNote {
+            id: 10,
+            guid: guid.to_owned(),
+            mid,
+            fields: "front\u{001f}back".to_owned(),
+        }],
+        cards: vec![TestCard {
+            id: 20,
+            note_id: 10,
+            deck_id,
+            ordinal: 0,
+        }],
+        revlog: false,
+    }
+}
+
+fn import_into(
+    directory: &Path,
+    package: &Path,
+    collection: &Path,
+) -> Connection {
+    import_apkg(package, collection, &directory.join("import-media")).unwrap();
+    Connection::open(collection).unwrap()
+}
+
+#[test]
+fn fresh_import_merges_named_deck_and_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = SourceMeta {
+        models: entry_map(&[model_json(
+            PACKAGE_MODEL_ID,
+            "Basic",
+            &["Front", "Back"],
+        )]),
+        decks: entry_map(&[deck_json(PACKAGE_DECK_ID, "Default")]),
+    };
+    let package = merge_package(
+        dir.path(),
+        &meta,
+        &one_note("flags", PACKAGE_MODEL_ID, PACKAGE_DECK_ID),
+    );
+
+    let collection = dir.path().join("fresh.anki2");
+    let connection = import_into(dir.path(), &package, &collection);
+
+    let decks = col_column(&connection, "decks");
+    let models = col_column(&connection, "models");
+    assert_eq!(entry_names(&decks), ["Default".to_owned()]);
+    assert_eq!(entry_ids(&decks, "Default"), [1]);
+    assert_eq!(entry_names(&models), ["Basic".to_owned()]);
+    assert_eq!(entry_ids(&models, "Basic"), [1]);
+    assert_eq!(
+        query_id(&connection, "SELECT mid FROM notes WHERE guid = ?", "flags"),
+        1
+    );
+    assert_eq!(
+        query_id(&connection, "SELECT did FROM cards WHERE nid = ?", "10"),
+        1
+    );
+}
+
+#[test]
+fn existing_import_reuses_same_named_deck_and_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("existing.anki2");
+    write_collection_with(
+        &destination,
+        &Seed {
+            notes: vec![TestNote {
+                id: 1,
+                guid: "existing".to_owned(),
+                mid: 11,
+                fields: "keep\u{001f}me".to_owned(),
+            }],
+            cards: vec![TestCard {
+                id: 9,
+                note_id: 1,
+                deck_id: 12,
+                ordinal: 0,
+            }],
+            revlog: false,
+        },
+        &SourceMeta {
+            models: entry_map(&[model_json(11, "basic", &["Front", "Back"])]),
+            decks: entry_map(&[deck_json(12, "default")]),
+        },
+    );
+    let meta = SourceMeta {
+        models: entry_map(&[model_json(
+            PACKAGE_MODEL_ID,
+            "Basic",
+            &["Front", "Back"],
+        )]),
+        decks: entry_map(&[deck_json(PACKAGE_DECK_ID, "Default")]),
+    };
+    let package = merge_package(
+        dir.path(),
+        &meta,
+        &one_note("flags", PACKAGE_MODEL_ID, PACKAGE_DECK_ID),
+    );
+
+    let connection = import_into(dir.path(), &package, &destination);
+
+    let decks = col_column(&connection, "decks");
+    let models = col_column(&connection, "models");
+    assert_eq!(entry_names(&decks), ["default".to_owned()]);
+    assert_eq!(entry_ids(&decks, "default"), [12]);
+    assert_eq!(entry_names(&models), ["basic".to_owned()]);
+    assert_eq!(entry_ids(&models, "basic"), [11]);
+    assert_eq!(
+        query_id(&connection, "SELECT mid FROM notes WHERE guid = ?", "flags"),
+        11
+    );
+    assert_eq!(
+        query_id(&connection, "SELECT did FROM cards WHERE nid = ?", "10"),
+        12
+    );
+    assert_eq!(count(&connection, "notes"), 2);
+}
+
+#[test]
+fn subdeck_merge_keeps_hierarchy() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("existing.anki2");
+    write_collection_with(
+        &destination,
+        &Seed {
+            notes: vec![],
+            cards: vec![],
+            revlog: false,
+        },
+        &SourceMeta {
+            models: entry_map(&[model_json(11, "Basic", &["Front", "Back"])]),
+            decks: entry_map(&[deck_json(12, "Parent")]),
+        },
+    );
+    let meta = SourceMeta {
+        models: entry_map(&[model_json(
+            PACKAGE_MODEL_ID,
+            "Basic",
+            &["Front", "Back"],
+        )]),
+        decks: entry_map(&[
+            deck_json(PACKAGE_DECK_ID, "Default"),
+            deck_json(701, "Parent"),
+            deck_json(702, "Parent::Child"),
+        ]),
+    };
+    let seed = Seed {
+        notes: vec![
+            TestNote {
+                id: 10,
+                guid: "parent".to_owned(),
+                mid: PACKAGE_MODEL_ID,
+                fields: "a\u{001f}b".to_owned(),
+            },
+            TestNote {
+                id: 11,
+                guid: "child".to_owned(),
+                mid: PACKAGE_MODEL_ID,
+                fields: "c\u{001f}d".to_owned(),
+            },
+        ],
+        cards: vec![
+            TestCard {
+                id: 20,
+                note_id: 10,
+                deck_id: 701,
+                ordinal: 0,
+            },
+            TestCard {
+                id: 21,
+                note_id: 11,
+                deck_id: 702,
+                ordinal: 0,
+            },
+        ],
+        revlog: false,
+    };
+    let package = merge_package(dir.path(), &meta, &seed);
+
+    let connection = import_into(dir.path(), &package, &destination);
+
+    let decks = col_column(&connection, "decks");
+    assert_eq!(
+        entry_names(&decks),
+        [
+            "Default".to_owned(),
+            "Parent".to_owned(),
+            "Parent::Child".to_owned()
+        ]
+    );
+    assert_eq!(entry_ids(&decks, "Parent"), [12]);
+    let child_id = entry_ids(&decks, "Parent::Child").first().copied().unwrap();
+    assert_eq!(
+        query_id(&connection, "SELECT did FROM cards WHERE nid = ?", "10"),
+        12
+    );
+    assert_eq!(
+        query_id(&connection, "SELECT did FROM cards WHERE nid = ?", "11"),
+        child_id
+    );
+}
+
+#[test]
+fn reimport_keeps_deck_and_model_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = SourceMeta {
+        models: entry_map(&[model_json(
+            PACKAGE_MODEL_ID,
+            "Basic",
+            &["Front", "Back"],
+        )]),
+        decks: entry_map(&[
+            deck_json(PACKAGE_DECK_ID, "Default"),
+            deck_json(701, "Parent::Child"),
+        ]),
+    };
+    let package = merge_package(
+        dir.path(),
+        &meta,
+        &one_note("flags", PACKAGE_MODEL_ID, PACKAGE_DECK_ID),
+    );
+    let collection = dir.path().join("fresh.anki2");
+
+    let first = import_into(dir.path(), &package, &collection);
+    let first_decks = entry_ids(&col_column(&first, "decks"), "Default");
+    let first_models = entry_ids(&col_column(&first, "models"), "Basic");
+    drop(first);
+
+    let second = import_into(dir.path(), &package, &collection);
+    assert_eq!(
+        entry_ids(&col_column(&second, "decks"), "Default"),
+        first_decks
+    );
+    assert_eq!(
+        entry_ids(&col_column(&second, "models"), "Basic"),
+        first_models
+    );
+    assert_eq!(count(&second, "notes"), 1);
+}
+
+#[test]
+fn incompatible_same_named_model_is_kept_separate() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = SourceMeta {
+        models: entry_map(&[model_json(
+            PACKAGE_MODEL_ID,
+            "Basic",
+            &["Front", "Back", "Extra"],
+        )]),
+        decks: entry_map(&[deck_json(PACKAGE_DECK_ID, "Default")]),
+    };
+    let package = merge_package(
+        dir.path(),
+        &meta,
+        &one_note("flags", PACKAGE_MODEL_ID, PACKAGE_DECK_ID),
+    );
+
+    let collection = dir.path().join("fresh.anki2");
+    let connection = import_into(dir.path(), &package, &collection);
+
+    let models = col_column(&connection, "models");
+    assert_eq!(entry_ids(&models, "Basic"), [1, PACKAGE_MODEL_ID]);
+    assert_eq!(
+        model_fields(&models, 1),
+        ["Front".to_owned(), "Back".to_owned()]
+    );
+    assert_eq!(
+        model_fields(&models, PACKAGE_MODEL_ID),
+        ["Front".to_owned(), "Back".to_owned(), "Extra".to_owned()]
+    );
+    assert_eq!(
+        query_id(&connection, "SELECT mid FROM notes WHERE guid = ?", "flags"),
+        PACKAGE_MODEL_ID
+    );
+}
+
+#[test]
+fn imported_original_deck_points_at_merged_deck() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = SourceMeta {
+        models: entry_map(&[model_json(
+            PACKAGE_MODEL_ID,
+            "Basic",
+            &["Front", "Back"],
+        )]),
+        decks: entry_map(&[
+            deck_json(PACKAGE_DECK_ID, "Default"),
+            deck_json(701, "Later"),
+        ]),
+    };
+    let source = dir.path().join("merge-source.anki2");
+    write_collection_with(
+        &source,
+        &one_note("flags", PACKAGE_MODEL_ID, 701),
+        &meta,
+    );
+    {
+        let connection = Connection::open(&source).unwrap();
+        connection
+            .execute(
+                "UPDATE cards SET odid = ?1, odue = 7 WHERE id = 20",
+                [PACKAGE_DECK_ID],
+            )
+            .unwrap();
+    }
+    let package = dir.path().join("merge.apkg");
+    build_zip(
+        &package,
+        &[("collection.anki2", fs::read(&source).unwrap())],
+    );
+
+    let collection = dir.path().join("fresh.anki2");
+    let connection = import_into(dir.path(), &package, &collection);
+
+    assert_eq!(
+        query_id(&connection, "SELECT did FROM cards WHERE nid = ?", "10"),
+        701
+    );
+    assert_eq!(
+        query_id(&connection, "SELECT odid FROM cards WHERE nid = ?", "10"),
+        1
+    );
+}
+
+#[test]
+fn real_world_apkg_import_keeps_single_default_deck() {
+    if !Path::new(REAL_FIXTURE).exists() {
+        eprintln!("skipping real-world apkg test: {REAL_FIXTURE} is absent");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("WorldFlags.apkg");
+    fs::copy(REAL_FIXTURE, &package).unwrap();
+    let collection = dir.path().join("flags.anki2");
+    let connection = import_into(dir.path(), &package, &collection);
+
+    let decks = col_column(&connection, "decks");
+    assert_eq!(entry_ids(&decks, "Default"), [1]);
+    assert_eq!(
+        entry_names(&decks),
+        ["Default".to_owned(), "WorldFlags".to_owned()]
+    );
 }

@@ -472,6 +472,13 @@ fn merge_decks(
 ) -> Result<BTreeMap<i64, i64>, FormatError> {
     let mut decks = as_object(destination, "decks")?;
     let incoming_decks = as_object(incoming, "decks")?;
+    let mut named = BTreeMap::new();
+    for (key, value) in &decks {
+        let id = entry_id(key, value, "deck")?;
+        if let Some(name) = deck_name(value) {
+            let _ = named.entry(name).or_insert(id);
+        }
+    }
     let dconf_map = state.dconf_map.clone();
     let mut remapper = DeckRemapper {
         used: collect_ids(&decks),
@@ -482,17 +489,28 @@ fn merge_decks(
 
     for (key, mut value) in incoming_decks {
         let old_id = entry_id(&key, &value, "deck")?;
-        remapper.visit(&mut value)?;
+        let merged =
+            deck_name(&value).and_then(|name| named.get(&name).copied());
+        remapper.visit(&mut value, merged)?;
         let new_id = value
             .get("id")
             .and_then(Value::as_i64)
             .ok_or_else(|| FormatError::new("deck has no identifier"))?;
         remapper.mapping.insert(old_id, new_id);
-        decks.insert(new_id.to_string(), value);
+        if merged.is_none() {
+            decks.insert(new_id.to_string(), value);
+        }
     }
 
     *destination = Value::Object(decks);
     Ok(remapper.mapping)
+}
+
+fn deck_name(value: &Value) -> Option<String> {
+    value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_lowercase)
 }
 
 struct DeckRemapper<'a> {
@@ -503,9 +521,13 @@ struct DeckRemapper<'a> {
 }
 
 impl DeckRemapper<'_> {
-    fn visit(&mut self, value: &mut Value) -> Result<(), FormatError> {
+    fn visit(
+        &mut self,
+        value: &mut Value,
+        merged: Option<i64>,
+    ) -> Result<(), FormatError> {
         if let Some(object) = value.as_object_mut() {
-            self.remap_object(object)?;
+            self.remap_object(object, merged)?;
         }
         self.visit_children(value)
     }
@@ -517,9 +539,12 @@ impl DeckRemapper<'_> {
     fn remap_object(
         &mut self,
         object: &mut Map<String, Value>,
+        merged: Option<i64>,
     ) -> Result<(), FormatError> {
         if let Some(old_id) = object.get("id").and_then(Value::as_i64) {
-            let new_id = if self.used.contains(&old_id) {
+            let new_id = if let Some(id) = merged {
+                id
+            } else if self.used.contains(&old_id) {
                 allocate(&mut self.used, self.state)?
             } else {
                 let _ = self.used.insert(old_id);
@@ -539,7 +564,7 @@ impl DeckRemapper<'_> {
             return Ok(());
         };
         for child in children.iter_mut() {
-            self.visit(child)?;
+            self.visit(child, None)?;
         }
         Ok(())
     }
@@ -553,11 +578,27 @@ fn merge_models(
     let mut models = as_object(destination, "models")?;
     let incoming_models = as_object(incoming, "models")?;
     let deck_map = state.deck_map.clone();
+    let mut named = BTreeMap::new();
+    for (key, value) in &models {
+        let id = entry_id(key, value, "model")?;
+        if let Some(name) = model_name(value) {
+            let _ = named
+                .entry(name)
+                .or_insert_with(|| (id, field_names(value)));
+        }
+    }
     let mut used = collect_ids(&models);
     let mut mapping = BTreeMap::new();
 
     for (key, mut value) in incoming_models {
         let old_id = entry_id(&key, &value, "model")?;
+        if let Some((id, fields)) =
+            model_name(&value).and_then(|name| named.get(&name))
+            && *fields == field_names(&value)
+        {
+            mapping.insert(old_id, *id);
+            continue;
+        }
         let new_id = if used.contains(&old_id) {
             allocate(&mut used, state)?
         } else {
@@ -572,6 +613,32 @@ fn merge_models(
 
     *destination = Value::Object(models);
     Ok(mapping)
+}
+
+fn model_name(value: &Value) -> Option<String> {
+    value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_lowercase)
+}
+
+fn field_names(value: &Value) -> Vec<String> {
+    value
+        .get("flds")
+        .and_then(Value::as_array)
+        .map(|fields| {
+            fields
+                .iter()
+                .map(|field| {
+                    field
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[expect(
