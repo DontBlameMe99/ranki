@@ -31,6 +31,7 @@ allow = [
   "ISC",
   "Zlib",
   "MPL-2.0",
+  "NCSA",
   "LGPL-2.1-or-later",
   "LGPL-3.0-or-later",
   "GPL-3.0",
