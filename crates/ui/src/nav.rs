@@ -6,8 +6,8 @@ use gpui::{
 };
 
 use crate::{
-    app::{Confirmation, Root, UiAction, View},
-    components::{ClickHandler, icon, keycap, secondary_button},
+    app::{Confirmation, Root, SYNC_STATE, UiAction, View},
+    components::{ClickHandler, brand_mark, icon, keycap, secondary_button},
     theme::{NAV_WIDTH, Style, alpha},
 };
 
@@ -19,6 +19,7 @@ impl Root {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let active = self.view;
+        let mark = brand_mark();
         let add_selected = active == View::AddCard;
         let add_ink = if add_selected {
             style.ink()
@@ -116,8 +117,11 @@ impl Root {
                             .h(px(32.))
                             .flex_none()
                             .rounded(px(10.))
+                            .text_color(style.ink())
+                            .text_size(px(mark.glyph))
+                            .font_weight(gpui::FontWeight::BOLD)
                             .bg(colors.mauve)
-                            .child(icon("rai.svg", 24., style.ink())),
+                            .child(mark.label),
                     )
                     .child(
                         div()
@@ -151,7 +155,7 @@ impl Root {
                     .text_size(px(12.))
                     .text_color(colors.subtext)
                     .child(crate::components::dot(status_color, 8.))
-                    .child(self.updated_label()),
+                    .child(crate::app::status_label(SYNC_STATE, Self::now())),
             )
     }
 

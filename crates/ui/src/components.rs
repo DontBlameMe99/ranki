@@ -126,6 +126,57 @@ pub fn chip(label: impl Into<SharedString>, colors: Palette) -> Div {
         .child(label.into())
 }
 
+/// Editable tag chip: the label plus a close button that owns the removal.
+#[must_use]
+pub fn removable_chip(
+    label: impl Into<SharedString>,
+    colors: Palette,
+    on_remove: ClickHandler,
+) -> impl IntoElement {
+    div()
+        .id("tag-chip")
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .py(px(7.))
+        .pr(px(8.))
+        .pl(px(12.))
+        .rounded(px(12.))
+        .bg(colors.surface0)
+        .text_size(px(13.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .child(label.into())
+        .child(
+            div()
+                .id("tag-chip-remove")
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .on_click(on_remove)
+                .child(icon("icon-x", 14., colors.overlay)),
+        )
+}
+
+/// Sidebar brand mark. The wordmark SVG is illegible at 32 px, so the tile
+/// carries a bold monogram instead.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrandMark {
+    pub label: &'static str,
+    pub tile: f32,
+    pub glyph: f32,
+}
+
+#[must_use]
+pub const fn brand_mark() -> BrandMark {
+    BrandMark {
+        label: "R",
+        tile: 32.0,
+        glyph: 20.0,
+    }
+}
+
 #[must_use]
 pub fn dot(color: Rgba, size: f32) -> Div {
     div()
@@ -151,4 +202,18 @@ pub fn progress_bar_width(fraction: f32, colors: Palette, width: f32) -> Div {
                 .rounded(px(3.))
                 .bg(colors.mauve),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::brand_mark;
+
+    #[test]
+    fn brand_mark_fills_the_tile_at_32_px() {
+        let mark = brand_mark();
+        assert_eq!(mark.label, "R");
+        assert_eq!(mark.tile, 32.0);
+        assert!(mark.glyph >= mark.tile * 0.55);
+        assert!(mark.glyph <= mark.tile * 0.75);
+    }
 }

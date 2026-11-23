@@ -62,6 +62,33 @@ pub struct TextField {
     edit_hook: Option<EditHook>,
 }
 
+/// Wraps `range` in `open`/`close` and returns the new text plus the caret
+/// offset. An empty selection gets an empty tag pair with the caret inside.
+#[must_use]
+pub fn wrap_selection(
+    content: &str,
+    range: Range<usize>,
+    tags: (&str, &str),
+) -> (String, usize) {
+    let (open, close) = tags;
+    let start = range.start.min(content.len());
+    let end = range.end.min(content.len()).max(start);
+    let mut text = String::with_capacity(
+        content.len().saturating_add(open.len() + close.len()),
+    );
+    text.push_str(content.get(..start).unwrap_or(""));
+    text.push_str(open);
+    text.push_str(content.get(start..end).unwrap_or(""));
+    text.push_str(close);
+    text.push_str(content.get(end..).unwrap_or(""));
+    let cursor = if start == end {
+        start.saturating_add(open.len())
+    } else {
+        end.saturating_add(open.len()).saturating_add(close.len())
+    };
+    (text, cursor)
+}
+
 impl TextField {
     #[must_use]
     pub fn new(
@@ -115,6 +142,16 @@ impl TextField {
     }
     pub fn set_edit_hook(&mut self, hook: EditHook) {
         self.edit_hook = Some(hook);
+    }
+
+    /// Wraps the selection in markup, or drops an empty pair at the caret.
+    pub fn wrap_markup(&mut self, tags: (&str, &str), cx: &mut Context<Self>) {
+        let (text, cursor) =
+            wrap_selection(&self.content, self.selected_range.clone(), tags);
+        self.content = text.into();
+        self.selected_range = cursor..cursor;
+        self.notify_edit(cx);
+        cx.notify();
     }
 
     /// Placeholder ink follows the palette so it keeps subtext contrast.
@@ -655,12 +692,25 @@ impl Element for TextElement {
 
 #[cfg(test)]
 mod tests {
-    use super::key_bindings;
+    use super::{key_bindings, wrap_selection};
 
     #[test]
     fn input_context_defines_navigation_keys() {
         let bindings = key_bindings();
         assert_eq!(bindings.len(), 10);
         assert!(!bindings.is_empty());
+    }
+
+    #[test]
+    fn markup_wraps_selection_or_inserts_an_empty_pair() {
+        let (text, cursor) = wrap_selection("問い", 0..6, ("<b>", "</b>"));
+        assert_eq!(text, "<b>問い</b>");
+        assert_eq!(cursor, 13);
+        let (text, cursor) = wrap_selection("abc", 1..2, ("<b>", "</b>"));
+        assert_eq!(text, "a<b>b</b>c");
+        assert_eq!(&text[cursor..], "c");
+        let (text, cursor) = wrap_selection("abc", 3..3, ("<b>", "</b>"));
+        assert_eq!(text, "abc<b></b>");
+        assert_eq!(&text[cursor..], "</b>");
     }
 }

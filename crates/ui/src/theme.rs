@@ -132,6 +132,17 @@ impl Style {
     }
 }
 
+/// Field placeholder ink. Latte `subtext` reaches only 3.2:1 on a `surface0`
+/// input, so light placeholders use a darker ink that clears 4.5:1 on both
+/// input roles.
+#[must_use]
+pub const fn placeholder_color(theme: Theme) -> Rgba {
+    match theme {
+        Theme::Dark => MOCHA.subtext,
+        Theme::Light => c(0x545869),
+    }
+}
+
 /// Rating hue: Again red, Hard peach, Good green, Easy blue.
 #[must_use]
 pub const fn rating_fill(code: u8, theme: Theme) -> Rgba {
@@ -279,7 +290,26 @@ pub const PROGRESS_WIDTH: f32 = 420.0;
 pub const PROGRESS_HEIGHT: f32 = 6.0;
 pub const PAGE_X: f32 = 40.0;
 pub const PAGE_Y: f32 = 32.0;
-pub const TABLE_COLUMNS: [f32; 5] = [1.0, 72.0, 72.0, 72.0, 108.0];
+/// Fixed width of one queue-count column in the deck table.
+pub const COUNT_COLUMN_WIDTH: f32 = 72.0;
+/// Reserved width of the deck table action column, so rows never shift.
+pub const ACTION_COLUMN_WIDTH: f32 = 120.0;
+/// Deck table widths: deck name flexes, three counts, then the action cell.
+pub const TABLE_COLUMNS: [f32; 5] = [
+    1.0,
+    COUNT_COLUMN_WIDTH,
+    COUNT_COLUMN_WIDTH,
+    COUNT_COLUMN_WIDTH,
+    ACTION_COLUMN_WIDTH,
+];
+/// Form column cap for the add-card screen.
+pub const ADD_FORM_WIDTH: f32 = 720.0;
+/// Preview rail width on the add-card screen.
+pub const PREVIEW_WIDTH: f32 = 380.0;
+/// Gap between the add-card form and its preview rail.
+pub const ADD_GAP: f32 = 32.0;
+/// Full add-card content width: form plus gap plus preview rail.
+pub const ADD_CONTENT_WIDTH: f32 = ADD_FORM_WIDTH + ADD_GAP + PREVIEW_WIDTH;
 
 /// Converts an interval in days or negative seconds into an Anki-style label.
 #[must_use]
@@ -307,7 +337,8 @@ mod tests {
     use super::{
         LATTE, MOCHA, PROGRESS_HEIGHT, PROGRESS_WIDTH, STAGE_HEIGHT,
         STAGE_RADIUS, STAGE_WIDTH, Theme, alpha, font_candidates,
-        interval_label, palette, rating_fill, rating_label, resolve_theme,
+        interval_label, palette, placeholder_color, rating_fill, rating_label,
+        resolve_theme,
     };
     use crate::ThemeChoice;
 
@@ -385,5 +416,36 @@ mod tests {
         assert_eq!(interval_label(6), "6d");
         assert_eq!(interval_label(60), "2mo");
         assert_eq!(interval_label(365), "1y");
+    }
+    /// WCAG 2.1 relative luminance ratio for two opaque roles.
+    fn contrast(a: gpui::Rgba, b: gpui::Rgba) -> f32 {
+        let lum = |color: gpui::Rgba| {
+            let channel = |value: f32| {
+                if value <= 0.040_45 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.212_6 * channel(color.r)
+                + 0.715_2 * channel(color.g)
+                + 0.072_2 * channel(color.b)
+        };
+        let (high, low) = {
+            let (a, b) = (lum(a), lum(b));
+            if a >= b { (a, b) } else { (b, a) }
+        };
+        (high + 0.05) / (low + 0.05)
+    }
+
+    #[test]
+    fn placeholders_clear_4_5_to_1_on_both_input_roles() {
+        for theme in [Theme::Dark, Theme::Light] {
+            let ink = placeholder_color(theme);
+            let input = palette(theme).base;
+            let raised = palette(theme).surface0;
+            assert!(contrast(ink, input) >= 4.5, "{theme:?} on base");
+            assert!(contrast(ink, raised) >= 4.5, "{theme:?} on surface0");
+        }
     }
 }

@@ -1,15 +1,18 @@
 //! Add-card screen: setup, dynamic fields, tags, live preview, and footer.
 
 use gpui::{
-    ClickEvent, Context, InteractiveElement, IntoElement, ParentElement,
+    App, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use crate::{
-    app::{Root, UiAction, note_type_name, resolve_model},
+    app::{AddedNote, Root, UiAction, note_type_name, resolve_model},
     card_view::{self, Side},
-    components::{icon, keycap},
-    theme::{NAV_WIDTH, PAGE_X, Style, alpha},
+    components::{ClickHandler, icon, keycap, removable_chip},
+    theme::{
+        ADD_CONTENT_WIDTH, ADD_FORM_WIDTH, ADD_GAP, NAV_WIDTH, PAGE_X,
+        PREVIEW_WIDTH, Style, alpha,
+    },
 };
 
 impl Root {
@@ -23,7 +26,9 @@ impl Root {
         let decks = self.decks.clone();
         let models = self.models.clone();
         let fields = self.add.fields.clone();
-        let tags = self.add.tags.clone();
+        let tags_field = self.add.tags.clone();
+        let tag_chips = self.add.tag_chips.clone();
+        let added = self.add.added.clone();
         let errors = self.add.errors.clone();
         let preview_side = self.add.preview_side;
         let model = resolve_model(&models, self.add.model_index);
@@ -31,6 +36,7 @@ impl Root {
             .iter()
             .map(|field| field.read(cx).text())
             .collect::<Vec<_>>();
+        let has_content = has_preview_content(&field_values);
         let preview_text = model.map_or_else(
             || String::from("Choose a note type"),
             |model| card_view::preview_card(model, &field_values, preview_side),
@@ -55,7 +61,6 @@ impl Root {
                         .map(str::to_owned)
                 })
         });
-        let keep_open = self.add.keep_open;
         let save = self.action_click(UiAction::SaveNote);
         let cancel = self.action_click(UiAction::CancelAdd);
         let preview_tab = |label: &'static str,
@@ -91,7 +96,7 @@ impl Root {
             f32::from(window.viewport_size().width) - NAV_WIDTH - PAGE_X * 2.0;
         let side_by_side = content_width >= 900.;
 
-        let mut screen = div()
+        let screen = div()
             .size_full()
             .id("add-scroll")
             .flex()
@@ -99,8 +104,13 @@ impl Root {
             .overflow_scroll()
             .px(px(PAGE_X))
             .pt(px(32.));
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .max_w(px(ADD_CONTENT_WIDTH));
 
-        screen = screen
+        column = column
             .child(
                 div()
                     .flex()
@@ -206,13 +216,14 @@ impl Root {
             );
 
         if let Some(error) = errors.get("deck") {
-            screen = screen.child(validation(error, colors));
+            column = column.child(validation(error, colors));
         }
         if let Some(error) = errors.get("model") {
-            screen = screen.child(validation(error, colors));
+            column = column.child(validation(error, colors));
         }
 
-        let mut left = div().flex().flex_1().flex_col().gap(px(18.));
+        let mut left =
+            div().flex().flex_col().w_full().gap(px(18.)).min_w(px(0.));
         for (index, field) in fields.iter().enumerate() {
             let name = model
                 .and_then(|model| model.fields.get(index).cloned())
@@ -226,6 +237,32 @@ impl Root {
             } else {
                 colors.surface1
             };
+            let mut field_box = div()
+                .flex()
+                .flex_col()
+                .px(px(16.))
+                .py(px(14.))
+                .rounded(px(16.))
+                .border_1()
+                .border_color(border)
+                .bg(if focused {
+                    colors.surface0
+                } else {
+                    colors.base
+                })
+                .child(
+                    div()
+                        .min_h(px(56.))
+                        .text_size(px(26.))
+                        .child(field.clone()),
+                );
+            if index == 0 {
+                field_box = field_box.child(formatting_toolbar(
+                    field.clone(),
+                    colors,
+                    cx,
+                ));
+            }
             left = left.child(
                 div()
                     .flex()
@@ -238,29 +275,45 @@ impl Root {
                             .text_color(colors.subtext)
                             .child(name),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .min_h(px(88.))
-                            .px(px(16.))
-                            .py(px(14.))
-                            .rounded(px(16.))
-                            .border_1()
-                            .border_color(border)
-                            .bg(if focused {
-                                colors.surface0
-                            } else {
-                                colors.base
-                            })
-                            .text_size(px(26.))
-                            .child(field.clone()),
-                    ),
+                    .child(field_box),
             );
         }
         if let Some(error) = errors.get("fields") {
             left = left.child(validation(error, colors));
         }
+        let tags_handle = tags_field.read(cx).focus_handle().clone();
+        let mut tags_row = div()
+            .id("add-tags")
+            .flex()
+            .items_center()
+            .flex_wrap()
+            .gap(px(8.))
+            .min_h(px(46.))
+            .px(px(12.))
+            .py(px(8.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(colors.surface1);
+        let weak = cx.entity().downgrade();
+        for tag in &tag_chips {
+            let tag = tag.clone();
+            let handle = tags_handle.clone();
+            let weak = weak.clone();
+            tags_row = tags_row.child(removable_chip(
+                tag.clone(),
+                colors,
+                Box::new(move |_, window, cx: &mut App| {
+                    let tag = tag.clone();
+                    let _ = weak.update(cx, |root, cx| {
+                        root.add.tag_chips.retain(|known| *known != tag);
+                        cx.notify();
+                    });
+                    window.focus(&handle);
+                }),
+            ));
+        }
+        let tag_input = tags_field;
+        let click_handle = tags_handle;
         left = left.child(
             div()
                 .flex()
@@ -274,15 +327,26 @@ impl Root {
                         .child("Tags"),
                 )
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .h(px(46.))
-                        .px(px(14.))
-                        .rounded(px(12.))
-                        .border_1()
-                        .border_color(colors.surface1)
-                        .child(tags),
+                    tags_row
+                        .on_click(cx.listener(
+                            move |_, _: &ClickEvent, window, _| {
+                                window.focus(&click_handle);
+                            },
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .min_w(px(140.))
+                                .child(icon("icon-tag", 14., colors.mauve))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(80.))
+                                        .child(tag_input),
+                                ),
+                        ),
                 ),
         );
 
@@ -290,129 +354,131 @@ impl Root {
             .flex()
             .flex_col()
             .gap(px(14.))
-            .h(px(300.))
             .p(px(20.))
+            .min_h(px(300.))
             .rounded(px(24.))
             .bg(colors.surface0);
         if side_by_side {
-            preview = preview.w(px(360.)).flex_none();
-        }
-        let preview = preview
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(colors.subtext)
-                            .child("LIVE PREVIEW"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(2.))
-                            .p(px(4.))
-                            .rounded(px(12.))
-                            .bg(colors.surface0)
-                            .child(preview_tab(
-                                "Front",
-                                Side::Question,
-                                preview_side == Side::Question,
-                                cx,
-                            ))
-                            .child(preview_tab(
-                                "Back",
-                                Side::Answer,
-                                preview_side == Side::Answer,
-                                cx,
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(10.))
-                    .child(
-                        div()
-                            .text_size(px(52.))
-                            .text_color(colors.text)
-                            .font_family(crate::theme::font_for_text(
-                                &preview_text,
-                            ))
-                            .child(preview_text),
-                    )
-                    .children(preview_reading.map(|reading| {
-                        div()
-                            .text_size(px(14.))
-                            .text_color(colors.subtext)
-                            .font_family(crate::theme::font_for_text(&reading))
-                            .child(reading)
-                    }))
-                    .child(div().w_full().h(px(1.)).bg(colors.surface1))
-                    .child(
-                        div()
-                            .text_size(px(28.))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(colors.mauve)
-                            .font_family(crate::theme::font_for_text(
-                                &preview_answer,
-                            ))
-                            .child(preview_answer),
-                    )
-                    .children(preview_example.map(|example| {
-                        div()
-                            .w_full()
-                            .px(px(14.))
-                            .py(px(10.))
-                            .rounded(px(14.))
-                            .bg(colors.base)
-                            .text_size(px(14.))
-                            .font_family(crate::theme::font_for_text(&example))
-                            .child(example)
-                    })),
-            );
-
-        let mut form = div().flex().flex_1().gap(px(32.)).items_start();
-        if side_by_side {
-            form = form.child(left).child(preview);
+            preview = preview.w(px(PREVIEW_WIDTH)).flex_none();
         } else {
-            form = form.flex_col().child(left).child(preview.w_full());
+            preview = preview.w_full();
         }
-        screen = screen.child(form);
+        let mut preview_header =
+            div().flex().items_center().justify_between().child(
+                div()
+                    .text_size(px(11.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(colors.subtext)
+                    .child("LIVE PREVIEW"),
+            );
+        if has_content {
+            preview_header = preview_header.child(
+                div()
+                    .flex()
+                    .gap(px(2.))
+                    .p(px(4.))
+                    .rounded(px(12.))
+                    .bg(colors.surface0)
+                    .child(preview_tab(
+                        "Front",
+                        Side::Question,
+                        preview_side == Side::Question,
+                        cx,
+                    ))
+                    .child(preview_tab(
+                        "Back",
+                        Side::Answer,
+                        preview_side == Side::Answer,
+                        cx,
+                    )),
+            );
+        }
+        let preview = preview.child(preview_header).child(if has_content {
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .text_size(px(52.))
+                        .text_color(colors.text)
+                        .font_family(crate::theme::font_for_text(&preview_text))
+                        .child(preview_text),
+                )
+                .children(preview_reading.map(|reading| {
+                    div()
+                        .text_size(px(14.))
+                        .text_color(colors.subtext)
+                        .font_family(crate::theme::font_for_text(&reading))
+                        .child(reading)
+                }))
+                .child(div().w_full().h(px(1.)).bg(colors.surface1))
+                .child(
+                    div()
+                        .text_size(px(28.))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(colors.mauve)
+                        .font_family(crate::theme::font_for_text(
+                            &preview_answer,
+                        ))
+                        .child(preview_answer),
+                )
+                .children(preview_example.map(|example| {
+                    div()
+                        .w_full()
+                        .px(px(14.))
+                        .py(px(10.))
+                        .rounded(px(14.))
+                        .bg(colors.base)
+                        .text_size(px(14.))
+                        .font_family(crate::theme::font_for_text(&example))
+                        .child(example)
+                }))
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .min_h(px(160.))
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .text_color(colors.overlay)
+                        .child("Preview appears as you type"),
+                )
+                .into_any_element()
+        });
 
-        let toggle = div()
-            .id("add-keep-open")
-            .w(px(44.))
-            .h(px(26.))
-            .rounded(px(13.))
-            .bg(if keep_open {
-                colors.mauve
-            } else {
-                colors.surface1
-            })
-            .flex()
-            .items_center()
-            .px(px(3.))
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.add.keep_open = !this.add.keep_open;
-                cx.notify();
-            }))
-            .child(div().w(px(20.)).h(px(20.)).rounded(px(10.)).bg(
-                if keep_open {
-                    colors.crust
-                } else {
-                    colors.subtext
-                },
-            ));
-        screen.child(
+        let history = added_history(&added, colors);
+
+        let mut form = div().flex().w_full().gap(px(ADD_GAP));
+        if side_by_side {
+            form = form
+                .items_start()
+                .child(
+                    div().flex_1().min_w(px(ADD_FORM_WIDTH * 0.5)).child(left),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(18.))
+                        .w(px(PREVIEW_WIDTH))
+                        .flex_none()
+                        .child(preview)
+                        .child(history),
+                );
+        } else {
+            form = form.flex_col().child(left).child(preview).child(history);
+        }
+        column = column.child(form);
+
+        column = column.child(
             div()
                 .mt(px(20.))
                 .mb(px(22.))
@@ -422,13 +488,6 @@ impl Root {
                 .pt(px(16.))
                 .border_t_1()
                 .border_color(colors.surface1)
-                .child(toggle)
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(colors.subtext)
-                        .child("Keep open after adding"),
-                )
                 .child(div().flex_1())
                 .child(
                     div()
@@ -465,8 +524,156 @@ impl Root {
                         .child("Add card")
                         .child(keycap("Ctrl+Enter", colors, true)),
                 ),
-        )
+        );
+
+        screen.child(div().flex().w_full().justify_center().child(column))
     }
+}
+
+/// True when any field carries text, which gates the preview side tabs.
+#[must_use]
+pub fn has_preview_content(values: &[String]) -> bool {
+    values.iter().any(|value| !value.trim().is_empty())
+}
+
+/// Field formatting bar plus the keyboard hint, under the first field.
+fn formatting_toolbar(
+    field: gpui::Entity<crate::text_field::TextField>,
+    colors: crate::theme::Palette,
+    cx: &mut Context<Root>,
+) -> impl IntoElement {
+    let handle = field.read(cx).focus_handle().clone();
+    let wrap = |tags: (&'static str, &'static str),
+                field: gpui::Entity<crate::text_field::TextField>,
+                handle: gpui::FocusHandle| {
+        let handler: ClickHandler = Box::new(
+            move |_event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                field.update(cx, |field, cx| {
+                    field.wrap_markup(tags, cx);
+                });
+                window.focus(&handle);
+            },
+        );
+        handler
+    };
+    let button = |label: &'static str, bold: bool, on_click: ClickHandler| {
+        let mut button = div()
+            .id("add-format")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(30.))
+            .h(px(30.))
+            .rounded(px(8.))
+            .text_size(px(14.))
+            .text_color(colors.subtext)
+            .cursor_pointer()
+            .on_click(on_click);
+        button = if bold {
+            button.font_weight(gpui::FontWeight::BOLD)
+        } else {
+            button.font_weight(gpui::FontWeight::MEDIUM)
+        };
+        button.child(label)
+    };
+    div()
+        .mt(px(10.))
+        .pt(px(8.))
+        .border_t_1()
+        .border_color(colors.surface1)
+        .flex()
+        .items_center()
+        .gap(px(2.))
+        .child(button(
+            "B",
+            true,
+            wrap(("<b>", "</b>"), field.clone(), handle.clone()),
+        ))
+        .child(button("I", false, wrap(("<i>", "</i>"), field, handle)))
+        .child(div().flex_1())
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(colors.overlay)
+                .child("Tab for next field"),
+        )
+}
+
+fn added_history(
+    added: &[AddedNote],
+    colors: crate::theme::Palette,
+) -> impl IntoElement {
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .rounded(px(16.))
+        .bg(colors.mantle)
+        .border_1()
+        .border_color(colors.surface0)
+        .overflow_hidden();
+    if added.is_empty() {
+        card = card.child(
+            div()
+                .px(px(14.))
+                .py(px(11.))
+                .text_size(px(13.))
+                .text_color(colors.overlay)
+                .child("No cards added yet"),
+        );
+    } else {
+        for note in added.iter().rev() {
+            card = card.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(14.))
+                    .py(px(11.))
+                    .child(icon("icon-check", 16., colors.green))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w(px(0.))
+                            .child(
+                                div()
+                                    .text_size(px(15.))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .font_family(crate::theme::font_for_text(
+                                        &note.headline,
+                                    ))
+                                    .child(note.headline.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(colors.subtext)
+                                    .child(note.detail.clone()),
+                            ),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(colors.overlay)
+                            .child(note.time.clone()),
+                    ),
+            );
+        }
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(
+            div()
+                .mt(px(18.))
+                .mb(px(2.))
+                .text_size(px(13.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child("Added this session"),
+        )
+        .child(card)
 }
 
 fn field_value(
@@ -481,7 +688,7 @@ fn field_value(
     (!text.is_empty()).then(|| text.to_owned())
 }
 
-/// Distinct stock note types in mockup order, keeping the first model per label.
+/// Distinct note types in mockup order, keeping the first model per label.
 #[must_use]
 pub fn note_type_tabs(
     models: &[ranki_model::NoteModel],
@@ -534,7 +741,7 @@ fn step(
     state: StepState,
     colors: crate::theme::Palette,
 ) -> gpui::Div {
-    let circle = match state {
+    let circle: gpui::Div = match state {
         StepState::Done => div()
             .w(px(24.))
             .h(px(24.))
@@ -598,7 +805,7 @@ fn connector(done: bool, colors: crate::theme::Palette) -> gpui::Div {
 #[cfg(test)]
 mod tests {
     use crate::{
-        app::{UiAction, validate_draft},
+        app::{UiAction, models_with_stock},
         card_view::Side,
         theme::MOCHA,
     };
@@ -627,38 +834,60 @@ mod tests {
             template_ordinals: vec![0],
             raw_config: None,
         };
-        assert!(validate_draft(&deck, &model, &[String::from("Q")]).is_empty());
+        assert!(
+            crate::app::validate_draft(&deck, &model, &[String::from("Q")])
+                .is_empty()
+        );
         assert_eq!(MOCHA.base, gpui::rgb(0x1e1e2e));
         assert_ne!(UiAction::SaveNote, UiAction::CancelAdd);
     }
 
     #[test]
     fn note_type_tabs_are_distinct_and_ordered() {
-        let base = ranki_model::NoteModel {
-            id: 1,
-            name: "Basic".into(),
-            fields: vec!["Front".into()],
-            templates: vec![ranki_model::CardTemplate::default()],
-            css: String::new(),
-            kind: ranki_model::NoteKind::Normal,
-            original_stock_kind: None,
-            field_tags: vec![],
-            template_ordinals: vec![0],
-            raw_config: None,
-        };
-        let duplicate = ranki_model::NoteModel {
-            id: 2,
-            ..base.clone()
-        };
-        let cloze = ranki_model::NoteModel {
-            id: 3,
-            name: "Cloze".into(),
-            kind: ranki_model::NoteKind::Cloze,
-            ..base.clone()
-        };
-        let tabs = super::note_type_tabs(&[cloze, duplicate, base]);
-        assert_eq!(tabs.len(), 2);
+        let tabs = super::note_type_tabs(&models_with_stock(Vec::new()));
+        assert_eq!(
+            tabs.iter()
+                .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>(),
+            ["Basic", "Reversed", "Cloze", "Image Occlusion"]
+        );
+    }
+
+    #[test]
+    fn stock_tabs_reuse_installed_models() {
+        let installed = ranki_model::stock_models()
+            .into_iter()
+            .next()
+            .map(|mut model| {
+                model.id = 42;
+                model
+            })
+            .expect("stock basic");
+        let models = models_with_stock(vec![installed]);
+        let tabs = super::note_type_tabs(&models);
+        assert_eq!(tabs.len(), 4);
         assert_eq!(tabs[0].0, "Basic");
-        assert_eq!(tabs[1].0, "Cloze");
+        assert_eq!(models[tabs[0].1].id, 42);
+        assert_eq!(models[tabs[1].1].id, 0);
+    }
+
+    #[test]
+    fn tab_selection_switches_the_field_list() {
+        let models = models_with_stock(Vec::new());
+        let cloze = models
+            .iter()
+            .find(|model| model.kind == ranki_model::NoteKind::Cloze)
+            .expect("stock cloze");
+        assert_eq!(cloze.fields, ["Text", "Back Extra"]);
+    }
+
+    #[test]
+    fn preview_tabs_need_field_text() {
+        assert!(!super::has_preview_content(&[String::new()]));
+        assert!(!super::has_preview_content(&[String::from("  ")]));
+        assert!(super::has_preview_content(&[
+            String::from(" "),
+            String::from("問い")
+        ]));
     }
 }

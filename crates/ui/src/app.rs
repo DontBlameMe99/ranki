@@ -111,16 +111,24 @@ impl Toast {
     }
 }
 
+/// One note added during this session, shown under the live preview.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddedNote {
+    pub headline: String,
+    pub detail: String,
+    pub time: String,
+}
+
 /// Add-card form state.
 pub struct AddState {
     pub deck_index: usize,
     pub model_index: usize,
     pub fields: Vec<Entity<TextField>>,
     pub tags: Entity<TextField>,
+    pub tag_chips: Vec<String>,
     pub preview_side: Side,
-    pub keep_open: bool,
     pub errors: BTreeMap<String, String>,
-    pub added: Vec<(String, String)>,
+    pub added: Vec<AddedNote>,
 }
 
 /// Review-session state owned by the root entity.
@@ -259,7 +267,9 @@ impl Root {
         let deck_search = cx.new(|cx| make_field(cx, "Search decks"));
         let create_field = cx.new(|cx| make_field(cx, "Deck name"));
         let rename_field = cx.new(|cx| make_field(cx, "New name"));
-        let tags = cx.new(|cx| make_field(cx, "tag1 tag2"));
+        let tags = cx.new(|cx| make_field(cx, "Add a tag"));
+        let tag_hook = Self::tag_hook(cx);
+        tags.update(cx, |field, _| field.set_edit_hook(tag_hook));
         let mut root = Self {
             scheduler: scheduler_from_options(&options),
             store,
@@ -286,8 +296,8 @@ impl Root {
                 model_index: 0,
                 fields: Vec::new(),
                 tags,
+                tag_chips: Vec::new(),
                 preview_side: Side::Question,
-                keep_open: false,
                 errors: BTreeMap::new(),
                 added: Vec::new(),
             },
@@ -312,6 +322,10 @@ impl Root {
                 });
             }
         }
+        if let Ok(tags) = env::var("RANKI_UI_DEV_TAGS") {
+            root.add.tag_chips =
+                tags.split_whitespace().map(str::to_owned).collect();
+        }
         match env::var("RANKI_UI_DEV_VIEW").as_deref() {
             Ok("add") => root.view = View::AddCard,
             Ok("question") => {
@@ -326,6 +340,27 @@ impl Root {
         }
         root
     }
+    /// Keeps the chip list in step with the tag field as words are typed.
+    fn tag_hook(cx: &mut Context<Self>) -> EditHook {
+        let weak = cx.entity().downgrade();
+        Arc::new(move |app| {
+            let _ = weak.update(app, |root, cx| {
+                root.sync_tags(cx);
+                cx.notify();
+            });
+        })
+    }
+
+    pub(crate) fn sync_tags(&mut self, cx: &mut Context<Self>) {
+        let text = self.add.tags.read(cx).text();
+        let remainder = collect_tags(&mut self.add.tag_chips, &text);
+        if remainder != text {
+            self.add
+                .tags
+                .update(cx, |field, cx| field.seed(remainder, cx));
+        }
+    }
+
     fn edit_hook(cx: &mut Context<Self>) -> EditHook {
         let weak = cx.entity().downgrade();
         Arc::new(move |app| {
@@ -378,7 +413,7 @@ impl Root {
             }
         }
         match self.store.models() {
-            Ok(models) => self.models = models,
+            Ok(models) => self.models = models_with_stock(models),
             Err(error) => {
                 self.set_error(format!("Could not load note types: {error}"));
             }
@@ -502,7 +537,7 @@ impl Root {
 
     /// Placeholder ink must follow the palette, including live appearance swaps.
     pub(crate) fn refresh_field_colors(&mut self, cx: &mut Context<Self>) {
-        let color = gpui::Hsla::from(self.colors().subtext);
+        let color = gpui::Hsla::from(theme::placeholder_color(self.theme()));
         let fields = [
             &self.deck_search,
             &self.create_field,
@@ -515,17 +550,6 @@ impl Root {
         for field in &self.add.fields {
             field.update(cx, |field, _| field.set_placeholder_color(color));
         }
-    }
-
-    /// Footer badge text, truthful about the local collection's mod time.
-    pub(crate) fn updated_label(&self) -> String {
-        if self.collection_modified <= 0 {
-            return String::from("Local collection");
-        }
-        format!(
-            "Local, updated {}",
-            relative_age(self.collection_modified, Self::now())
-        )
     }
 
     fn ensure_current(&mut self, cx: &mut Context<Self>) {
@@ -730,20 +754,24 @@ impl Root {
             .iter()
             .map(|field| field.read(cx).text())
             .collect::<Vec<_>>();
-        let tags = self
-            .add
-            .tags
-            .read(cx)
-            .text()
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect();
+        let mut tags = self.add.tag_chips.clone();
+        for tag in self.add.tags.read(cx).text().split_whitespace() {
+            if !tags.iter().any(|known| known == tag) {
+                tags.push(tag.to_owned());
+            }
+        }
         let errors = validate_draft(&deck, &model, &fields);
         self.add.errors = errors;
         if !self.add.errors.is_empty() {
             cx.notify();
             return;
         }
+        let headline = fields
+            .iter()
+            .map(|value| value.trim())
+            .find(|value| !value.is_empty())
+            .map(|value| value.chars().take(32).collect::<String>())
+            .unwrap_or_default();
         let note = NewNote {
             model_id: model.id,
             deck_id: deck.id,
@@ -752,19 +780,20 @@ impl Root {
         };
         match self.store.add_note(&note) {
             Ok(ids) => {
-                self.add.added.push((model.name, clock_label()));
-                let _ = ids;
+                self.add.added.push(AddedNote {
+                    headline,
+                    detail: model.name,
+                    time: clock_label(),
+                });
+                let count = ids.len();
                 self.clear_toast();
                 for field in &self.add.fields {
                     field.update(cx, super::text_field::TextField::clear);
                 }
-                self.refresh_stats();
-                self.reset_queue();
-                self.set_status("Added card");
-                    }
-                } else {
-                    self.view = View::Decks;
-                }
+                self.add
+                    .tags
+                    .update(cx, super::text_field::TextField::clear);
+                self.add.errors.clear();
                 self.reload(cx);
                 self.set_error(format!("Added {count} cards"));
             }
@@ -887,6 +916,7 @@ pub enum UiAction {
     Retry,
     EndSession,
     OpenDecks,
+    OpenAdd,
     CreateDeck,
     SubmitDeck,
     SaveNote,
@@ -898,7 +928,6 @@ pub enum UiAction {
     NextDeck,
     ClearSearch,
     Ignore,
-}
 }
 
 impl From<&Reveal> for UiAction {
@@ -1398,6 +1427,58 @@ pub fn relative_age(modified: i64, now: i64) -> String {
     }
 }
 
+/// Last successful sync in Unix seconds. The store exposes no sync stamp yet,
+/// so the footer truthfully reports a local, unsynced collection.
+pub const SYNC_STATE: Option<i64> = None;
+
+/// Footer sync badge: local state, or the age of the last sync.
+#[must_use]
+pub fn status_label(last_sync: Option<i64>, now: i64) -> String {
+    last_sync.map_or_else(
+        || String::from("Local \u{b7} not synced"),
+        |stamp| format!("Synced \u{b7} {}", relative_age(stamp, now)),
+    )
+}
+
+/// Installed note types plus every stock type the collection is missing.
+///
+/// Missing stock types keep placeholder id 0, so the add-card screen can show
+/// their fields before the collection has the model.
+#[must_use]
+pub fn models_with_stock(installed: Vec<NoteModel>) -> Vec<NoteModel> {
+    let mut models = installed;
+    for stock in ranki_model::stock_models() {
+        let known = models
+            .iter()
+            .any(|model| model.name.eq_ignore_ascii_case(&stock.name));
+        if !known {
+            models.push(stock);
+        }
+    }
+    models
+}
+
+/// Moves completed words from the tag field into the chip list.
+///
+/// The trailing word stays in the field until a space commits it, so the field
+/// only ever holds the word being typed.
+#[must_use]
+pub fn collect_tags(chips: &mut Vec<String>, text: &str) -> String {
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    let pending = !text.ends_with(char::is_whitespace);
+    let (complete, remainder) = match words.split_last() {
+        Some((last, rest)) if pending => (rest, *last),
+        Some(_) => (&words[..], ""),
+        None => (&[][..], ""),
+    };
+    for word in complete {
+        if !chips.iter().any(|known| known == word) {
+            chips.push((*word).to_owned());
+        }
+    }
+    remainder.to_owned()
+}
+
 /// Deck row metadata: child count for parents and total cards for every row.
 #[must_use]
 pub fn deck_meta(rows: &[DeckRow], row: &DeckRow) -> String {
@@ -1426,16 +1507,8 @@ pub fn deck_meta(rows: &[DeckRow], row: &DeckRow) -> String {
     format!("{subdecks} · {cards_label}")
 }
 
-/// Mockup date line: weekday, day, month.
-#[must_use]
-pub fn today_label() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    date_label(now)
-}
-
+/// Calendar label for the removed date line, kept for its unit test.
+#[cfg(test)]
 #[must_use]
 pub fn date_label(seconds: u64) -> String {
     let days = i64::try_from(seconds / 86_400).unwrap_or(0);
@@ -1470,6 +1543,7 @@ pub fn date_label(seconds: u64) -> String {
 }
 
 /// Howard Hinnant's civil-from-days, valid for the Unix epoch range.
+#[cfg(test)]
 fn civil_from_days(days: i64) -> (i64, i32, i32) {
     let shifted = days.saturating_add(719_468);
     let era = if shifted >= 0 {
@@ -1632,10 +1706,11 @@ mod tests {
     use crate::Options;
 
     use super::{
-        DeckRow, EmptyKind, Phase, UiAction, View, build_deck_rows, date_label,
-        deck_meta, due_total, empty_copy, empty_kind, filter_decks,
-        focused_delta, next_due_deck, next_view, note_type_name, relative_age,
-        sum_leaf_counts, validate_draft,
+        DeckRow, EmptyKind, Phase, SYNC_STATE, UiAction, View, build_deck_rows,
+        collect_tags, date_label, deck_meta, due_total, empty_copy, empty_kind,
+        filter_decks, focused_delta, models_with_stock, next_due_deck,
+        next_view, note_type_name, relative_age, status_label, sum_leaf_counts,
+        validate_draft,
     };
     #[test]
     fn scheduler_follows_the_configured_algorithm() {
@@ -1930,11 +2005,56 @@ mod tests {
         let (_, stats) = deck(1, "A", 2, 3, 4);
         assert_eq!(due_total(stats), 9);
     }
+
     #[test]
-    fn bench_app_renders_frames_without_a_window() {
-        let mut app = BenchApp::new(Box::new(fixture()), &Options::default());
-        app.frame(None);
-        app.frame(Some(Key::Space));
-        app.reset();
+    fn footer_status_reports_local_until_a_sync_stamp_exists() {
+        assert_eq!(SYNC_STATE, None);
+        assert_eq!(status_label(SYNC_STATE, 1_000), "Local \u{b7} not synced");
+        assert_eq!(status_label(Some(1_000), 1_120), "Synced \u{b7} 2 min ago");
+    }
+
+    #[test]
+    fn stock_types_fill_in_missing_note_models() {
+        let models = models_with_stock(Vec::new());
+        let names = models
+            .iter()
+            .map(|model| model.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "Basic",
+                "Basic (and reversed card)",
+                "Cloze",
+                "Image Occlusion"
+            ]
+        );
+        assert!(models.iter().all(|model| model.id == 0));
+        let installed = ranki_model::stock_models()
+            .into_iter()
+            .next()
+            .map(|mut model| {
+                model.id = 7;
+                model
+            })
+            .expect("stock basic");
+        let merged = models_with_stock(vec![installed]);
+        assert_eq!(merged.len(), 4);
+        assert_eq!(merged[0].id, 7);
+    }
+
+    #[test]
+    fn tag_field_commits_words_into_chips() {
+        let mut chips = Vec::new();
+        assert_eq!(collect_tags(&mut chips, "japan"), "japan");
+        assert_eq!(chips.len(), 0);
+        assert_eq!(collect_tags(&mut chips, "japan "), "");
+        assert_eq!(chips, ["japan"]);
+        assert_eq!(collect_tags(&mut chips, "japan verb"), "verb");
+        assert_eq!(chips, ["japan"]);
+        assert_eq!(collect_tags(&mut chips, "verb "), "");
+        assert_eq!(chips, ["japan", "verb"]);
+        assert_eq!(collect_tags(&mut chips, " 	 "), "");
+        assert_eq!(chips, ["japan", "verb"]);
     }
 }

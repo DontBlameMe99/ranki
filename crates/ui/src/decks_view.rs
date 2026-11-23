@@ -45,21 +45,9 @@ impl Root {
                 .justify_between()
                 .child(
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.))
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .text_color(colors.subtext)
-                                .child(app::today_label()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(32.))
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .child("Decks"),
-                        ),
+                        .text_size(px(32.))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child("Decks"),
                 )
                 .child(
                     div()
@@ -172,23 +160,19 @@ impl Root {
                     .py(px(12.))
                     .text_size(px(12.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(header_cell("DECK", colors.subtext, true))
-                    .child(header_cell(
-                        "NEW",
-                        queue_text(0, self.theme()),
-                        false,
-                    ))
+                    .child(header_cell("DECK", colors.subtext, 0))
+                    .child(header_cell("NEW", queue_text(0, self.theme()), 1))
                     .child(header_cell(
                         "LEARNING",
                         queue_text(1, self.theme()),
-                        false,
+                        2,
                     ))
                     .child(header_cell(
                         "REVIEW",
                         queue_text(2, self.theme()),
-                        false,
+                        3,
                     ))
-                    .child(header_cell("", colors.subtext, false)),
+                    .child(header_cell("", colors.subtext, 4)),
             );
             for row in rows {
                 table = table.child(self.render_deck_row(&row, cx));
@@ -475,6 +459,7 @@ impl Root {
         let count = |value: usize, color: Rgba| {
             div()
                 .w(px(TABLE_COLUMNS[1]))
+                .flex_none()
                 .flex()
                 .justify_end()
                 .text_size(px(15.))
@@ -666,20 +651,21 @@ impl Root {
     }
 }
 
-fn header_cell(label: &str, color: Rgba, deck: bool) -> gpui::Div {
+/// One table header cell. Every column keeps the exact width its row cell
+/// uses, so counts stay under their labels and the action cell stays reserved.
+fn header_cell(label: &str, color: Rgba, column: usize) -> gpui::Div {
     let mut cell = div()
         .text_size(px(12.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(color);
-    if deck {
+    if column == 0 {
         cell = cell.flex_1();
     } else {
-        cell = cell.flex().flex_none().justify_end().pr(px(6.));
-        if label.is_empty() {
-            cell = cell.w(px(TABLE_COLUMNS[4]));
-        } else {
-            cell = cell.w(px(TABLE_COLUMNS[1]));
-        }
+        cell = cell
+            .flex()
+            .flex_none()
+            .justify_end()
+            .w(px(TABLE_COLUMNS[column]));
     }
     cell.child(label.to_owned())
 }
@@ -701,10 +687,14 @@ mod tests {
     use super::{deck_hue, header_cell};
 
     #[test]
-    fn deck_header_uses_the_five_column_widths() {
-        let head = header_cell("NEW", crate::theme::MOCHA.blue, false);
+    fn deck_header_cells_share_the_row_column_widths() {
+        let head = header_cell("NEW", crate::theme::MOCHA.blue, 1);
         let _ = head;
-        assert_eq!(crate::theme::TABLE_COLUMNS, [1.0, 72.0, 72.0, 72.0, 108.0]);
+        let columns = crate::theme::TABLE_COLUMNS;
+        assert_eq!(columns[0], 1.0);
+        assert_eq!(columns[1], columns[2]);
+        assert_eq!(columns[2], columns[3]);
+        assert!(columns[4] >= 120.0);
     }
 
     #[test]
