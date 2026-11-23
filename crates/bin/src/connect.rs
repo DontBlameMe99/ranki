@@ -902,4 +902,66 @@ mod tests {
             assert_eq!(response.error_code, expected, "{body:?}");
         }
     }
+
+    #[test]
+    fn malformed_parameters_report_precise_errors() {
+        let (_dir, mut store) = fixture();
+        let request = json!({
+            "action": "version", "version": 7, "params": {},
+        });
+        let body = serde_json::to_vec(&request).unwrap();
+        let response = handle_body(&mut store, &body, scheduler().as_ref());
+        assert_eq!(
+            response.error.as_deref(),
+            Some("unsupported protocol version: 7")
+        );
+
+        let cases = [
+            (
+                json!({"action":"findCards","params":{"query":42}}),
+                "invalid parameter: query",
+            ),
+            (
+                json!({"action":"cardsInfo","params":{"cards":"1"}}),
+                "invalid parameter: cards",
+            ),
+            (
+                json!({"action":"cardsInfo","params":{"cards":[1,"x"]}}),
+                "invalid card id: \"x\"",
+            ),
+            (
+                json!({"action":"modelFieldNames","params":{"modelName":"Missing"}}),
+                "model not found: Missing",
+            ),
+            (
+                json!({"action":"addNote","params":{}}),
+                "missing parameter: note",
+            ),
+            (
+                json!({"action":"addNote","params":{"note":{"deckName":"Default","modelName":"Basic","fields":{}}}}),
+                "empty question",
+            ),
+            (
+                json!({"action":"addNote","params":{"note":{"deckName":"Missing","modelName":"Basic","fields":{"Front":"Q"}}}}),
+                "deck not found: Missing",
+            ),
+            (
+                json!({"action":"answerCards","params":{}}),
+                "missing parameter: answers",
+            ),
+            (
+                json!({"action":"answerCards","params":{"answers":{}}}),
+                "invalid parameter: answers",
+            ),
+            (
+                json!({"action":"suspend","params":{"cards":[1,"x"]}}),
+                "invalid card id: \"x\"",
+            ),
+        ];
+        for (request, expected) in cases {
+            let body = serde_json::to_vec(&request).unwrap();
+            let response = handle_body(&mut store, &body, scheduler().as_ref());
+            assert_eq!(response.error.as_deref(), Some(expected), "{request}");
+        }
+    }
 }

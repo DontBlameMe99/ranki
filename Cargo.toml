@@ -7,7 +7,7 @@ name = "ranki"
 
 [workspace.package]
 version    = "0.1.0"
-repository = "https://codeberg.org/DontBlameMe/ranki"
+repository = "https://github.com/DontBlameMeDev/ranki"
 edition    = "2024"
 license    = "GPL-3.0-or-later"
 

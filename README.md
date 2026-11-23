@@ -10,14 +10,14 @@ API, and a Model Context Protocol server.
 With Nix installed:
 
 ```bash
-nix profile add git+https://codeberg.org/DontBlameMe/ranki
+nix profile add git+https://github.com/DontBlameMeDev/ranki
 ranki --help
 ```
 
 Run once without installing:
 
 ```bash
-nix run git+https://codeberg.org/DontBlameMe/ranki -- --help
+nix run git+https://github.com/DontBlameMeDev/ranki -- --help
 ```
 
 Build from a checkout:
@@ -37,7 +37,7 @@ Add Ranki and Home Manager as flake inputs, both following the same nixpkgs:
 
 ```nix
 {
-  inputs.ranki.url = "git+https://codeberg.org/DontBlameMe/ranki";
+  inputs.ranki.url = "git+https://github.com/DontBlameMeDev/ranki";
   inputs.ranki.inputs.nixpkgs.follows = "nixpkgs";
   inputs.home-manager.url = "github:nix-community/home-manager";
   inputs.home-manager.inputs.nixpkgs.follows = "nixpkgs";
@@ -157,3 +157,15 @@ is not implemented, and AnkiConnect support is a subset of the upstream API.
 ```bash
 nix build .#checks.x86_64-linux.nextest --print-build-logs
 ```
+
+Coverage must stay at or above 80%. The floor is set in `.tarpaulin.toml` and
+applies to local runs and CI:
+
+```bash
+nix build .#checks.x86_64-linux.tarpaulin --print-build-logs
+```
+
+Performance is measured across the CLI, AnkiConnect, MCP, GUI, storage,
+scheduling, and package surfaces in release builds. A pull request fails the
+`Performance audit` check when a workload regresses. See
+[docs/performance.md](docs/performance.md) for the method and local commands.

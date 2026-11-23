@@ -5,7 +5,7 @@ Research only. No application code was changed. Upstream Anki at commit
 rechecked against `ankitects/anki` `main`. Community documents are secondary and
 some describe older multipart versions, so they are used only where labeled.
 
-## 1. Wire protocol
+## 1\. Wire protocol
 
 Current sync version is **11** (`SYNC_VERSION_MAX = 11`, named
 `SYNC_VERSION_11_DIRECT_POST`). Versions 8 through 10 remain supported by Anki's
@@ -62,7 +62,7 @@ and `err` fields. Source files are listed in section 9.
 `SyncLoginRequest`, `SyncStatusResponse`). It is not the HTTP wire format. There
 is no sync protobuf on the wire in v11.
 
-## 2. Sequence Anki actually runs
+## 2\. Sequence Anki actually runs
 
 1. Login: POST `sync/hostKey` with `u` and `p`. A 403 means bad credentials.
    Save the returned `key` as `hkey`. The host key is long lived.
@@ -90,7 +90,7 @@ is no sync protobuf on the wire in v11.
 Anki syncs on profile open and close when credentials exist and automatic sync
 is enabled. Conflict choices are presented to the user. Sources are listed in section 9.
 
-## 3. Exchanged data
+## 3\. Exchanged data
 
 `meta` fields use short names: `mod` and `scm` are milliseconds, `usn` is an
 integer, `ts` is Unix seconds, `msg` is a server message, `cont` says whether to
@@ -111,7 +111,7 @@ already reads both schemas and leaves schema and collection JSON untouched.
 Media is never part of the collection blob. It is a separate folder with a
 filename, hash, and USN manifest.
 
-## 4. Minimal scope and its limits
+## 4\. Minimal scope and its limits
 
 A minimal Ranki client can implement login, `meta`, full upload, full download,
 and local state. This is compatible with the endpoints. It cannot reproduce
@@ -131,7 +131,7 @@ Therefore automatic full sync must only run when the direction is provably
 safe. Every other case must report a conflict and require an explicit one-way
 choice.
 
-## 5. Authentication
+## 5\. Authentication
 
 There is no separate public API token in the sync protocol. The host key is the
 token. Login still exchanges username and password at `sync/hostKey`. Anki's
@@ -148,7 +148,7 @@ password on the command line. Never log the `anki-sync` header, request bodies,
 or URLs with query strings. Anki itself strips URLs from network errors to avoid
 exposing keys.
 
-## 6. Proposed Ranki design
+## 6\. Proposed Ranki design
 
 Add a `ranki-sync` crate. Keep `ranki-storage` as the only owner of collection
 file handling. Use a blocking HTTP client with zstd support and a fixed timeout,
@@ -269,7 +269,7 @@ network, timeout, and 5xx errors with 1 and 2 second backoff. No retry for 400,
 attempts increment `failures` and are retried on the next startup. Shutdown
 sync is best effort and uses the same budget.
 
-## 7. Test strategy
+## 7\. Test strategy
 
 Use `MockTransport` for all state-machine tests. No real credentials, network,
 or AnkiWeb account. A scripted `wiremock` or `tiny_http` server can add one test
@@ -288,7 +288,7 @@ for header, zstd framing, and `anki-original-size`.
 Add guard tests for corrupt download bytes, oversized upload, clock skew,
 sanity of local USN preparation, and state file permissions.
 
-## 8. Security and data-loss guards
+## 8\. Security and data-loss guards
 
 - Never overwrite a newer local collection. Require last-sync stamps and refuse
   a one-way sync when both sides changed.
@@ -306,7 +306,8 @@ sanity of local USN preparation, and state file permissions.
 - Abort on clock skew over 300 seconds and on server `cont = false`.
 - Back up the local collection before the first full download.
 
-## 9. Sources
+## 9\. Sources
+
 - Anki pinned tree: https://github.com/ankitects/anki/tree/be56085c32a9d02b506fa880cfa63c756c1779fc
 - Sync source: https://github.com/ankitects/anki/tree/be56085c32a9d02b506fa880cfa63c756c1779fc/rslib/src/sync
 - Sync proto: https://github.com/ankitects/anki/blob/be56085c32a9d02b506fa880cfa63c756c1779fc/proto/anki/sync.proto

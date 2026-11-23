@@ -15,13 +15,12 @@ Ranki code read: `crates/model/src/lib.rs`, `crates/ui/src/card_view.rs`,
 `crates/storage/src/records.rs`, `crates/format/src/merge.rs`, and
 `docs/anki-compatibility.md`.
 
-## 1. How Anki represents note types and cards
+## 1\. How Anki represents note types and cards
 
 A note type is stored in `col.models` as a JSON object keyed by model id on
 schema 11. On schema 18 the JSON columns are empty and the data lives in the
 protobuf `notetypes`, `fields`, and `templates` tables. Anki accepts both.
-Ranki already reads both paths in `storage::records::{models_from_json,
-models_from_tables}`, but `format::merge::read_col` replaces an empty schema-18
+Ranki already reads both paths in `storage::records::{models_from_json, models_from_tables}`, but `format::merge::read_col` replaces an empty schema-18
 `col.models` with stubs `{"id":..,"name":..,"did":1,"flds":[],"tmpls":[]}`.
 That is the direct cause of imported cards with no template. Fix the import
 path to build full model JSON from normalized tables before merging. See
@@ -36,7 +35,7 @@ note add/edit, not at review. Anki uses `(mid, csum)` for duplicate checks and
 `notes.guid` as import identity; see `docs/anki-compatibility.md` sections 3
 and 7.
 
-## 2. Exact stock note types
+## 2\. Exact stock note types
 
 ### Basic
 
@@ -102,7 +101,7 @@ card for `c0`. Sources: `rslib/src/cloze.rs`, `rslib/src/notetype/cardgen.rs`,
 `rslib/src/notetype/mod.rs`, `rslib/src/template.rs`,
 `https://docs.ankiweb.net/manual/templates/generation`.
 
-## 3. Built-in Image Occlusion (Anki 23+)
+## 3\. Built-in Image Occlusion (Anki 23+)
 
 Source: `rslib/src/image_occlusion/notetype.rs`,
 `rslib/src/image_occlusion/imageocclusion.rs`,
@@ -170,7 +169,7 @@ canvas id and the `anki.imageOcclusion.setup()` call; and the CSS variables.
 Ambiguity: the cloze string has no version marker and names are localized. The
 field tags / `original_stock_kind` are the reliable identification signals.
 
-## 4. Rendering semantics Ranki must match
+## 4\. Rendering semantics Ranki must match
 
 `{{FrontSide}}` is replaced by the fully rendered question HTML when rendering
 the answer. It does not replay front-side audio. Sources:
@@ -204,14 +203,13 @@ duplicate it. Sources: `https://docs.ankiweb.net/manual/importing/text-files`,
 `https://docs.ankiweb.net/manual/templates/fields`, and
 `https://github.com/ankitects/anki/blob/be56085c32a9d02b506fa880cfa63c756c1779fc/qt/aqt/sound.py`.
 
-## 5. Minimal Ranki implementation plan
+## 5\. Minimal Ranki implementation plan
 
 Storage and format:
 
 1. Extend `NoteModel` with `kind: NoteKind` (`Normal=0`, `Cloze=1`),
    `original_stock_kind: Option<i32>`, and template `ord: u16`. Keep
-   `fields: Vec<String>` for compatibility; add parallel `field_tags:
-   Vec<Option<u32>>` only if the IO editor is built. Preserve raw model JSON or
+   `fields: Vec<String>` for compatibility; add parallel `field_tags: Vec<Option<u32>>` only if the IO editor is built. Preserve raw model JSON or
    protobuf blobs in a `raw: Option<Vec<u8>>`/JSON field so export can
    round-trip unknown keys. Do not change `Card.ordinal: u16`.
 2. In `storage::records::models_from_json`, parse `type`, `originalStockKind`,
@@ -240,11 +238,9 @@ Renderer (`card_view`):
    subset.
 7. Add `cloze_ordinals(fields: &[String]) -> BTreeSet<u16>` using the same
    tokenization rules: `{{cN::`, comma-separated positive numbers, nested
-   clozes, MathJax-aware closing braces. Add `cloze_html(text, ord, side)
-   -> ClozeRender` returning segments with `Active{hint, answer}`,
+   clozes, MathJax-aware closing braces. Add `cloze_html(text, ord, side) -> ClozeRender` returning segments with `Active{hint, answer}`,
    `Inactive`, and `ImageMask(ShapeMask)`.
-8. Add `ShapeMask { shape: ShapeKind, properties: BTreeMap<String,String>,
-   ordinals: Vec<u16> }`, `parse_image_occlusion(text)` and
+8. Add `ShapeMask { shape: ShapeKind, properties: BTreeMap<String,String>, ordinals: Vec<u16> }`, `parse_image_occlusion(text)` and
    `mask_to_egui(mask, image_size, side)`. Draw active masks as translucent red
    rect/ellipse/polygon, inactive masks as yellow only when `oi=1`, and
    highlights as red outlines. Reuse `ImageCache`; do not embed JS or canvas in
@@ -260,7 +256,7 @@ Deferred: full HTML/CSS layout, JavaScript template filters, MathJax, TTS,
 typed answers, image-occlusion editing, and schema-18 table writes. Reading and
 re-exporting schema-11 JSON is enough for the first pass.
 
-## 6. Test cases
+## 6\. Test cases
 
 - Stock Basic: local model `1735253330886` renders question `Front` and answer
   containing question, `<hr id=answer>`, and `Back`.

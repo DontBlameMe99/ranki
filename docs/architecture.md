@@ -32,7 +32,6 @@ card's `due` is a queue position.
 ## Development
 
 - Toolchain: `nix develop --command cargo test --workspace`.
-- Lints come from the workspace; code must pass `cargo clippy --workspace
-  --all-targets -- -D warnings` and `cargo fmt --all --check`.
+- Lints come from the workspace; code must pass `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check`.
 - Keep dependencies in the crate's own `Cargo.toml`; do not edit the workspace
   manifest from a worktree.

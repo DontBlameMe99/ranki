@@ -2,11 +2,11 @@
 
 Scope: Anki source at pinned commit `be56085c32a9d02b506fa880cfa63c756c1779fc`, which pins `fsrs` crate version `6.6.2`. Ranki files read: `crates/core/src/{lib,fsrs,shared,tests}.rs`, `crates/model/src/config.rs`, `crates/bin/src/config.rs`, `docs/anki-compatibility.md`, `docs/card-types-research.md`.
 
-## 1. What Ranki does today
+## 1\. What Ranki does today
 
 `FsrsScheduler` uses one fixed FSRS-5 weight array of 19 values, a fixed decay of 0.5, and a fixed factor of `19/81`. `desired_retention` comes from global TOML config, defaults to 0.9, and is validated to `0.5..=0.999`. The scheduler clamps it to the same range. There is no per-deck retention, no parameter storage, no optimizer, and no load balancing. `write_memory` stores `s`, `d`, and `dr` in `cards.data`, but not `decay`. Fuzzing uses a local hash of card id, reps, and rating. See `crates/core/src/fsrs.rs:16`, `crates/core/src/shared.rs:303`, `crates/model/src/config.rs:249`.
 
-## 2. How desired retention feeds Anki's interval
+## 2\. How desired retention feeds Anki's interval
 
 Anki uses the Rust `fsrs` crate. Parameter length selects the model (fsrs-rs `model.rs`, `check_and_fill_parameters`): 17 values convert to 21 (FSRS-4.5), 19 values append decay 0.5 (FSRS-5), 21 values are used directly (FSRS-6). An empty list uses defaults. Model defaults are:
 
@@ -60,7 +60,7 @@ Sources:
 `https://github.com/ankitects/anki/blob/be56085c32a9d02b506fa880cfa63c756c1779fc/rslib/src/scheduler/states/fuzz.rs`
 `https://github.com/ankitects/anki/blob/be56085c32a9d02b506fa880cfa63c756c1779fc/rslib/src/scheduler/fsrs/memory_state.rs`
 
-## 3. Desired retention value and change behavior
+## 3\. Desired retention value and change behavior
 
 Default desired retention is 0.9. Preset validation is `0.7..=0.99` in `deckconfig/mod.rs`, and the UI spin box uses `min=0.7 max=0.99`. Warnings appear below 0.8 or above 0.95, with danger styling below 0.7 or above 0.97. The manual recommends staying below 0.97. Historical retention is separate, default 0.9 and validated to `0.7..=0.97`.
 
@@ -74,7 +74,7 @@ Source:
 `https://github.com/ankitects/anki/blob/be56085c32a9d02b506fa880cfa63c756c1779fc/rslib/src/deckconfig/mod.rs`
 `https://github.com/ankitects/anki/blob/be56085c32a9d02b506fa880cfa63c756c1779fc/rslib/src/decks/schema11.rs`
 
-## 4. Anki's FSRS optimizer in practice
+## 4\. Anki's FSRS optimizer in practice
 
 Anki does not run the optimizer automatically. There is no sync trigger, daily job, or review-count job. The deck options screen shows a reminder when `daysSinceLastOptimization > 30`. The user clicks "Optimize" for a preset or "Save and Optimize" for all presets. Only the optimize-all path writes `lastFsrsOptimize` in the pinned source. Manual docs recommend optimization about once per month.
 
@@ -123,7 +123,7 @@ Anki depends on the Rust `fsrs` crate, not the Python `fsrs-optimizer` repositor
 `https://github.com/open-spaced-repetition/fsrs-rs/blob/v6.6.2/src/parameter_clipper.rs`
 `https://github.com/open-spaced-repetition/fsrs4anki/blob/main/docs/tutorial.md`
 
-## 5. Config and storage keys
+## 5\. Config and storage keys
 
 Schema 11 JSON keys, all preserved through migration:
 
@@ -139,7 +139,7 @@ Sources:
 `https://github.com/ankitects/anki/blob/be56085c32a9d02b506fa880cfa63c756c1779fc/rslib/src/deckconfig/schema11.rs`
 `https://github.com/ankitects/anki/blob/be56085c32a9d02b506fa880cfa63c756c1779fc/rslib/src/storage/card/data.rs`
 
-## 6. Minimal "always auto-optimize" for Ranki
+## 6\. Minimal "always auto-optimize" for Ranki
 
 Proposed trigger, close to Anki's cadence and cheap to implement:
 
@@ -159,7 +159,7 @@ Simplification and compatibility loss:
 
 If exact optimization compatibility matters later, replace the lightweight fitter with the Rust `fsrs` crate's `compute_parameters`. Do not add the Python optimizer.
 
-## 7. Concrete Ranki integration plan
+## 7\. Concrete Ranki integration plan
 
 ranki-core:
 
@@ -182,7 +182,7 @@ Tests:
 11. Test persistence of params and counters, failure keeping old params, and that no card due dates change on optimization.
 12. Test reading and writing `s`, `d`, `dr`, `decay`, and unknown fields in `cards.data`.
 
-## 8. Pitfalls
+## 8\. Pitfalls
 
 - FSRS-5 has 19 weights and decay 0.5. FSRS-6 has 21 weights and variable decay. Ranki's current fixed 19-weight model will not interpret a 21-value Anki preset.
 - Variable decay changes interval scaling. With `d=0.1542`, `S=10`, and `DR=0.95`, the interval is 4 days. With `d=0.5`, it is 5 days.

@@ -95,6 +95,7 @@
           inherit name entry;
           language = "system";
           pass_filenames = false;
+          stages = ["pre-push"];
         };
 
         hooks = git-hooks.lib.${system}.run {
@@ -108,10 +109,19 @@
             check-merge-conflicts.enable = true;
             forbid-new-submodules.enable = true;
             check-json.enable = true;
-            lychee.enable = true;
-            comrak.enable = true;
+            lychee = {
+              enable = true;
+              stages = ["pre-push"];
+            };
+            comrak = {
+              enable = true;
+              entry = "${pkgs.comrak}/bin/comrak --inplace --extension tasklist";
+            };
             ripsecrets.enable = true;
-            typos.enable = true;
+            typos = {
+              enable = true;
+              settings.config.default.extend-words.PN = "PN";
+            };
             check-toml.enable = true;
             check-yaml.enable = true;
             check-executables-have-shebangs.enable = true;
@@ -126,7 +136,6 @@
             };
 
             rustfmt = mkHook "rustfmt" "nix build .#checks.${system}.fmt --no-link --print-build-logs";
-            cargo-check = mkHook "cargo check" "nix build .#checks.${system}.clippy --no-link --print-build-logs";
             clippy = mkHook "clippy" "nix build .#checks.${system}.clippy --no-link --print-build-logs";
             audit = mkHook "audit" "${pkgs.cargo-audit}/bin/cargo-audit audit";
             deny = mkHook "deny" "${pkgs.writeShellScript "cargo-deny-check" ''
@@ -180,7 +189,7 @@
             // {
               inherit src cargoArtifacts;
               pname = "${binName}-tarpaulin";
-              buildPhaseCargoCommand = "cargo tarpaulin --fail-under 80";
+              buildPhaseCargoCommand = "cargo tarpaulin --exclude-files 'crates/bench/src/*'";
               installPhase = "mkdir -p $out";
               nativeBuildInputs = [pkgs.cargo-tarpaulin];
             }

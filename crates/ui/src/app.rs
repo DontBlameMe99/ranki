@@ -753,11 +753,14 @@ impl Root {
         match self.store.add_note(&note) {
             Ok(ids) => {
                 self.add.added.push((model.name, clock_label()));
-                let count = ids.len();
+                let _ = ids;
                 self.clear_toast();
-                if self.add.keep_open {
-                    for field in &self.add.fields {
-                        field.update(cx, super::text_field::TextField::clear);
+                for field in &self.add.fields {
+                    field.update(cx, super::text_field::TextField::clear);
+                }
+                self.refresh_stats();
+                self.reset_queue();
+                self.set_status("Added card");
                     }
                 } else {
                     self.view = View::Decks;
@@ -884,7 +887,6 @@ pub enum UiAction {
     Retry,
     EndSession,
     OpenDecks,
-    OpenAdd,
     CreateDeck,
     SubmitDeck,
     SaveNote,
@@ -896,6 +898,7 @@ pub enum UiAction {
     NextDeck,
     ClearSearch,
     Ignore,
+}
 }
 
 impl From<&Reveal> for UiAction {
@@ -1926,5 +1929,12 @@ mod tests {
     fn due_totals_add_all_queues() {
         let (_, stats) = deck(1, "A", 2, 3, 4);
         assert_eq!(due_total(stats), 9);
+    }
+    #[test]
+    fn bench_app_renders_frames_without_a_window() {
+        let mut app = BenchApp::new(Box::new(fixture()), &Options::default());
+        app.frame(None);
+        app.frame(Some(Key::Space));
+        app.reset();
     }
 }

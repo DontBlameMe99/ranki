@@ -3,7 +3,7 @@
 Target: Anki 25.x/26.x collections (schema 11 through 18) and AnkiConnect API version 6.
 Facts below come from the pinned upstream sources in [Sources](#sources) and from inspecting a read-only copy of `/home/user/.local/share/Anki2/main/collection.anki2`. That local file is schema 18: `col.id=1`, `ver=18`, 351 notes, 372 cards, 41,519 revlog rows, and empty strings in all five JSON columns of `col`.
 
-## 1. Package files
+## 1\. Package files
 
 An `.apkg`/`.colpkg` is a ZIP archive. Anki chooses the collection entry and the media-map format from the `meta` entry. If `meta` is absent, the presence of `collection.anki21` selects legacy 2, otherwise legacy 1.
 
@@ -19,7 +19,7 @@ Every package also contains a dummy `collection.anki2` (a tiny schema-11 collect
 
 `.apkg` contains the selected notes, their note types, templates, decks, deck configs and referenced media. `.colpkg` contains the whole collection file plus the media folder (when media is requested). Both use the same envelope writer: `meta`, collection, dummy collection, numbered media, `media`. Anki checkpoints WAL and closes the collection before copying it into either package.
 
-## 2. SQLite collection
+## 2\. SQLite collection
 
 Canonical schema 11 DDL (`rslib/src/storage/schema11.sql`). Anki accepts `col.ver` 11 through 18 and upgrades on open.
 
@@ -87,7 +87,7 @@ Schema 18 also adds normalized config tables and indexes; all five `col` JSON co
 
 `tags`: object mapping tag name to `{"usn": int, "collapsed": bool}`. Hierarchical tags use `::`.
 
-## 3. Row encodings
+## 3\. Row encodings
 
 `notes.flds`: fields joined by U+001F. Split on `'\x1f'`; do not trim. Empty trailing fields are significant.
 
@@ -111,7 +111,7 @@ Schema 18 also adds normalized config tables and indexes; all five `col` JSON co
 
 Timestamps: `col.crt`, `notes.mod`, `cards.mod` and due day counts use seconds. Revlog `id` is Unix milliseconds. `col.mod`, `col.scm`, `col.ls` are milliseconds.
 
-## 4. Learning steps and scheduling constants
+## 4\. Learning steps and scheduling constants
 
 Defaults from `deckconfig/schema11.rs` and `scheduler/states/mod.rs`: learning steps `[1, 10]` minutes, relearning steps `[10]` minutes, graduating intervals good 1 day and easy 4 days, starting ease 2.5, hard multiplier 1.2, easy multiplier 1.3, interval modifier 1.0, maximum interval 36500 days, leech threshold 8 lapses, 20 new cards and 200 reviews per day.
 
@@ -119,7 +119,7 @@ Learning answers (`scheduler/states/steps.rs`): Again returns to step 0 (600 s w
 
 SM-2 review intervals (`scheduler/states/review.rs`): initial ease 2.5, floor 1.3; Again subtracts 0.2, Hard subtracts 0.15, Easy adds 0.15. On-time Hard is `max(1, interval * hard_multiplier)` and at least previous interval plus 1; Good is `(interval + days_late/2) * ease`; Easy is `(interval + days_late) * ease * easy_multiplier`. Early reviews use elapsed days instead of the scheduled interval. Interval fuzz ranges are `2.5-7 days: 15%`, `7-20: 10%`, `>20: 5%`, seeded by card id and reps. Leech detection triggers at the threshold and every half threshold after it.
 
-## 5. AnkiConnect subset (API version 6)
+## 5\. AnkiConnect subset (API version 6)
 
 HTTP POST to `http://127.0.0.1:8765` with `Content-Type: application/json`. Request: `{"action": "...", "version": 6, "params": {...}}`; `params` defaults to `{}`. An optional `key` must match the configured apiKey. Reply: `{"result": <value>, "error": null}`, or `{"result": null, "error": "<message>"}`. Version 4 and lower return the bare result.
 
@@ -142,7 +142,7 @@ HTTP POST to `http://127.0.0.1:8765` with `Content-Type: application/json`. Requ
 
 `cardsInfo` objects contain `cardId`, `fields` (field name to `{"value": html, "order": n}`), `fieldOrder`, `question`, `answer`, `modelName`, `ord`, `deckName`, `css`, `factor`, `interval`, `note`, `type`, `queue`, `due`, `reps`, `lapses`, `left`, `mod`. `suspend` sets queue -1; `unsuspend` restores the queue derived from card type. `answerCards` uses ease 1 (Again) through 4 (Easy) and requires a started card timer in Anki's implementation.
 
-## 6. Scheduling algorithms
+## 6\. Scheduling algorithms
 
 Anki uses the Rust `fsrs` crate, version `6.6.2` at the pinned revision. It accepts 17 parameters (FSRS-4.5, converted to 21), 19 (FSRS-5, decay 0.5 appended), 21 (FSRS-6), or an empty list (defaults). Defaults: `[0.212, 1.2931, 2.3065, 8.2956, 6.4133, 0.8334, 3.0194, 0.001, 1.8722, 0.1666, 0.796, 1.4835, 0.0614, 0.2629, 1.6483, 0.6014, 1.8729, 0.5425, 0.0912, 0.0658, 0.1542]`. The last value is the positive decay stored on the card; the engine uses `w20 = -decay`. FSRS-5 stores `0.5`.
 
@@ -166,7 +166,7 @@ Sshort(t=0) = S * exp(w17*(r-3+w18)) * S^(-w19)  (factor maxed at 1 when r>=2)
 
 First review of a card initializes S and D directly. FSRS-5 adds `w17,w18` for short-term stability over FSRS-4.5. FSRS-6 adds `w19` (short-term decay) and `w20` (variable decay). Stability and difficulty, desired retention, decay and last review time are stored per card in `cards.data`. Anki computes the next four states, then maps them to the usual type/queue/due fields. With FSRS disabled, Anki uses the SM-2 variant in section 4.
 
-## 7. Pitfalls
+## 7\. Pitfalls
 
 - Import identity is `notes.guid`, not `notes.id`. An existing GUID updates the note when its mtime is newer, otherwise it is a duplicate. A conflicting note type is skipped. For a new note whose id is already used, Anki adds 999 until free; cards use the same `+999` rule. Re-map `nid`/`did` and original due dates when moving between collections.
 - Duplicate detection for notes uses `(mid, csum)`, so identical first fields collapse unless duplicates are allowed.
