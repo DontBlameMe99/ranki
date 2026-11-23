@@ -191,7 +191,8 @@
               pname = "${binName}-tarpaulin";
               buildPhaseCargoCommand = "cargo tarpaulin --exclude-files 'crates/bench/src/*'";
               installPhase = "mkdir -p $out";
-              nativeBuildInputs = [pkgs.cargo-tarpaulin];
+              nativeBuildInputs =
+                commonArgs.nativeBuildInputs ++ [pkgs.cargo-tarpaulin];
             }
           );
 

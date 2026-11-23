@@ -4,6 +4,7 @@
 )]
 //! Auto-optimization at session and sync boundaries.
 
+use ranki_core::AUTO_OPTIMIZE_MIN_DAYS;
 use ranki_core::FsrsParams;
 use ranki_core::MIN_TRAINING_ITEMS;
 use ranki_core::OptimizationInput;
@@ -20,14 +21,23 @@ const MILLIS_PER_DAY: i64 = 86_400_000;
 /// Runs one optimizer pass when the documented trigger policy allows it.
 ///
 /// The config is updated with the fitted weights and reset counters when a
-/// pass ran. Review counters are also refreshed without a pass so persisted
-/// state reflects the collection.
+/// pass ran. The config-only part of the trigger policy is checked before the
+/// review log is read, so the day gate rejects most sessions without a query.
+/// Review counters refresh once that gate passes. Loading the whole log after
+/// the gate costs one query per session, because the [`Store`] trait exposes
+/// no review count.
 pub(super) fn maybe_auto_optimize(
     store: &dyn Store,
     config: &mut Config,
     now_secs: i64,
 ) {
     if !config.scheduler.auto_optimize {
+        return;
+    }
+    let today = day_number(now_secs);
+    if today.saturating_sub(config.scheduler.last_optimized)
+        < AUTO_OPTIMIZE_MIN_DAYS
+    {
         return;
     }
     let history = match store.review_history() {
@@ -50,7 +60,6 @@ pub(super) fn maybe_auto_optimize(
                 )
         })
         .count();
-    let today = day_number(now_secs);
     let reviews_since =
         reviews_since(&history, config.scheduler.last_optimized);
     let trigger = ranki_core::OptimizationTrigger {
@@ -160,28 +169,26 @@ mod tests {
             .unwrap();
         let card = collection.card(ids[0]).unwrap().unwrap();
         let base = NOW.saturating_mul(1_000);
-        for index in 0..count {
-            let id = i64::try_from(index)
-                .unwrap_or(0)
-                .saturating_mul(super::MILLIS_PER_DAY)
-                .saturating_add(base);
-            collection
-                .apply_review(&ReviewDecision {
-                    card: card.clone(),
-                    revlog: RevLog {
-                        id,
-                        card_id: card.id,
-                        usn: 0,
-                        ease: Rating::Good,
-                        interval: 1,
-                        last_interval: 0,
-                        factor: 2_500,
-                        time_ms: 100,
-                        kind: RevLogKind::Review,
-                    },
-                })
-                .unwrap();
-        }
+        let decisions = (0..count)
+            .map(|index| ReviewDecision {
+                card: card.clone(),
+                revlog: RevLog {
+                    id: i64::try_from(index)
+                        .unwrap_or(0)
+                        .saturating_mul(super::MILLIS_PER_DAY)
+                        .saturating_add(base),
+                    card_id: card.id,
+                    usn: 0,
+                    ease: Rating::Good,
+                    interval: 1,
+                    last_interval: 0,
+                    factor: 2_500,
+                    time_ms: 100,
+                    kind: RevLogKind::Review,
+                },
+            })
+            .collect::<Vec<_>>();
+        collection.apply_reviews(&decisions).unwrap();
         collection
     }
 
@@ -194,6 +201,8 @@ mod tests {
             super::day_number(NOW).saturating_sub(29);
         maybe_auto_optimize(&collection, &mut config, NOW);
         assert_eq!(config.scheduler.params.len(), 0);
+        // The day gate returns before the review log is read.
+        assert_eq!(config.scheduler.reviews_since, 0);
 
         config.scheduler.last_optimized =
             super::day_number(NOW).saturating_sub(30);
