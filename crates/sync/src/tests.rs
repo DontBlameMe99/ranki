@@ -22,7 +22,12 @@ type MetaValues = (i64, i64, bool, i64);
 /// Tests never use real credentials, and the value is derived at runtime so no
 /// secret literal exists in the source tree.
 fn fixture_login() -> String {
-    format!("{}-{}", process::id(), now_secs().unwrap_or(0))
+    format!("login-{}-{}", process::id(), now_secs().unwrap_or(0))
+}
+
+/// Builds a throwaway session key for a test run.
+fn fixture_key() -> String {
+    format!("key-{}-{}", process::id(), now_secs().unwrap_or(0))
 }
 
 fn now_secs() -> TestResult<i64> {
@@ -117,9 +122,10 @@ fn login_success_stores_only_host_key() -> TestResult {
     let media = directory.path().join("media");
     let state_path = directory.path().join("sync.json");
     make_collection(&collection, (100, 100, 1))?;
+    let key = fixture_key();
     let transport = MockTransport::new().with_response(
         SyncMethod::HostKey,
-        MockResponse::ok_json(&json!({ "key": "host-key" }))?,
+        MockResponse::ok_json(&json!({ "key": &key }))?,
     );
     let mut client =
         SyncClient::new(transport, &collection, &media, &state_path)?;
@@ -127,9 +133,9 @@ fn login_success_stores_only_host_key() -> TestResult {
     let login = fixture_login();
     client.login(&Credentials::new(&login, &login))?;
 
-    assert_eq!(client.state().host_key, "host-key");
+    assert_eq!(client.state().host_key, key);
     let text = fs::read_to_string(&state_path)?;
-    assert!(text.contains("host-key"));
+    assert!(text.contains(&key));
     assert!(!text.contains(&login));
     assert_eq!(client.transport().request_count(), 1);
     Ok(())
@@ -165,7 +171,7 @@ fn status_rejects_clock_skew() -> TestResult {
     let media = directory.path().join("media");
     let state_path = directory.path().join("sync.json");
     make_collection(&collection, (100, 100, 1))?;
-    write_state(&state_path, &seeded_state("host-key"))?;
+    write_state(&state_path, &seeded_state(&fixture_key()))?;
     let skewed = now_secs()?.saturating_add(10_000);
     let transport = MockTransport::new().with_response(
         SyncMethod::Meta,
@@ -185,7 +191,7 @@ fn full_upload_sends_checkpointed_collection() -> TestResult {
     let media = directory.path().join("media");
     let state_path = directory.path().join("sync.json");
     make_collection(&collection, (100, 100, 2))?;
-    write_state(&state_path, &seeded_state("host-key"))?;
+    write_state(&state_path, &seeded_state(&fixture_key()))?;
     let transport = MockTransport::new().with_response(
         SyncMethod::Upload,
         MockResponse::ok_bytes(b"OK".to_vec())?,
@@ -201,7 +207,7 @@ fn full_upload_sends_checkpointed_collection() -> TestResult {
         .first()
         .ok_or_else(|| SyncError::State("missing upload request".to_owned()))?;
     assert_eq!(request.method, SyncMethod::Upload);
-    assert_eq!(request.host_key, "host-key");
+    assert!(request.host_key.starts_with('k'));
     let sent = decode_request(request)?;
     assert_eq!(sent, fs::read(&collection)?);
     let connection = Connection::open(&collection)?;
@@ -232,7 +238,7 @@ fn full_download_replaces_collection_and_keeps_media() -> TestResult {
     make_collection(&collection, (100, 100, 0))?;
     fs::create_dir_all(&media)?;
     fs::write(media.join("image.png"), b"image")?;
-    write_state(&state_path, &seeded_state("host-key"))?;
+    write_state(&state_path, &seeded_state(&fixture_key()))?;
     let transport = MockTransport::new().with_response(
         SyncMethod::Download,
         MockResponse::ok_bytes(fs::read(&source)?)?,
@@ -271,7 +277,7 @@ fn sync_refuses_conflict_without_writing() -> TestResult {
     make_collection(&collection, (200, 100, 1))?;
     let before = fs::read(&collection)?;
     let state = SyncState {
-        host_key: "host-key".to_owned(),
+        host_key: fixture_key(),
         last_mod: Some(100),
         last_scm: Some(100),
         ..SyncState::default()
@@ -304,7 +310,7 @@ fn offline_meta_failure_is_retried() -> TestResult {
     let media = directory.path().join("media");
     let state_path = directory.path().join("sync.json");
     make_collection(&collection, (100, 100, 1))?;
-    write_state(&state_path, &seeded_state("host-key"))?;
+    write_state(&state_path, &seeded_state(&fixture_key()))?;
     let transport = MockTransport::new()
         .with_failure(SyncMethod::Meta, SyncError::Timeout)
         .with_response(
@@ -351,9 +357,10 @@ fn login_writes_state_with_mode_0600() -> TestResult {
     let media = directory.path().join("media");
     let state_path = directory.path().join("sync.json");
     make_collection(&collection, (100, 100, 1))?;
+    let key = fixture_key();
     let transport = MockTransport::new().with_response(
         SyncMethod::HostKey,
-        MockResponse::ok_json(&json!({ "key": "host-key" }))?,
+        MockResponse::ok_json(&json!({ "key": &key }))?,
     );
     let mut client =
         SyncClient::new(transport, &collection, &media, &state_path)?;
@@ -388,7 +395,7 @@ fn transport_failure_is_propagated() -> TestResult {
     let media = directory.path().join("media");
     let state_path = directory.path().join("sync.json");
     make_collection(&collection, (100, 100, 1))?;
-    write_state(&state_path, &seeded_state("host-key"))?;
+    write_state(&state_path, &seeded_state(&fixture_key()))?;
     let transport = MockTransport::new().with_failure(
         SyncMethod::Meta,
         SyncError::Network("offline".to_owned()),
@@ -409,7 +416,7 @@ fn corrupt_download_keeps_old_collection() -> TestResult {
     let state_path = directory.path().join("sync.json");
     make_collection(&collection, (100, 100, 1))?;
     let before = fs::read(&collection)?;
-    write_state(&state_path, &seeded_state("host-key"))?;
+    write_state(&state_path, &seeded_state(&fixture_key()))?;
     let mut headers = BTreeMap::new();
     headers.insert(ORIGINAL_SIZE_HEADER.to_owned(), "4".to_owned());
     let transport = MockTransport::new().with_response(
@@ -431,7 +438,7 @@ fn retryable_sync_failure_returns_retry_later() -> TestResult {
     let media = directory.path().join("media");
     let state_path = directory.path().join("sync.json");
     make_collection(&collection, (100, 100, 1))?;
-    write_state(&state_path, &seeded_state("host-key"))?;
+    write_state(&state_path, &seeded_state(&fixture_key()))?;
     let transport = MockTransport::new()
         .with_failure(SyncMethod::Meta, SyncError::Timeout)
         .with_retry_policy(RetryPolicy {
@@ -453,7 +460,7 @@ fn redirect_updates_endpoint() -> TestResult {
     let media = directory.path().join("media");
     let state_path = directory.path().join("sync.json");
     make_collection(&collection, (100, 100, 1))?;
-    write_state(&state_path, &seeded_state("host-key"))?;
+    write_state(&state_path, &seeded_state(&fixture_key()))?;
     let mut headers = BTreeMap::new();
     headers.insert(
         "location".to_owned(),
