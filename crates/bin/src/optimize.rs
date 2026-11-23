@@ -4,11 +4,11 @@
 )]
 //! Auto-optimization at session and sync boundaries.
 
-use ranki_core::AUTO_OPTIMIZE_MIN_DAYS;
 use ranki_core::FsrsParams;
 use ranki_core::MIN_TRAINING_ITEMS;
 use ranki_core::OptimizationInput;
 use ranki_core::ReviewRecord;
+use ranki_core::day_gate;
 use ranki_core::should_auto_optimize;
 use ranki_model::Config;
 use ranki_model::RevLog;
@@ -35,9 +35,7 @@ pub(super) fn maybe_auto_optimize(
         return;
     }
     let today = day_number(now_secs);
-    if today.saturating_sub(config.scheduler.last_optimized)
-        < AUTO_OPTIMIZE_MIN_DAYS
-    {
+    if !day_gate(u64::from(today), u64::from(config.scheduler.last_optimized)) {
         return;
     }
     let history = match store.review_history() {

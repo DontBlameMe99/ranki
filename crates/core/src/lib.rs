@@ -19,7 +19,7 @@ pub use optimizer::{
     AUTO_OPTIMIZE_MIN_DAYS, AUTO_OPTIMIZE_MIN_REVIEWS, BATCH_SIZE, EPOCHS,
     HEALTH_CHECK_ITEMS, L2_GAMMA, LEARNING_RATE, MAX_SEQUENCE_LENGTH,
     MIN_TRAINING_ITEMS, OptimizationInput, OptimizationReport,
-    OptimizationTrigger, RANDOM_SEED, ReviewRecord, optimize,
+    OptimizationTrigger, RANDOM_SEED, ReviewRecord, day_gate, optimize,
     should_auto_optimize,
 };
 pub use sm2::{Sm2Preset, Sm2Scheduler};

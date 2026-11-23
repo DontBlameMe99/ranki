@@ -86,6 +86,14 @@ impl OptimizationTrigger {
     }
 }
 
+/// Cheap day-gate precheck that needs no review log.
+///
+/// Callers use it to skip loading review history while the policy cannot fire
+/// yet. It is the day conjunct of [`should_auto_optimize`].
+#[must_use]
+pub const fn day_gate(today: u64, last_optimized: u64) -> bool {
+    today.saturating_sub(last_optimized) >= AUTO_OPTIMIZE_MIN_DAYS as u64
+}
 /// Always-on auto-optimize policy, a deliberate simplification of Anki.
 #[must_use]
 pub const fn should_auto_optimize(trigger: OptimizationTrigger) -> bool {
