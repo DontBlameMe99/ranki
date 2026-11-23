@@ -322,18 +322,12 @@ fn run_with_sync(
         }
     }
 
-    if matches!(cli.command, Some(Command::Mcp)) {
-        return mcp::serve(
-            Some(&settings.collection),
-            scheduler_for(&settings),
-        );
-    }
     let scheduler = scheduler_for(&settings);
     let collection_path = settings.collection.as_path();
     let media_dir = settings.media_dir.as_path();
     let command = cli.command.unwrap_or(Command::Gui);
     let result = match command {
-        Command::Mcp => Ok(()),
+        Command::Mcp => mcp::serve(Some(collection_path), scheduler),
         Command::Gui => open_gui(&settings),
         Command::Import { package } => {
             let result = import_package(collection_path, media_dir, &package);
@@ -427,10 +421,11 @@ fn scheduler_for(settings: &config::Settings) -> Arc<dyn Scheduler> {
 }
 
 fn fsrs_params(settings: &config::Settings) -> FsrsParams {
-    if settings.fsrs_params.is_empty() {
-        return FsrsParams::default();
-    }
-    let mut values = settings.fsrs_params.clone();
+    let mut values = if settings.fsrs_params.is_empty() {
+        FsrsParams::default().weights().to_vec()
+    } else {
+        settings.fsrs_params.clone()
+    };
     apply_decay(&mut values, settings.fsrs_decay);
     FsrsParams::from_slice(&values).unwrap_or_default()
 }
