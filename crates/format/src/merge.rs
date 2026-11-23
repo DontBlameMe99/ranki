@@ -1001,6 +1001,10 @@ fn existing_guids(
     Ok(rows.into_iter().collect())
 }
 
+const INSERT_NOTE_SQL: &str =
+    "INSERT INTO main.notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
 fn merge_notes(
     transaction: &Transaction<'_>,
     state: &mut MergeState,
@@ -1048,6 +1052,9 @@ fn merge_notes(
         .map_err(db_error("cannot read package notes"))?;
     drop(statement);
 
+    let mut insert = transaction
+        .prepare_cached(INSERT_NOTE_SQL)
+        .map_err(db_error("cannot insert imported note"))?;
     let mut inserted = 0;
     for row in rows {
         if guids.contains(&row.guid) {
@@ -1062,24 +1069,20 @@ fn merge_notes(
         };
         let model_id =
             state.model_map.get(&row.mid).copied().unwrap_or(row.mid);
-        transaction
-            .execute(
-                "INSERT INTO main.notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    id,
-                    row.guid,
-                    model_id,
-                    row.modified,
-                    row.usn,
-                    row.tags,
-                    row.fields,
-                    row.sort_field,
-                    row.checksum,
-                    row.flags,
-                    row.data,
-                ],
-            )
+        insert
+            .execute(params![
+                id,
+                row.guid,
+                model_id,
+                row.modified,
+                row.usn,
+                row.tags,
+                row.fields,
+                row.sort_field,
+                row.checksum,
+                row.flags,
+                row.data,
+            ])
             .map_err(db_error("cannot insert imported note"))?;
         state.note_map.insert(row.id, Some(id));
         let _ = guids.insert(row.guid);
@@ -1135,12 +1138,20 @@ fn read_card_rows(
     Ok(rows)
 }
 
+const INSERT_CARD_SQL: &str =
+    "INSERT INTO main.cards (id, nid, did, ord, mod, usn, type, queue, due, ivl,
+         factor, reps, lapses, left, odue, odid, flags, data)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
 fn insert_cards(
     transaction: &Transaction<'_>,
     state: &mut MergeState,
     rows: &[CardRow],
 ) -> Result<usize, FormatError> {
     let mut used = all_ids(transaction, "main.cards")?;
+    let mut insert = transaction
+        .prepare_cached(INSERT_CARD_SQL)
+        .map_err(db_error("cannot insert imported card"))?;
     let mut inserted = 0;
     for row in rows {
         let Some(note_id) = state.note_map.get(&row.note_id).copied().flatten()
@@ -1176,32 +1187,27 @@ fn insert_cards(
         } else {
             shifted_due(row.original_due, row, day_delta)?
         };
-        transaction
-            .execute(
-                "INSERT INTO main.cards (id, nid, did, ord, mod, usn, type, queue, due, ivl,
-                     factor, reps, lapses, left, odue, odid, flags, data)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    id,
-                    note_id,
-                    deck_id,
-                    row.ordinal,
-                    row.modified,
-                    row.usn,
-                    row.kind,
-                    row.queue,
-                    due,
-                    row.interval,
-                    row.factor,
-                    row.reps,
-                    row.lapses,
-                    row.left,
-                    original_due,
-                    original_deck_id,
-                    row.flags,
-                    row.data,
-                ],
-            )
+        insert
+            .execute(params![
+                id,
+                note_id,
+                deck_id,
+                row.ordinal,
+                row.modified,
+                row.usn,
+                row.kind,
+                row.queue,
+                due,
+                row.interval,
+                row.factor,
+                row.reps,
+                row.lapses,
+                row.left,
+                original_due,
+                original_deck_id,
+                row.flags,
+                row.data,
+            ])
             .map_err(db_error("cannot insert imported card"))?;
         state.card_map.insert(row.id, Some(id));
         inserted = increment(inserted)?;
@@ -1221,6 +1227,10 @@ fn shifted_due(
         FormatError::new("card due overflow while importing package")
     })
 }
+
+const INSERT_REVLOG_SQL: &str =
+    "INSERT INTO main.revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
 fn merge_revlog(
     transaction: &Transaction<'_>,
@@ -1252,6 +1262,9 @@ fn merge_revlog(
         .map_err(db_error("cannot read package review log"))?;
     drop(statement);
 
+    let mut insert = transaction
+        .prepare_cached(INSERT_REVLOG_SQL)
+        .map_err(db_error("cannot insert imported review log entry"))?;
     let mut inserted = 0;
     for row in rows {
         let Some(card_id) = state.card_map.get(&row.card_id).copied().flatten()
@@ -1264,22 +1277,18 @@ fn merge_revlog(
             let _ = used.insert(row.id);
             row.id
         };
-        transaction
-            .execute(
-                "INSERT INTO main.revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    id,
-                    card_id,
-                    row.usn,
-                    row.ease,
-                    row.interval,
-                    row.last_interval,
-                    row.factor,
-                    row.time_ms,
-                    row.kind,
-                ],
-            )
+        insert
+            .execute(params![
+                id,
+                card_id,
+                row.usn,
+                row.ease,
+                row.interval,
+                row.last_interval,
+                row.factor,
+                row.time_ms,
+                row.kind,
+            ])
             .map_err(db_error("cannot insert imported review log entry"))?;
         inserted = increment(inserted)?;
     }
