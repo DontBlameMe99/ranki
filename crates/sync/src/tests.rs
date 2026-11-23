@@ -447,7 +447,7 @@ fn redirect_updates_endpoint() -> TestResult {
     let mut headers = BTreeMap::new();
     headers.insert(
         "location".to_owned(),
-        "https://sync-two.ankiweb.net/".to_owned(),
+        "https://sync.ankiweb.net/".to_owned(),
     );
     let transport = MockTransport::new()
         .with_response(
@@ -463,12 +463,12 @@ fn redirect_updates_endpoint() -> TestResult {
 
     client.status()?;
 
-    assert_eq!(client.state().endpoint, "https://sync-two.ankiweb.net/");
+    assert_eq!(client.state().endpoint, "https://sync.ankiweb.net/");
     let requests = client.transport().requests();
     assert_eq!(requests.len(), 2);
     let second = requests.get(1).ok_or_else(|| {
         SyncError::State("missing redirected request".to_owned())
     })?;
-    assert_eq!(second.endpoint, "https://sync-two.ankiweb.net/");
+    assert_eq!(second.endpoint, "https://sync.ankiweb.net/");
     Ok(())
 }
