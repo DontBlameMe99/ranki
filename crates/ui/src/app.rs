@@ -139,6 +139,7 @@ pub struct ReviewState {
     pub answered: usize,
     pub session_total: usize,
     pub again_count: usize,
+    pub scope_all: bool,
     pub status: Option<String>,
 }
 
@@ -172,6 +173,18 @@ pub struct Root {
     pub(crate) collection_modified: i64,
     pub(crate) images: Entity<card_view::LruImageCache>,
     pub(crate) font_family: &'static str,
+}
+
+/// Values the window needs before the root entity exists.
+pub struct Launch {
+    pub store: Box<dyn Store>,
+    pub options: Options,
+}
+
+impl Root {
+    pub(crate) const fn style(&self) -> crate::theme::Style {
+        crate::theme::Style::new(self.colors(), self.theme())
+    }
 }
 
 impl Focusable for Root {
@@ -225,11 +238,11 @@ pub fn scheduler_from_options(options: &Options) -> Arc<dyn Scheduler> {
 impl Root {
     #[must_use]
     pub fn new(
-        store: Box<dyn Store>,
-        options: Options,
+        launch: Launch,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let Launch { store, options } = launch;
         let focus = cx.focus_handle();
         window.focus(&focus);
         let system_dark = !matches!(
@@ -285,10 +298,20 @@ impl Root {
             external_change: false,
             collection_modified: 0,
             images: card_view::LruImageCache::new(cx),
-            font_family: theme::detected_font_family(),
+            font_family: theme::ui_font_family(),
         };
         root.reload(cx);
         root.reset_fields(cx);
+        root.refresh_field_colors(cx);
+        if let Ok(prefill) = env::var("RANKI_UI_DEV_FIELDS") {
+            for (field, value) in
+                root.add.fields.iter().zip(prefill.split('\t'))
+            {
+                field.update(cx, |field, cx| {
+                    field.seed(value.to_owned(), cx);
+                });
+            }
+        }
         match env::var("RANKI_UI_DEV_VIEW").as_deref() {
             Ok("add") => root.view = View::AddCard,
             Ok("question") => {
@@ -323,6 +346,7 @@ impl Root {
                 window.appearance(),
                 WindowAppearance::Light | WindowAppearance::VibrantLight
             );
+            this.refresh_field_colors(cx);
             cx.notify();
         })
         .detach();
@@ -428,13 +452,7 @@ impl Root {
     pub(crate) fn study_deck(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(deck) = self.decks.get(index) {
             self.selected = Some(index);
-            self.review = ReviewState {
-                session_total: self
-                    .stats
-                    .get(index)
-                    .map_or(0, |stats| due_total(*stats)),
-                ..ReviewState::default()
-            };
+            self.review = ReviewState::default();
             let now = Self::now();
             match self.store.due_cards(
                 Some(deck.id),
@@ -446,6 +464,7 @@ impl Root {
                     self.set_error(format!("Could not load cards: {error}"));
                 }
             }
+            self.review.session_total = self.review.queue.len();
             self.previous_view = View::Decks;
             self.view = View::Review;
             self.ensure_current(cx);
@@ -455,8 +474,7 @@ impl Root {
 
     pub(crate) fn study_all(&mut self, cx: &mut Context<Self>) {
         self.review = ReviewState::default();
-        self.review.session_total =
-            due_total(leaf_deck_totals(&self.decks, &self.stats));
+        self.review.scope_all = true;
         let now = Self::now();
         match self
             .store
@@ -467,6 +485,7 @@ impl Root {
                 self.set_error(format!("Could not load cards: {error}"));
             }
         }
+        self.review.session_total = self.review.queue.len();
         self.previous_view = View::Decks;
         self.view = View::Review;
         self.ensure_current(cx);
@@ -479,6 +498,34 @@ impl Root {
         self.review.phase = Phase::Question;
         self.view = View::Decks;
         cx.notify();
+    }
+
+    /// Placeholder ink must follow the palette, including live appearance swaps.
+    pub(crate) fn refresh_field_colors(&mut self, cx: &mut Context<Self>) {
+        let color = gpui::Hsla::from(self.colors().subtext);
+        let fields = [
+            &self.deck_search,
+            &self.create_field,
+            &self.rename_field,
+            &self.add.tags,
+        ];
+        for field in fields {
+            field.update(cx, |field, _| field.set_placeholder_color(color));
+        }
+        for field in &self.add.fields {
+            field.update(cx, |field, _| field.set_placeholder_color(color));
+        }
+    }
+
+    /// Footer badge text, truthful about the local collection's mod time.
+    pub(crate) fn updated_label(&self) -> String {
+        if self.collection_modified <= 0 {
+            return String::from("Local collection");
+        }
+        format!(
+            "Local, updated {}",
+            relative_age(self.collection_modified, Self::now())
+        )
     }
 
     fn ensure_current(&mut self, cx: &mut Context<Self>) {
@@ -498,14 +545,12 @@ impl Root {
                     Some(card_view::render_card(
                         model,
                         note,
-                        card.ordinal,
-                        Side::Question,
+                        card_view::CardRequest::question(card.ordinal),
                     )),
                     Some(card_view::render_card(
                         model,
                         note,
-                        card.ordinal,
-                        Side::Answer,
+                        card_view::CardRequest::answer_only(card.ordinal),
                     )),
                 ),
                 _ => (None, None),
@@ -749,12 +794,16 @@ impl Root {
             self.review.last_tick = Some(now);
             return;
         };
-        let delta =
-            focused_delta(last, now, active, self.review.focused_elapsed);
-        self.review.focused_elapsed = delta;
+        let elapsed = now.saturating_duration_since(last);
+        self.review.focused_elapsed =
+            focused_delta(elapsed, active, self.review.focused_elapsed);
         self.review.last_tick = Some(now);
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one dispatcher entry point keeps every key and click handler on the same path"
+    )]
     pub(crate) fn dispatch(
         &mut self,
         action: UiAction,
@@ -1068,7 +1117,7 @@ impl Render for Root {
                     this.dispatch(UiAction::from(action), window, cx);
                 },
             ))
-            .child(self.render_nav(cx))
+            .when(view != View::Review, |this| this.child(self.render_nav(cx)))
             .child(div().flex_1().overflow_hidden().child(main))
             .children(self.render_overlay(cx))
     }
@@ -1152,54 +1201,59 @@ pub fn build_deck_rows(
         }
         total
     }
-    let mut rows = Vec::new();
-    fn visit(
-        path: &str,
-        depth: usize,
-        nodes: &[(String, Option<&Deck>, DeckStats)],
-        children: &BTreeMap<String, Vec<usize>>,
-        expanded: &HashSet<String>,
-        rows: &mut Vec<DeckRow>,
-    ) {
-        if let Some(indices) = children.get(path) {
-            for index in indices {
-                let (child_path, deck, stats) =
-                    (&nodes[*index].0, nodes[*index].1, nodes[*index].2);
-                let has_children = children.contains_key(child_path);
+    struct Tree<'a> {
+        nodes: &'a [(String, Option<&'a Deck>, DeckStats)],
+        children: &'a BTreeMap<String, Vec<usize>>,
+        expanded: &'a HashSet<String>,
+        rows: Vec<DeckRow>,
+    }
+
+    impl Tree<'_> {
+        fn visit(&mut self, path: &str, depth: usize) {
+            let Some(indices) = self.children.get(path) else {
+                return;
+            };
+            for index in indices.clone() {
+                let child_path = self.nodes[index].0.clone();
+                let deck = self.nodes[index].1;
+                let stats = self.nodes[index].2;
+                let has_children = self.children.contains_key(&child_path);
                 let aggregate = if has_children {
-                    subtree(*index, nodes, children)
+                    subtree(index, self.nodes, self.children)
                 } else {
                     stats
                 };
-                rows.push(DeckRow {
+                let name = child_path
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&child_path)
+                    .to_owned();
+                let expanded = self.expanded.contains(&child_path);
+                self.rows.push(DeckRow {
                     id: deck.map(|item| item.id),
                     path: child_path.clone(),
-                    name: child_path
-                        .rsplit("::")
-                        .next()
-                        .unwrap_or(child_path)
-                        .to_owned(),
+                    name,
                     depth,
                     stats: aggregate,
                     virtual_group: deck.is_none(),
                     has_children,
-                    expanded: expanded.contains(child_path),
+                    expanded,
                 });
-                if expanded.contains(child_path) {
-                    visit(
-                        child_path,
-                        depth.saturating_add(1),
-                        nodes,
-                        children,
-                        expanded,
-                        rows,
-                    );
+                if expanded {
+                    self.visit(&child_path, depth.saturating_add(1));
                 }
             }
         }
     }
-    visit("", 0, &nodes, &children, expanded, &mut rows);
-    rows
+
+    let mut tree = Tree {
+        nodes: &nodes,
+        children: &children,
+        expanded,
+        rows: Vec::new(),
+    };
+    tree.visit("", 0);
+    tree.rows
 }
 
 #[must_use]
@@ -1212,7 +1266,7 @@ pub const fn due_total(stats: DeckStats) -> usize {
 
 /// Sums only real leaf decks so parents never double count.
 #[must_use]
-#[expect(dead_code, reason = "kept as a pure helper for deck-table tests")]
+#[cfg(test)]
 pub fn sum_leaf_counts(rows: &[DeckRow]) -> DeckStats {
     let mut total = DeckStats::default();
     for row in rows {
@@ -1270,7 +1324,7 @@ pub fn note_type_name(model: &NoteModel) -> &'static str {
     } else if name.contains("cloze") {
         "Cloze"
     } else if name.contains("reversed") {
-        "Basic and reversed card"
+        "Reversed"
     } else {
         "Basic"
     }
@@ -1329,19 +1383,142 @@ pub fn next_due_deck(
     })
 }
 
+/// Human age for the footer badge.
+#[must_use]
+pub fn relative_age(modified: i64, now: i64) -> String {
+    let seconds = now.saturating_sub(modified).max(0);
+    match seconds {
+        0..=59 => String::from("just now"),
+        60..=3599 => format!("{} min ago", seconds / 60),
+        3600..=86_399 => format!("{} h ago", seconds / 3600),
+        _ => format!("{} days ago", seconds / 86_400),
+    }
+}
+
+/// Deck row metadata: child count for parents and total cards for every row.
+#[must_use]
+pub fn deck_meta(rows: &[DeckRow], row: &DeckRow) -> String {
+    let prefix = format!("{}::", row.path);
+    let children = rows
+        .iter()
+        .filter(|other| {
+            other.depth == row.depth.saturating_add(1)
+                && other.path.starts_with(&prefix)
+        })
+        .count();
+    let cards = row.stats.total_cards;
+    let cards_label = if cards == 1 {
+        String::from("1 card")
+    } else {
+        format!("{cards} cards")
+    };
+    if children == 0 {
+        return cards_label;
+    }
+    let subdecks = if children == 1 {
+        String::from("1 subdeck")
+    } else {
+        format!("{children} subdecks")
+    };
+    format!("{subdecks} · {cards_label}")
+}
+
+/// Mockup date line: weekday, day, month.
+#[must_use]
+pub fn today_label() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    date_label(now)
+}
+
+#[must_use]
+pub fn date_label(seconds: u64) -> String {
+    let days = i64::try_from(seconds / 86_400).unwrap_or(0);
+    let (_, month, day) = civil_from_days(days);
+    let weekday = (days + 4).rem_euclid(7);
+    let names = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    let months = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let weekday_name = names[usize::try_from(weekday).unwrap_or(0)];
+    let month_name = months[usize::try_from(month - 1).unwrap_or(0)];
+    format!("{weekday_name}, {day} {month_name}")
+}
+
+/// Howard Hinnant's civil-from-days, valid for the Unix epoch range.
+fn civil_from_days(days: i64) -> (i64, i32, i32) {
+    let shifted = days.saturating_add(719_468);
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted.saturating_sub(146_096)
+    } / 146_097;
+    let day_of_era = shifted.saturating_sub(era.saturating_mul(146_097));
+    let year_of_era = (day_of_era
+        .saturating_sub(day_of_era / 1460)
+        .saturating_add(day_of_era / 36_524)
+        .saturating_sub(day_of_era / 146_096))
+        / 365;
+    let year = year_of_era.saturating_add(era.saturating_mul(400));
+    let day_of_year = day_of_era
+        .saturating_sub(year_of_era.saturating_mul(365))
+        .saturating_sub(year_of_era / 4)
+        .saturating_add(year_of_era / 100);
+    let month_index =
+        (5_i64.saturating_mul(day_of_year).saturating_add(2)) / 153;
+    let day = day_of_year
+        .saturating_sub(
+            (153_i64.saturating_mul(month_index).saturating_add(2)) / 5,
+        )
+        .saturating_add(1);
+    let month = if month_index < 10 {
+        month_index.saturating_add(3)
+    } else {
+        month_index.saturating_sub(9)
+    };
+    let year = if month <= 2 {
+        year.saturating_add(1)
+    } else {
+        year
+    };
+    (
+        year,
+        i32::try_from(month).unwrap_or(1),
+        i32::try_from(day).unwrap_or(1),
+    )
+}
+
 #[must_use]
 pub fn focused_delta(
-    from: Instant,
-    to: Instant,
+    elapsed: Duration,
     focused: bool,
     total: Duration,
 ) -> Duration {
     if !focused {
         return total;
     }
-    total
-        .saturating_add(to.saturating_duration_since(from))
-        .min(MAX_REVIEW_TIME)
+    total.saturating_add(elapsed).min(MAX_REVIEW_TIME)
 }
 
 #[must_use]
@@ -1452,14 +1629,17 @@ mod tests {
     use crate::Options;
 
     use super::{
-        DeckRow, EmptyKind, Phase, UiAction, View, build_deck_rows, due_total,
-        empty_copy, empty_kind, filter_decks, focused_delta, next_due_deck,
-        next_view, note_type_name, sum_leaf_counts, validate_draft,
+        DeckRow, EmptyKind, Phase, UiAction, View, build_deck_rows, date_label,
+        deck_meta, due_total, empty_copy, empty_kind, filter_decks,
+        focused_delta, next_due_deck, next_view, note_type_name, relative_age,
+        sum_leaf_counts, validate_draft,
     };
     #[test]
     fn scheduler_follows_the_configured_algorithm() {
-        let mut options = Options::default();
-        options.scheduler = SchedulerKind::Sm2;
+        let mut options = Options {
+            scheduler: SchedulerKind::Sm2,
+            ..Options::default()
+        };
         assert_eq!(super::scheduler_from_options(&options).name(), "sm2");
         options.scheduler = SchedulerKind::Fsrs;
         assert_eq!(super::scheduler_from_options(&options).name(), "fsrs");
@@ -1474,6 +1654,10 @@ mod tests {
         assert!(options.show_keyboard_hints);
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test fixture with one argument per queue"
+    )]
     fn deck(
         id: i64,
         name: &str,
@@ -1507,7 +1691,7 @@ mod tests {
         let rows = build_deck_rows(
             &decks.iter().map(|(d, _)| d.clone()).collect::<Vec<_>>(),
             &stats,
-            &Default::default(),
+            &std::collections::HashSet::default(),
         );
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].path, "A");
@@ -1555,7 +1739,7 @@ mod tests {
                 path: "A".into(),
                 name: "A".into(),
                 depth: 0,
-                stats: Default::default(),
+                stats: ranki_model::DeckStats::default(),
                 virtual_group: false,
                 has_children: false,
                 expanded: false,
@@ -1565,7 +1749,7 @@ mod tests {
                 path: "A::B".into(),
                 name: "B".into(),
                 depth: 1,
-                stats: Default::default(),
+                stats: ranki_model::DeckStats::default(),
                 virtual_group: false,
                 has_children: false,
                 expanded: true,
@@ -1575,7 +1759,7 @@ mod tests {
                 path: "Z".into(),
                 name: "Z".into(),
                 depth: 0,
-                stats: Default::default(),
+                stats: ranki_model::DeckStats::default(),
                 virtual_group: false,
                 has_children: false,
                 expanded: false,
@@ -1601,7 +1785,7 @@ mod tests {
             template_ordinals: vec![0],
             raw_config: None,
         };
-        assert_eq!(note_type_name(&model), "Basic and reversed card");
+        assert_eq!(note_type_name(&model), "Reversed");
         let cloze = NoteModel {
             name: "Cloze".into(),
             kind: NoteKind::Cloze,
@@ -1673,18 +1857,69 @@ mod tests {
 
     #[test]
     fn focused_time_is_capped_and_ignores_blur() {
-        let now = std::time::Instant::now();
-        let before = now
-            .checked_sub(std::time::Duration::from_secs(61))
-            .unwrap_or(now);
+        let elapsed = std::time::Duration::from_secs(61);
         assert_eq!(
-            focused_delta(before, now, false, std::time::Duration::ZERO),
+            focused_delta(elapsed, false, std::time::Duration::ZERO),
             std::time::Duration::ZERO
         );
         assert_eq!(
-            focused_delta(before, now, true, std::time::Duration::ZERO),
+            focused_delta(elapsed, true, std::time::Duration::ZERO),
             std::time::Duration::from_secs(60)
         );
+    }
+
+    #[test]
+    fn footer_age_is_human_and_truthful() {
+        assert_eq!(relative_age(100, 130), "just now");
+        assert_eq!(relative_age(100, 220), "2 min ago");
+        assert_eq!(relative_age(100, 7_300), "2 h ago");
+        assert_eq!(relative_age(100, 172_900), "2 days ago");
+    }
+
+    #[test]
+    fn date_label_uses_the_real_calendar() {
+        assert_eq!(date_label(0), "Thursday, 1 January");
+        assert_eq!(date_label(1_800_000_000), "Friday, 15 January");
+    }
+
+    #[test]
+    fn deck_meta_counts_children_and_cards() {
+        let row = DeckRow {
+            id: None,
+            path: "Japanese".into(),
+            name: "Japanese".into(),
+            depth: 0,
+            stats: ranki_model::DeckStats {
+                total_cards: 1284,
+                ..Default::default()
+            },
+            virtual_group: true,
+            has_children: true,
+            expanded: false,
+        };
+        let child = DeckRow {
+            id: Some(2),
+            path: "Japanese::Vocabulary N5".into(),
+            name: "Vocabulary N5".into(),
+            depth: 1,
+            stats: ranki_model::DeckStats::default(),
+            virtual_group: false,
+            has_children: false,
+            expanded: false,
+        };
+        assert_eq!(
+            deck_meta(&[row.clone(), child], &row),
+            "1 subdeck · 1284 cards"
+        );
+        let solo = DeckRow {
+            path: String::from("Solo"),
+            stats: ranki_model::DeckStats {
+                total_cards: 1,
+                ..Default::default()
+            },
+            ..row
+        };
+        assert_eq!(deck_meta(std::slice::from_ref(&solo), &solo), "1 card");
     }
 
     #[test]

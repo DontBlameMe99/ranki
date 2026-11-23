@@ -10,7 +10,8 @@ use gpui::{
     AnyElement, App, AppContext, Asset, AssetLogger, Div, Entity,
     ImageAssetLoader, ImageCache, ImageCacheError, ImageCacheItem,
     InteractiveElement, IntoElement, ParentElement, RenderImage, Resource,
-    SharedString, Styled, StyledImage, Window, div, hash, img, px, relative,
+    Rgba, SharedString, Styled, StyledImage, Window, div, hash, img, px,
+    relative,
 };
 use ranki_model::{
     Note, NoteModel,
@@ -193,7 +194,7 @@ pub fn parse_template(template: &str) -> Vec<TemplateNode> {
 }
 
 fn push_node(
-    stack: &mut Vec<(String, bool, Vec<TemplateNode>)>,
+    stack: &mut [(String, bool, Vec<TemplateNode>)],
     roots: &mut Vec<TemplateNode>,
     node: TemplateNode,
 ) {
@@ -204,21 +205,33 @@ fn push_node(
     }
 }
 
+/// Field names and values, parallel slices straight from the note.
+#[derive(Clone, Copy, Debug)]
+pub struct FieldValues<'a> {
+    pub names: &'a [String],
+    pub values: &'a [String],
+}
+
+impl<'a> FieldValues<'a> {
+    #[must_use]
+    pub const fn new(names: &'a [String], values: &'a [String]) -> Self {
+        Self { names, values }
+    }
+}
+
 /// Renders a template with field values, conditionals, and `FrontSide` support.
 #[must_use]
 pub fn render_template(
     template: &str,
-    field_names: &[String],
-    values: &[String],
+    fields: FieldValues<'_>,
     front_side: &str,
 ) -> String {
-    render_nodes(&parse_template(template), field_names, values, front_side)
+    render_nodes(&parse_template(template), fields, front_side)
 }
 
 fn render_nodes(
     nodes: &[TemplateNode],
-    field_names: &[String],
-    values: &[String],
+    fields: FieldValues<'_>,
     front_side: &str,
 ) -> String {
     let mut output = String::new();
@@ -228,8 +241,7 @@ fn render_nodes(
             TemplateNode::Field { key, .. } => {
                 if key.eq_ignore_ascii_case("FrontSide") {
                     output.push_str(front_side);
-                } else if let Some(value) = find_field(field_names, values, key)
-                {
+                } else if let Some(value) = find_field(fields, key) {
                     output.push_str(value);
                 }
             }
@@ -238,15 +250,11 @@ fn render_nodes(
                 negated,
                 children,
             } => {
-                let value = find_field(field_names, values, key).unwrap_or("");
+                let value = find_field(fields, key).unwrap_or("");
                 let present = !value.trim().is_empty() && !is_empty_html(value);
                 if present != *negated {
-                    output.push_str(&render_nodes(
-                        children,
-                        field_names,
-                        values,
-                        front_side,
-                    ));
+                    output
+                        .push_str(&render_nodes(children, fields, front_side));
                 }
             }
         }
@@ -254,14 +262,11 @@ fn render_nodes(
     output
 }
 
-fn find_field<'a>(
-    names: &[String],
-    values: &'a [String],
-    key: &str,
-) -> Option<&'a str> {
-    names
+fn find_field<'a>(fields: FieldValues<'a>, key: &str) -> Option<&'a str> {
+    fields
+        .names
         .iter()
-        .zip(values.iter())
+        .zip(fields.values.iter())
         .find(|(name, _)| name.eq_ignore_ascii_case(key))
         .map(|(_, value)| value.as_str())
 }
@@ -552,14 +557,57 @@ fn parse_points(text: &str, width: f32, height: f32) -> Vec<(f32, f32)> {
         .collect()
 }
 
+/// One card side plus whether the answer repeats the front.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardRequest {
+    pub ordinal: u16,
+    pub side: Side,
+    pub include_front: bool,
+}
+
+impl CardRequest {
+    #[must_use]
+    pub const fn question(ordinal: u16) -> Self {
+        Self {
+            ordinal,
+            side: Side::Question,
+            include_front: true,
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub const fn answer(ordinal: u16) -> Self {
+        Self {
+            ordinal,
+            side: Side::Answer,
+            include_front: true,
+        }
+    }
+
+    /// Answer template without the repeated front, for the revealed stage.
+    #[must_use]
+    pub const fn answer_only(ordinal: u16) -> Self {
+        Self {
+            ordinal,
+            side: Side::Answer,
+            include_front: false,
+        }
+    }
+}
+
 /// Renders the front or back text of a card using the selected template.
 #[must_use]
 pub fn render_card(
     model: &NoteModel,
     note: &Note,
-    ordinal: u16,
-    side: Side,
+    request: CardRequest,
 ) -> RenderedCard {
+    let CardRequest {
+        ordinal,
+        side,
+        include_front,
+    } = request;
     let Some(template) = model.template_for(ordinal) else {
         return RenderedCard {
             text: String::from("This note has no template."),
@@ -570,13 +618,13 @@ pub fn render_card(
         Side::Question => template.question_format.as_str(),
         Side::Answer => template.answer_format.as_str(),
     };
-    let front = render_template(
-        &template.question_format,
-        &model.fields,
-        &note.fields,
-        "",
-    );
-    let rendered = render_template(source, &model.fields, &note.fields, &front);
+    let fields = FieldValues::new(&model.fields, &note.fields);
+    let front = if include_front {
+        render_template(&template.question_format, fields, "")
+    } else {
+        String::new()
+    };
+    let rendered = render_template(source, fields, &front);
     let text = strip_tags(&rendered);
     let clozes = if model.is_cloze() {
         cloze_segments(&text, ordinal, side)
@@ -607,20 +655,20 @@ pub fn render_card(
 
 /// Draws cloze and occlusion content as a compact text block.
 #[must_use]
-pub fn rendered_text(
-    card: &RenderedCard,
-    colors: Palette,
-    size_px: f32,
-) -> Div {
+pub fn rendered_text(card: &RenderedCard, color: Rgba, size_px: f32) -> Div {
     let mut block = div()
         .flex()
         .flex_col()
         .items_center()
         .gap(px(6.))
         .text_size(px(size_px))
-        .text_color(colors.text);
+        .text_color(color);
     for line in card.text.lines() {
-        block = block.child(div().child(line.to_owned()));
+        block = block.child(
+            div()
+                .font_family(crate::theme::font_for_text(line))
+                .child(line.to_owned()),
+        );
     }
     block
 }
@@ -716,6 +764,10 @@ impl LruImageCache {
     }
 
     /// Loads an image resource, keeping at most `capacity` decoded entries.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the ImageCache trait signature"
+    )]
     pub fn load(
         &mut self,
         resource: &Resource,
@@ -832,10 +884,15 @@ pub fn preview_card(
         flags: 0,
         data: String::new(),
     };
-    render_card(model, &note, 0, side)
+    let request = match side {
+        Side::Question => CardRequest::question(0),
+        Side::Answer => CardRequest::answer_only(0),
+    };
+    render_card(model, &note, request)
         .text
         .lines()
-        .next()
+        .rev()
+        .find(|line| !line.trim().is_empty())
         .unwrap_or("")
         .to_owned()
 }
@@ -845,9 +902,9 @@ mod tests {
     use ranki_model::{CardTemplate, NoteKind};
 
     use super::{
-        ClozeKind, MediaKind, Side, TemplateNode, cloze_text, media_refs,
-        occlusion_overlays, parse_template, preview_card, render_card,
-        strip_tags,
+        CardRequest, ClozeKind, MediaKind, Side, TemplateNode, cloze_text,
+        media_refs, occlusion_overlays, parse_template, preview_card,
+        render_card, strip_tags,
     };
 
     fn model(
@@ -927,8 +984,7 @@ mod tests {
         let rendered = render_card(
             &form,
             &note(&["Question?", "Answer!"]),
-            0,
-            Side::Answer,
+            CardRequest::answer(0),
         );
         assert_eq!(rendered.text, "Question?\nAnswer!");
     }
@@ -950,8 +1006,7 @@ mod tests {
         let rendered = render_card(
             &form,
             &note(&["Front text", "Back text"]),
-            1,
-            Side::Question,
+            CardRequest::question(1),
         );
         assert_eq!(rendered.text, "Back text");
     }
@@ -960,7 +1015,8 @@ mod tests {
     fn missing_template_has_a_helpful_fallback() {
         let mut form = model(&["Front"], "{{Front}}", "{{Front}}");
         form.templates.clear();
-        let rendered = render_card(&form, &note(&["x"]), 0, Side::Question);
+        let rendered =
+            render_card(&form, &note(&["x"]), CardRequest::question(0));
         assert_eq!(rendered.text, "This note has no template.");
     }
 
@@ -971,13 +1027,15 @@ mod tests {
             "{{Front}}{{#Add Reverse}} + {{Back}}{{/Add Reverse}}",
             "{{Front}}",
         );
-        let empty =
-            render_card(&form, &note(&["One", "", "Two"]), 0, Side::Question);
+        let empty = render_card(
+            &form,
+            &note(&["One", "", "Two"]),
+            CardRequest::question(0),
+        );
         let filled = render_card(
             &form,
             &note(&["One", "yes", "Two"]),
-            0,
-            Side::Question,
+            CardRequest::question(0),
         );
         assert_eq!(empty.text, "One");
         assert_eq!(filled.text, "One + Two");
@@ -1067,10 +1125,9 @@ mod tests {
         let card = render_card(
             &model(&["Front"], "{{Front}}", "{{Front}}"),
             &note(&["Hello"]),
-            0,
-            Side::Question,
+            CardRequest::question(0),
         );
-        let _ = super::rendered_text(&card, crate::theme::MOCHA, 84.0);
+        let _ = super::rendered_text(&card, crate::theme::MOCHA.text, 84.0);
         let _ = crate::theme::MOCHA;
     }
 }

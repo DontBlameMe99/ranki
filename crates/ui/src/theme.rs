@@ -1,7 +1,7 @@
 //! Catppuccin palette, layout tokens, and semantic colors for the GPUI UI.
 
 use gpui::Rgba;
-use ranki_model::{SchedulerKind, ThemeChoice};
+use ranki_model::ThemeChoice;
 
 /// Dark Catppuccin Mocha, the palette used by the mockups.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +112,25 @@ pub const fn accent_ink(theme: Theme) -> Rgba {
         Theme::Light => c(0xffffff),
     }
 }
+/// Palette plus resolved theme, passed by value to shared element helpers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Style {
+    pub colors: Palette,
+    pub theme: Theme,
+}
+
+impl Style {
+    #[must_use]
+    pub const fn new(colors: Palette, theme: Theme) -> Self {
+        Self { colors, theme }
+    }
+
+    /// Ink used on mauve fills.
+    #[must_use]
+    pub const fn ink(self) -> Rgba {
+        accent_ink(self.theme)
+    }
+}
 
 /// Rating hue: Again red, Hard peach, Good green, Easy blue.
 #[must_use]
@@ -146,55 +165,104 @@ pub const fn queue_color(code: u8, theme: Theme) -> Rgba {
     }
 }
 
-pub const FONT_FAMILY: &str = "CCL Nerd Font";
+/// Text-safe queue color. Latte green fails 4.5:1 on raised surfaces.
+#[must_use]
+pub const fn queue_text(code: u8, theme: Theme) -> Rgba {
+    match (theme, code) {
+        (Theme::Light, 2) => LATTE.text,
+        _ => queue_color(code, theme),
+    }
+}
+
+pub const FONT_FAMILY: &str = "Liberation Sans";
+pub const CJK_FAMILY: &str = "Noto Sans CJK JP";
+/// Last-resort family that still covers Latin, kana, and Nerd icons.
+pub const FONT_FALLBACK: &str = "CCL Nerd Font";
 
 /// Picks the first installed family from the mockup and Ranki fallbacks.
 #[must_use]
 pub fn detected_font_family() -> &'static str {
-    let candidates = font_candidates(None);
-    for candidate in candidates {
-        if let Ok(output) = std::process::Command::new("fc-match")
-            .args(["-f", "%{family}", candidate])
-            .output()
-            && output.status.success()
-        {
-            let matched = String::from_utf8_lossy(&output.stdout);
-            let family = matched.lines().next().unwrap_or("").trim();
-            if !family.is_empty() && !family.eq_ignore_ascii_case(candidate) {
-                continue;
-            }
-            if candidate.eq_ignore_ascii_case(FONT_FAMILY)
-                || family.eq_ignore_ascii_case(candidate)
-            {
-                return if candidate == "Inter" {
-                    "Inter"
-                } else {
-                    FONT_FAMILY
-                };
-            }
-        }
-    }
-    FONT_FAMILY
+    font_candidates(None)
+        .into_iter()
+        .find(|family| family_installed(family))
+        .unwrap_or(FONT_FALLBACK)
 }
 
-/// Font candidates, with CCL Nerd Font first and a CJK fallback last.
+/// Resolved UI family, cached after the first fontconfig probe.
+pub fn ui_font_family() -> &'static str {
+    static UI_FONT: std::sync::OnceLock<&'static str> =
+        std::sync::OnceLock::new();
+    UI_FONT.get_or_init(detected_font_family)
+}
+
+/// Japanese family for glyph runs that need a real CJK face.
+pub fn cjk_font_family() -> &'static str {
+    static CJK_FONT: std::sync::OnceLock<&'static str> =
+        std::sync::OnceLock::new();
+    CJK_FONT.get_or_init(|| {
+        [CJK_FAMILY, "Noto Sans JP"]
+            .into_iter()
+            .find(|family| family_installed(family))
+            .unwrap_or_else(ui_font_family)
+    })
+}
+
+/// True when the text needs the CJK face. Unifont is the wrong fallback.
+#[must_use]
+pub fn contains_cjk(text: &str) -> bool {
+    text.chars().any(|character| {
+        matches!(
+            u32::from(character),
+            0x3040..=0x30ff
+                | 0x3400..=0x4dbf
+                | 0x4e00..=0x9fff
+                | 0xf900..=0xfaff
+                | 0xff66..=0xff9f
+        )
+    })
+}
+
+/// Family for one text block. Mixed strings favor the CJK face.
+#[must_use]
+pub fn font_for_text(text: &str) -> &'static str {
+    if contains_cjk(text) {
+        cjk_font_family()
+    } else {
+        ui_font_family()
+    }
+}
+
+fn family_installed(family: &str) -> bool {
+    let Ok(output) = std::process::Command::new("fc-match")
+        .args(["-f", "%{family}", family])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split(',')
+        .any(|matched| matched.trim().eq_ignore_ascii_case(family))
+}
+
+/// Font candidates: clean sans and real CJK first, CCL Nerd Font last.
 #[must_use]
 pub fn font_candidates(matched: Option<&str>) -> Vec<&str> {
-    let mut candidates = vec![FONT_FAMILY];
-    if let Some(name) = matched
-        && !name.trim().is_empty()
-    {
+    let mut candidates =
+        vec![FONT_FAMILY, "Inter", "Noto Sans JP", "DejaVu Sans"];
+    if let Some(name) = matched {
         let first = name.split(',').next().unwrap_or(name).trim();
-        if !first.is_empty() && !first.eq_ignore_ascii_case(FONT_FAMILY) {
+        if !first.is_empty()
+            && !candidates
+                .iter()
+                .any(|family| family.eq_ignore_ascii_case(first))
+        {
             candidates.push(first);
         }
     }
-    if !candidates
-        .iter()
-        .any(|name| name.eq_ignore_ascii_case("noto sans jp"))
-    {
-        candidates.push("Noto Sans JP");
-    }
+    candidates.push(FONT_FALLBACK);
     candidates
 }
 
@@ -230,12 +298,6 @@ pub fn interval_label(interval: i32) -> String {
     } else {
         format!("{}y", interval / 365)
     }
-}
-
-/// Short label used by the scheduler controls.
-#[must_use]
-pub const fn scheduler_label(kind: SchedulerKind) -> &'static str {
-    kind.label()
 }
 
 #[cfg(test)]
@@ -299,12 +361,12 @@ mod tests {
     }
 
     #[test]
-    fn fonts_put_ccl_first_and_keep_cjk_fallback() {
-        assert_eq!(
-            font_candidates(Some("Inter, sans-serif")),
-            vec!["CCL Nerd Font", "Inter", "Noto Sans JP"]
-        );
-        assert_eq!(font_candidates(None)[0], "CCL Nerd Font");
+    fn fonts_put_clean_sans_first_and_keep_ccl_fallback() {
+        let candidates = font_candidates(Some("Inter, sans-serif"));
+        assert_eq!(candidates[0], "Liberation Sans");
+        assert_eq!(candidates.last(), Some(&"CCL Nerd Font"));
+        assert!(candidates.contains(&"Noto Sans JP"));
+        assert_eq!(font_candidates(None).last(), Some(&"CCL Nerd Font"));
     }
 
     #[test]

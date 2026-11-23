@@ -2,15 +2,13 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement, IntoElement,
-    ParentElement, StatefulInteractiveElement, Styled, Window, div, px, svg,
+    ParentElement, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use crate::{
     app::{Confirmation, Root, UiAction, View},
-    components::{
-        ClickHandler, icon, keycap, primary_button, secondary_button,
-    },
-    theme::{NAV_WIDTH, accent_ink},
+    components::{ClickHandler, icon, keycap, secondary_button},
+    theme::{NAV_WIDTH, Style, alpha},
 };
 
 impl Root {
@@ -19,23 +17,47 @@ impl Root {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = self.colors();
-        let theme = self.theme();
+        let style = Style::new(colors, self.theme());
         let active = self.view;
-        let add = primary_button(
-            "Add card",
-            colors,
-            theme,
-            self.action_click(UiAction::OpenAdd),
-        )
-        .w_full()
-        .child(keycap("A", colors, true));
+        let add_selected = active == View::AddCard;
+        let add_ink = if add_selected {
+            style.ink()
+        } else {
+            colors.subtext
+        };
+        let mut add = div()
+            .id("nav-add")
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(44.))
+            .px(px(14.))
+            .rounded(px(12.))
+            .text_size(px(14.))
+            .text_color(add_ink)
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .cursor_pointer()
+            .on_click(self.action_click(UiAction::OpenAdd))
+            .child(icon("icon-plus", 18., add_ink))
+            .child("Add card")
+            .child(div().flex_1())
+            .child(keycap("A", colors, add_selected));
+        if add_selected {
+            add = add.bg(colors.mauve).text_color(style.ink());
+        }
+        let add = add.w_full();
         let nav = |label: &'static str,
                    icon_name: &'static str,
                    key: &'static str,
                    item: View,
                    enabled: bool,
                    cx: &mut Context<Self>| {
-            let selected = active == item;
+            let selected = enabled && active == item;
+            let ink = if selected {
+                colors.mauve
+            } else {
+                colors.subtext
+            };
             let mut row = div()
                 .id("auto-nav-1")
                 .flex()
@@ -45,15 +67,10 @@ impl Root {
                 .px(px(12.))
                 .rounded(px(10.))
                 .text_size(px(14.))
+                .text_color(ink)
                 .font_weight(gpui::FontWeight::SEMIBOLD);
             if selected {
-                row = row
-                    .bg(crate::theme::alpha(colors.mauve, 0.16))
-                    .text_color(colors.mauve);
-            } else if enabled {
-                row = row.text_color(colors.subtext);
-            } else {
-                row = row.text_color(crate::theme::alpha(colors.subtext, 0.55));
+                row = row.bg(alpha(colors.mauve, 0.16));
             }
             if enabled {
                 row = row.on_click(cx.listener(
@@ -62,7 +79,7 @@ impl Root {
                     },
                 ));
             }
-            row.child(icon(icon_name, 18.))
+            row.child(icon(icon_name, 18., ink))
                 .child(label.to_owned())
                 .child(div().flex_1())
                 .child(keycap(key, colors, false))
@@ -88,9 +105,20 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .px(px(8.))
-                    .pb(px(20.))
-                    .child(svg().path("rai.svg").w(px(32.)).h(px(32.)))
+                    .px(px(6.))
+                    .pb(px(18.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(32.))
+                            .h(px(32.))
+                            .flex_none()
+                            .rounded(px(10.))
+                            .bg(colors.mauve)
+                            .child(icon("rai.svg", 24., style.ink())),
+                    )
                     .child(
                         div()
                             .text_size(px(18.))
@@ -123,7 +151,7 @@ impl Root {
                     .text_size(px(12.))
                     .text_color(colors.subtext)
                     .child(crate::components::dot(status_color, 8.))
-                    .child("Local collection"),
+                    .child(self.updated_label()),
             )
     }
 
@@ -214,8 +242,7 @@ impl Root {
                                     ))
                                     .child(primary(
                                         accept,
-                                        colors,
-                                        accent_ink(self.theme()),
+                                        Style::new(colors, self.theme()),
                                         cx,
                                     )),
                             ),
@@ -278,8 +305,7 @@ impl Root {
 
 fn primary(
     label: &'static str,
-    colors: crate::theme::Palette,
-    ink: gpui::Rgba,
+    style: Style,
     cx: &Context<Root>,
 ) -> impl IntoElement {
     div()
@@ -287,8 +313,8 @@ fn primary(
         .h(px(40.))
         .px(px(16.))
         .rounded(px(12.))
-        .bg(colors.mauve)
-        .text_color(ink)
+        .bg(style.colors.mauve)
+        .text_color(style.ink())
         .text_size(px(14.))
         .flex()
         .items_center()

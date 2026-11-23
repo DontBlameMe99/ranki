@@ -4,7 +4,7 @@ use std::{ops::Range, sync::Arc};
 
 use gpui::{
     App, Bounds, Context, Element, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, GlobalElementId,
+    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
@@ -52,6 +52,7 @@ pub struct TextField {
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
+    placeholder_color: Hsla,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -71,6 +72,7 @@ impl TextField {
             focus_handle: cx.focus_handle(),
             content: String::new().into(),
             placeholder: placeholder.into(),
+            placeholder_color: gpui::hsla(0., 0., 0.5, 1.0),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -100,8 +102,24 @@ impl TextField {
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.set_text("", cx);
     }
+
+    /// Seeds an initial value without firing the edit hook.
+    pub fn seed(
+        &mut self,
+        text: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.content = text.into();
+        self.selected_range = self.content.len()..self.content.len();
+        cx.notify();
+    }
     pub fn set_edit_hook(&mut self, hook: EditHook) {
         self.edit_hook = Some(hook);
+    }
+
+    /// Placeholder ink follows the palette so it keeps subtext contrast.
+    pub fn set_placeholder_color(&mut self, color: Hsla) {
+        self.placeholder_color = color;
     }
 
     fn notify_edit(&self, cx: &mut Context<Self>) {
@@ -197,12 +215,7 @@ impl TextField {
         line.closest_index_for_x(point.x - bounds.left())
     }
 
-    fn backspace(
-        &mut self,
-        _: &FieldBackspace,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn backspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             let start = self.previous_boundary(self.cursor_offset());
             self.select_to(start, cx);
@@ -210,12 +223,7 @@ impl TextField {
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn delete(
-        &mut self,
-        _: &FieldDelete,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             let end = self.next_boundary(self.selected_range.end);
             self.selected_range.end = end;
@@ -224,7 +232,7 @@ impl TextField {
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn left(&mut self, _: &FieldLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn left(&mut self, cx: &mut Context<Self>) {
         let target = if self.selected_range.is_empty() {
             self.previous_boundary(self.cursor_offset())
         } else {
@@ -233,12 +241,7 @@ impl TextField {
         self.move_to(target, cx);
     }
 
-    fn right(
-        &mut self,
-        _: &FieldRight,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn right(&mut self, cx: &mut Context<Self>) {
         let target = if self.selected_range.is_empty() {
             self.next_boundary(self.selected_range.end)
         } else {
@@ -247,41 +250,26 @@ impl TextField {
         self.move_to(target, cx);
     }
 
-    fn select_left(
-        &mut self,
-        _: &FieldSelectLeft,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_left(&mut self, cx: &mut Context<Self>) {
         let target = self.previous_boundary(self.cursor_offset());
         self.select_to(target, cx);
     }
 
-    fn select_right(
-        &mut self,
-        _: &FieldSelectRight,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_right(&mut self, cx: &mut Context<Self>) {
         let target = self.next_boundary(self.cursor_offset());
         self.select_to(target, cx);
     }
 
-    fn select_all(
-        &mut self,
-        _: &FieldSelectAll,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_all(&mut self, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
     }
 
-    fn home(&mut self, _: &FieldHome, _: &mut Window, cx: &mut Context<Self>) {
+    fn home(&mut self, cx: &mut Context<Self>) {
         self.move_to(0, cx);
     }
 
-    fn end(&mut self, _: &FieldEnd, _: &mut Window, cx: &mut Context<Self>) {
+    fn end(&mut self, cx: &mut Context<Self>) {
         self.move_to(self.content.len(), cx);
     }
 }
@@ -431,15 +419,27 @@ impl Render for TextField {
             .id("ranki-text-input")
             .track_focus(&focus)
             .key_context("ranki_input")
-            .on_action(cx.listener(Self::backspace))
-            .on_action(cx.listener(Self::delete))
-            .on_action(cx.listener(Self::left))
-            .on_action(cx.listener(Self::right))
-            .on_action(cx.listener(Self::select_left))
-            .on_action(cx.listener(Self::select_right))
-            .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::home))
-            .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(|this, _: &FieldBackspace, window, cx| {
+                this.backspace(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FieldDelete, window, cx| {
+                this.delete(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FieldLeft, _, cx| this.left(cx)))
+            .on_action(cx.listener(|this, _: &FieldRight, _, cx| {
+                this.right(cx);
+            }))
+            .on_action(cx.listener(|this, _: &FieldSelectLeft, _, cx| {
+                this.select_left(cx);
+            }))
+            .on_action(cx.listener(|this, _: &FieldSelectRight, _, cx| {
+                this.select_right(cx);
+            }))
+            .on_action(cx.listener(|this, _: &FieldSelectAll, _, cx| {
+                this.select_all(cx);
+            }))
+            .on_action(cx.listener(|this, _: &FieldHome, _, cx| this.home(cx)))
+            .on_action(cx.listener(|this, _: &FieldEnd, _, cx| this.end(cx)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -469,6 +469,7 @@ impl Render for TextField {
             .child(TextElement {
                 input: cx.entity(),
                 placeholder,
+                placeholder_color: self.placeholder_color,
                 text,
                 selected,
                 marked,
@@ -479,6 +480,7 @@ impl Render for TextField {
 struct TextElement {
     input: Entity<TextField>,
     placeholder: SharedString,
+    placeholder_color: Hsla,
     text: SharedString,
     selected: Range<usize>,
     marked: Option<Range<usize>>,
@@ -536,13 +538,15 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let style = window.text_style();
         let (display, color) = if self.text.is_empty() {
-            (self.placeholder.clone(), hsla(0., 0., 0., 0.4))
+            (self.placeholder.clone(), self.placeholder_color)
         } else {
             (self.text.clone(), style.color)
         };
+        let mut font = style.font();
+        font.family = crate::theme::font_for_text(&display).into();
         let run = TextRun {
             len: display.len(),
-            font: style.font(),
+            font,
             color,
             background_color: None,
             underline: None,

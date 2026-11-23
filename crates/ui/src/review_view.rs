@@ -1,43 +1,51 @@
 //! Learning screen: header, fixed card stage, reveal and rating controls.
 
 use gpui::{
-    ClickEvent, Context, InteractiveElement, IntoElement, ParentElement,
+    ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, Rgba,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
+use ranki_model::{CardType, Note, NoteModel};
 
 use crate::{
-    app::{Phase, Root, UiAction, rating_name},
+    app::{Phase, Root, UiAction, leaf_deck_totals, rating_name},
     card_view,
-    components::{icon, keycap, progress_bar_width},
+    components::{chip, icon, keycap, progress_bar_width},
     theme::{
-        CONTROL_HEIGHT, FOOTER_HEIGHT, NAV_WIDTH, PROGRESS_WIDTH, RATING_GAP,
+        CONTROL_HEIGHT, FOOTER_HEIGHT, PROGRESS_WIDTH, RATING_GAP,
         STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS, STAGE_WIDTH, TOPBAR_HEIGHT,
-        accent_ink, alpha, interval_label, rating_fill, rating_label,
+        alpha, interval_label, rating_fill, rating_label,
     },
 };
 
 impl Root {
     pub(crate) fn render_review(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = self.colors();
-        let theme = self.theme();
-        let stats = self
-            .selected
-            .and_then(|index| self.stats.get(index))
-            .copied()
-            .unwrap_or_default();
-        let total = self.review.session_total.max(1);
-        let fraction = self.review.answered as f32 / total as f32;
-        let usable = f32::from(window.viewport_size().width) - NAV_WIDTH - 32.0;
-        let progress_width = (PROGRESS_WIDTH).min((usable - 460.0).max(150.0));
+        let style = self.style();
+        let stats = if self.review.scope_all {
+            leaf_deck_totals(&self.decks, &self.stats)
+        } else {
+            self.selected
+                .and_then(|index| self.stats.get(index))
+                .copied()
+                .unwrap_or_default()
+        };
+        let total = self.review.session_total;
+        let fraction = if total == 0 {
+            0.0
+        } else {
+            self.review.answered as f32 / total as f32
+        };
         let current = self.review.current.clone();
         let phase = self.review.phase;
         let question = self.review.question.clone();
         let answer = self.review.answer.clone();
+        let note = self.review.note.clone();
         let status = self.review.status.clone();
+        let active_queue = current.as_ref().map(|card| card.card_type);
         let collection_start = self.store.collection_created().unwrap_or(0);
         let now = Self::now();
         let previews = if let Some(card) = current.as_ref() {
@@ -70,12 +78,60 @@ impl Root {
         } else {
             [0; 4]
         };
-        let deck_name = self
-            .selected
-            .and_then(|index| self.decks.get(index))
-            .map_or_else(|| "All decks".to_owned(), |deck| deck.name.clone());
+        let deck_name = if self.review.scope_all {
+            String::from("All decks")
+        } else {
+            self.selected
+                .and_then(|index| self.decks.get(index))
+                .map_or_else(
+                    || String::from("All decks"),
+                    |deck| deck.name.replace("::", " › "),
+                )
+        };
+        let tags = note
+            .as_ref()
+            .map(|note| note.tags.clone())
+            .unwrap_or_default();
+        let reading = reading_label(&self.models, note.as_ref());
         let reveal = self.action_click(UiAction::Reveal);
         let end = self.action_click(UiAction::EndSession);
+        let queue_count = |name: &str,
+                           value: usize,
+                           color: Rgba,
+                           ink: Rgba,
+                           active: bool| {
+            let mut wrapper = div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(2.))
+                .pb(px(4.))
+                .border_b_2()
+                .border_color(if active { color } else { alpha(color, 0.0) });
+            if active {
+                wrapper = wrapper.child(
+                    div()
+                        .text_size(px(27.))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(ink)
+                        .child(format!("{value}")),
+                );
+            } else {
+                wrapper = wrapper.child(
+                    div()
+                        .text_size(px(11.))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(ink)
+                        .child(format!("{value}")),
+                );
+            }
+            wrapper.child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(colors.subtext)
+                    .child(name.to_owned()),
+            )
+        };
         let mut screen = div().size_full().flex().flex_col();
 
         screen = screen.child(
@@ -88,7 +144,7 @@ impl Root {
                 .px(px(32.))
                 .child(
                     div()
-                        .id("auto-review_view-1")
+                        .id("review-end")
                         .flex()
                         .items_center()
                         .gap(px(10.))
@@ -100,7 +156,7 @@ impl Root {
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .cursor_pointer()
                         .on_click(end)
-                        .child(icon("icon-arrow-left", 18.))
+                        .child(icon("icon-arrow-left", 18., colors.text))
                         .child("End session")
                         .child(keycap("Esc", colors, false)),
                 )
@@ -114,147 +170,174 @@ impl Root {
                             div()
                                 .text_size(px(14.))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(format!(
-                                    "{} · {}",
-                                    deck_name,
-                                    crate::theme::scheduler_label(
-                                        self.options.scheduler
-                                    )
-                                )),
+                                .child(deck_name),
                         )
-                        .child(progress_bar_width(
-                            fraction,
-                            colors,
-                            progress_width,
-                        ))
-                        .child(
-                            div()
-                                .w(px(progress_width))
-                                .text_size(px(11.))
-                                .text_color(colors.subtext)
-                                .child(format!(
-                                    "{} / {} reviewed",
-                                    self.review.answered,
-                                    self.review.session_total
-                                )),
-                        ),
+                        .children((total > 0).then(|| {
+                            progress_bar_width(fraction, colors, PROGRESS_WIDTH)
+                        })),
                 )
                 .child(
                     div()
                         .flex()
                         .items_end()
-                        .gap(px(12.))
+                        .gap(px(22.))
                         .child(queue_count(
                             "New",
                             stats.new_cards,
                             colors.blue,
-                            colors,
-                            false,
+                            crate::theme::queue_text(0, self.theme()),
+                            active_queue == Some(CardType::New),
                         ))
                         .child(queue_count(
                             "Learning",
                             stats.learning_cards,
                             colors.red,
-                            colors,
-                            false,
+                            crate::theme::queue_text(1, self.theme()),
+                            matches!(
+                                active_queue,
+                                Some(CardType::Learning | CardType::Relearning)
+                            ),
                         ))
                         .child(queue_count(
                             "Review",
                             stats.review_cards,
                             colors.green,
-                            colors,
-                            true,
+                            crate::theme::queue_text(2, self.theme()),
+                            active_queue == Some(CardType::Review),
                         )),
                 ),
         );
 
-        let stage = div()
-            .w(px(STAGE_WIDTH))
-            .h(px(STAGE_HEIGHT))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .p(px(STAGE_PADDING))
-            .rounded(px(STAGE_RADIUS))
-            .bg(colors.surface0)
-            .child(top_row(colors))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(10.))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(colors.subtext)
-                            .child("RECALL THE MEANING"),
-                    )
-                    .child(if let Some(card) = question.as_ref() {
-                        card_view::rendered_text(
-                            card,
-                            colors,
-                            if phase == Phase::Answer { 44. } else { 84. },
-                        )
-                        .into_any_element()
-                    } else {
-                        div()
-                            .text_size(px(84.))
-                            .child("No cards due")
-                            .into_any_element()
-                    })
-                    .child(
-                        div()
-                            .text_size(px(18.))
-                            .text_color(colors.subtext)
-                            .child(reading_label(question.as_ref())),
-                    ),
-            );
-        let stage = if let Some(card) = question.as_ref() {
-            match card_view::media_column(&card.media, colors) {
-                Some(media) => stage.child(media),
-                None => stage,
-            }
-        } else {
-            stage
-        };
-        let stage = if let Some(card) = question.as_ref()
-            && !card.masks.is_empty()
-        {
-            let answer_phase = phase == Phase::Answer;
-            stage.child(card_view::occlusion_layer(
-                &card.masks,
-                colors,
-                answer_phase,
-            ))
-        } else {
-            stage
-        };
-        let stage = if phase == Phase::Answer {
-            stage
-                .child(separator(colors))
+        let body = if current.is_none() {
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
                 .child(
                     div()
-                        .text_size(px(36.))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(colors.mauve)
-                        .child(if let Some(card) = answer.as_ref() {
-                            card_view::rendered_text(card, colors, 32.)
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(8.))
+                        .w(px(STAGE_WIDTH))
+                        .h(px(240.))
+                        .rounded(px(STAGE_RADIUS))
+                        .bg(colors.surface0)
+                        .child(
+                            div()
+                                .text_size(px(32.))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .child("All caught up"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .text_color(colors.subtext)
+                                .child("No cards are due right now"),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            let mut stage = div()
+                .w(px(STAGE_WIDTH))
+                .h(px(STAGE_HEIGHT))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .p(px(STAGE_PADDING))
+                .rounded(px(STAGE_RADIUS))
+                .bg(colors.surface0)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(div().flex().gap(px(6.)).children(
+                            tags.iter().map(|tag| chip(tag.clone(), colors)),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .h(px(40.))
+                                .px(px(12.))
+                                .rounded(px(20.))
+                                .bg(alpha(colors.mauve, 0.16))
+                                .text_color(colors.mauve)
+                                .child(icon("icon-volume", 20., colors.mauve))
+                                .child(keycap("R", colors, false)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(10.))
+                        .children((phase == Phase::Question).then(|| {
+                            div()
+                                .text_size(px(11.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(colors.subtext)
+                                .child("RECALL THE MEANING")
+                        }))
+                        .child(if let Some(card) = question.as_ref() {
+                            card_view::rendered_text(card, colors.text, 84.)
                                 .into_any_element()
                         } else {
-                            div().into_any_element()
-                        }),
-                )
-                .child(feedback(colors))
-        } else {
-            stage
-        };
-        let stage = gpui::image_cache(self.images.clone()).child(stage);
+                            div()
+                                .text_size(px(84.))
+                                .child("No cards due")
+                                .into_any_element()
+                        })
+                        .children(reading.as_ref().map(|text| {
+                            div()
+                                .text_size(px(18.))
+                                .text_color(colors.subtext)
+                                .child(text.clone())
+                        }))
+                        .children(
+                            (phase == Phase::Answer).then(|| separator(colors)),
+                        )
+                        .children((phase == Phase::Answer).then(|| {
+                            div()
+                                .text_size(px(36.))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(colors.mauve)
+                                .child(if let Some(card) = answer.as_ref() {
+                                    card_view::rendered_text(
+                                        card,
+                                        colors.mauve,
+                                        32.,
+                                    )
+                                    .into_any_element()
+                                } else {
+                                    div().into_any_element()
+                                })
+                        })),
+                );
+            if let Some(card) = question.as_ref()
+                && let Some(media) =
+                    card_view::media_column(&card.media, colors)
+            {
+                stage = stage.child(media);
+            }
+            if let Some(card) = question.as_ref()
+                && !card.masks.is_empty()
+            {
+                stage = stage.child(card_view::occlusion_layer(
+                    &card.masks,
+                    colors,
+                    phase == Phase::Answer,
+                ));
+            }
+            let stage = gpui::image_cache(self.images.clone()).child(stage);
 
-        screen = screen.child(
             div()
                 .flex_1()
                 .flex()
@@ -265,7 +348,7 @@ impl Root {
                 .child(stage)
                 .child(if phase == Phase::Question {
                     div()
-                        .id("auto-review_view-2")
+                        .id("review-reveal")
                         .w(px(STAGE_WIDTH))
                         .h(px(CONTROL_HEIGHT))
                         .flex()
@@ -274,7 +357,7 @@ impl Root {
                         .gap(px(12.))
                         .rounded(px(18.))
                         .bg(colors.mauve)
-                        .text_color(accent_ink(theme))
+                        .text_color(style.ink())
                         .text_size(px(17.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .cursor_pointer()
@@ -287,12 +370,13 @@ impl Root {
                 })
                 .child(
                     div()
-                        .mt(px(8.))
                         .text_size(px(12.))
                         .text_color(colors.subtext)
                         .child(status.unwrap_or_default()),
-                ),
-        );
+                )
+                .into_any_element()
+        };
+        screen = screen.child(body);
 
         screen.child(
             div()
@@ -320,44 +404,12 @@ impl Root {
     }
 }
 
-fn top_row(colors: crate::theme::Palette) -> gpui::Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .px(px(10.))
-                .py(px(5.))
-                .rounded(px(10.))
-                .bg(colors.surface1)
-                .text_size(px(12.))
-                .child("Japanese N5"),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .h(px(40.))
-                .px(px(12.))
-                .rounded(px(20.))
-                .bg(alpha(colors.mauve, 0.16))
-                .text_color(colors.mauve)
-                .text_size(px(13.))
-                .child(icon("icon-volume", 20.))
-                .child("Audio"),
-        )
-}
-
 fn separator(colors: crate::theme::Palette) -> gpui::Div {
     div()
         .flex()
         .items_center()
         .gap(px(12.))
+        .w_full()
         .my(px(10.))
         .child(div().h(px(1.)).flex_1().bg(colors.surface1))
         .child(
@@ -370,73 +422,17 @@ fn separator(colors: crate::theme::Palette) -> gpui::Div {
         .child(div().h(px(1.)).flex_1().bg(colors.surface1))
 }
 
-fn feedback(colors: crate::theme::Palette) -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .p(px(10.))
-        .px(px(14.))
-        .rounded(px(16.))
-        .bg(colors.base)
-        .child(div().text_size(px(17.)).child("毎日りんごを食べる。"))
-        .child(
-            div()
-                .text_size(px(13.))
-                .text_color(colors.subtext)
-                .child("I eat an apple every day."),
-        )
-}
-
-fn reading_label(card: Option<&card_view::RenderedCard>) -> String {
-    card.map_or_else(String::new, |card| {
-        let text = card.text.lines().next().unwrap_or("");
-        if text.is_ascii() {
-            String::new()
-        } else {
-            format!("{text} · review")
-        }
-    })
-}
-
-fn queue_count(
-    name: &str,
-    value: usize,
-    color: gpui::Rgba,
-    colors: crate::theme::Palette,
-    active: bool,
-) -> gpui::Div {
-    let mut wrapper = div()
-        .flex()
-        .flex_col()
-        .items_center()
-        .gap(px(2.))
-        .pb(px(4.))
-        .border_b_2()
-        .border_color(if active { color } else { alpha(color, 0.0) });
-    if active {
-        wrapper = wrapper.child(
-            div()
-                .text_size(px(27.))
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(color)
-                .child(format!("{value}")),
-        );
-    } else {
-        wrapper = wrapper.child(
-            div()
-                .text_size(px(11.))
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(color)
-                .child(format!("{value}")),
-        );
-    }
-    wrapper.child(
-        div()
-            .text_size(px(13.))
-            .text_color(colors.subtext)
-            .child(name.to_owned()),
-    )
+/// A field named Reading, Kana, or Pronunciation, when the note has one.
+fn reading_label(models: &[NoteModel], note: Option<&Note>) -> Option<String> {
+    let note = note?;
+    let model = models.iter().find(|model| model.id == note.model_id)?;
+    let index = model.fields.iter().position(|field| {
+        field.eq_ignore_ascii_case("reading")
+            || field.eq_ignore_ascii_case("kana")
+            || field.eq_ignore_ascii_case("pronunciation")
+    })?;
+    let text = note.fields.get(index)?.trim();
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
 fn rating_row(
@@ -473,10 +469,12 @@ fn rating_row(
                 UiAction::Grade(ranki_model::Rating::Easy)
             }
         };
-        let (fill_color, label_color) = rating_colors(code, colors);
+        let theme = theme_from(colors);
+        let hue = rating_fill(code, theme);
+        let label_color = rating_label(code, theme);
         row = row.child(
             div()
-                .id("auto-review_view-3")
+                .id("review-rating")
                 .flex_1()
                 .h(px(CONTROL_HEIGHT))
                 .flex()
@@ -485,9 +483,9 @@ fn rating_row(
                 .justify_center()
                 .gap(px(4.))
                 .rounded(px(18.))
-                .bg(fill_color)
+                .bg(alpha(hue, 0.14))
                 .border_1()
-                .border_color(alpha(rating_fill(code, theme_from(colors)), 0.4))
+                .border_color(alpha(hue, 0.4))
                 .cursor_pointer()
                 .on_click(cx.listener(
                     move |this, _: &ClickEvent, window, cx| {
@@ -497,7 +495,7 @@ fn rating_row(
                 .child(
                     div()
                         .text_size(px(12.))
-                        .text_color(label_color)
+                        .text_color(colors.text)
                         .child(interval_label(interval)),
                 )
                 .child(
@@ -514,10 +512,7 @@ fn rating_row(
                                 .px(px(6.))
                                 .py(px(2.))
                                 .rounded(px(6.))
-                                .bg(alpha(
-                                    rating_fill(code, theme_from(colors)),
-                                    0.2,
-                                ))
+                                .bg(alpha(hue, 0.2))
                                 .text_size(px(11.))
                                 .child(format!("{}", index + 1)),
                         ),
@@ -535,29 +530,17 @@ fn theme_from(colors: crate::theme::Palette) -> crate::theme::Theme {
     }
 }
 
-fn rating_colors(
-    code: u8,
-    colors: crate::theme::Palette,
-) -> (gpui::Rgba, gpui::Rgba) {
-    let theme = theme_from(colors);
-    (
-        alpha(
-            rating_fill(code, theme),
-            if theme == crate::theme::Theme::Dark {
-                0.14
-            } else {
-                0.10
-            },
-        ),
-        rating_label(code, theme),
-    )
-}
-
 fn footer_action(
     label: &str,
     key: &str,
     colors: crate::theme::Palette,
 ) -> gpui::Div {
+    let icon_name = match label {
+        "Undo" => "icon-undo",
+        "Flag" => "icon-flag",
+        "Edit" => "icon-more",
+        _ => "icon-x",
+    };
     div()
         .flex()
         .items_center()
@@ -566,7 +549,8 @@ fn footer_action(
         .px(px(12.))
         .rounded(px(10.))
         .text_size(px(13.))
-        .text_color(alpha(colors.subtext, 0.6))
+        .text_color(colors.subtext)
+        .child(icon(icon_name, 16., colors.subtext))
         .child(label.to_owned())
         .child(keycap(key.to_owned(), colors, false))
 }

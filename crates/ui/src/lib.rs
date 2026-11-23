@@ -7,29 +7,21 @@
     clippy::arithmetic_side_effects,
     clippy::cast_precision_loss,
     clippy::clone_on_ref_ptr,
-    clippy::default_trait_access,
-    clippy::field_reassign_with_default,
     clippy::inconsistent_struct_constructor,
     clippy::indexing_slicing,
     clippy::integer_division,
     clippy::items_after_statements,
-    clippy::map_unwrap_or,
     clippy::match_same_arms,
     clippy::missing_const_for_fn,
     clippy::needless_pass_by_ref_mut,
     clippy::needless_pass_by_value,
     clippy::option_if_let_else,
-    clippy::redundant_closure,
-    clippy::redundant_pub_crate,
-    clippy::semicolon_if_nothing_returned,
     clippy::shadow_reuse,
     clippy::similar_names,
     clippy::too_many_lines,
     clippy::type_complexity,
-    clippy::uninlined_format_args,
     clippy::unreadable_literal,
     clippy::struct_excessive_bools,
-    clippy::use_self,
     clippy::excessive_nesting,
     reason = "GPUI view builders and pure helper models favor direct element trees and index math over extra abstraction"
 )]
@@ -72,7 +64,11 @@ pub fn run(store: Box<dyn Store>, options: Options) {
                 },
                 |window, cx| {
                     cx.new(|cx| {
-                        let root = app::Root::new(store, options, window, cx);
+                        let root = app::Root::new(
+                            app::Launch { store, options },
+                            window,
+                            cx,
+                        );
                         root.observe_appearance(window, cx);
                         root
                     })

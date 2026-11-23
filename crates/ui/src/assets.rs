@@ -4,7 +4,29 @@ use std::{borrow::Cow, fs, path::PathBuf};
 
 use gpui::{AssetSource, Result, SharedString};
 
-const RAI: &str = include_str!("../../../assets/rai.svg");
+// Crane's source filter drops non-Rust assets, so the icon ships as a
+// constant. `assets/rai.svg` stays the editable copy.
+const RAI: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="800" viewBox="0 0 211.6667 211.66669">
+  <defs>
+    <filter id="glow" style="color-interpolation-filters:sRGB;" x="-0.056453245" y="-0.13570336" width="1.1329358" height="1.3195536">
+      <feOffset dx="3" dy="3"/>
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feFlood flood-color="rgb(0,0,0)" flood-opacity="1" result="flood"/>
+      <feComposite in="flood" in2="SourceGraphic" operator="in" result="composite"/>
+      <feBlend in="blur" in2="composite" mode="normal" result="fbSourceGraphic"/>
+      <feColorMatrix in="fbSourceGraphic" values="0 0 0 -1 0 0 0 0 -1 0 0 0 0 -1 0 0 0 0 1 0"/>
+      <feColorMatrix in="fbSourceGraphic" values="1.3 0 0 0.0345 -0.15 0 1.3 0 0.0345 -0.15 0 0 1.3 0.0345 -0.15 0 0 0 1 0"/>
+    </filter>
+  </defs>
+  <text
+     xml:space="preserve"
+     style="font-weight:bold;font-size:79.375px;font-family:Comfortaa;fill:#000000;fill-rule:evenodd;stroke:#181825;stroke-width:2.51118;stroke-opacity:1;stroke-linejoin:round;paint-order:markers fill stroke;filter:url(#glow)"
+     x="4.7136173"
+     y="147.98276"
+     transform="translate(23.41563,0.95911) matrix(1.0246445,0,0,0.96727946,17.908656,-8.9300719)"><tspan style="fill:#cba6f7">r</tspan><tspan style="fill:#94e2d5">a</tspan><tspan style="fill:#f38ba8">i</tspan></text>
+</svg>
+"#;
 
 fn icon(body: &str) -> String {
     format!(
@@ -56,6 +78,11 @@ const ICONS: &[(&str, &str)] = &[
         "icon-pencil",
         "<path d=\"M12 20h9\"/><path d=\"M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z\"/>",
     ),
+    (
+        "icon-undo",
+        "<path d=\"M3 7v6h6\"/><path d=\"M3 13a9 9 0 1 0 3-7\"/>",
+    ),
+    ("icon-flag", "<path d=\"M5 21V4h13l-2 4 2 4H5\"/>"),
     (
         "icon-tag",
         "<path d=\"M20.6 13.4 12 22l-9-9V3h10l7.6 7.6a2 2 0 0 1 0 2.8z\"/><circle cx=\"7.5\" cy=\"7.5\" r=\"1\"/>",
@@ -110,7 +137,7 @@ impl AssetSource for Assets {
 mod tests {
     use gpui::AssetSource;
 
-    use super::Assets;
+    use super::{Assets, RAI};
 
     #[test]
     fn embedded_icons_and_logo_are_available() {
@@ -120,5 +147,14 @@ mod tests {
         assert!(assets.load("rai.svg").unwrap().is_some());
         assert!(assets.load("icon-plus").unwrap().is_some());
         assert!(assets.load("missing-file").unwrap().is_none());
+    }
+
+    #[test]
+    fn embedded_logo_matches_the_asset_copy() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/rai.svg");
+        if let Ok(svg) = std::fs::read_to_string(path) {
+            assert!(RAI.contains(svg.trim()));
+        }
     }
 }

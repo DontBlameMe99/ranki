@@ -2,44 +2,42 @@
 
 use gpui::{
     App, ClickEvent, Div, InteractiveElement, IntoElement, ParentElement, Rgba,
-    SharedString, Stateful, StatefulInteractiveElement, Styled, Svg, Window,
-    div, px, svg,
+    SharedString, StatefulInteractiveElement, Styled, Svg, Window, div, px,
+    svg,
 };
 
-use crate::theme::{Palette, accent_ink, alpha};
+use crate::theme::{Palette, Style, alpha};
 
 pub type ClickHandler =
     Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 /// Lucide-style icon served by the embedded asset source.
+///
+/// GPUI paints an SVG mask in the element's own text color, so every call
+/// must name its tint.
 #[must_use]
-pub fn icon(name: &'static str, size: f32) -> Svg {
-    svg().path(name).w(px(size)).h(px(size)).flex_none()
+pub fn icon(name: &'static str, size: f32, color: Rgba) -> Svg {
+    svg()
+        .path(name)
+        .w(px(size))
+        .h(px(size))
+        .flex_none()
+        .text_color(color)
 }
 
+/// 36x36 tinted tile holding a hue-colored icon.
 #[must_use]
-pub fn primary_button(
-    label: impl Into<SharedString>,
-    colors: Palette,
-    theme: crate::theme::Theme,
-    on_click: ClickHandler,
-) -> Stateful<Div> {
+pub fn icon_tile(name: &'static str, hue: Rgba) -> Div {
     div()
-        .id("auto-components-1")
         .flex()
         .items_center()
         .justify_center()
-        .gap(px(8.))
-        .h(px(44.))
-        .px(px(16.))
-        .rounded(px(12.))
-        .bg(colors.mauve)
-        .text_color(accent_ink(theme))
-        .text_size(px(14.))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .cursor_pointer()
-        .on_click(on_click)
-        .child(label.into())
+        .w(px(36.))
+        .h(px(36.))
+        .flex_none()
+        .rounded(px(10.))
+        .bg(alpha(hue, 0.16))
+        .child(icon(name, 18., hue))
 }
 
 #[must_use]
@@ -70,8 +68,7 @@ pub fn secondary_button(
 #[must_use]
 pub fn small_button(
     label: impl Into<SharedString>,
-    colors: Palette,
-    theme: crate::theme::Theme,
+    style: Style,
     on_click: ClickHandler,
 ) -> impl IntoElement {
     div()
@@ -82,8 +79,8 @@ pub fn small_button(
         .h(px(30.))
         .px(px(14.))
         .rounded(px(9.))
-        .bg(colors.mauve)
-        .text_color(accent_ink(theme))
+        .bg(style.colors.mauve)
+        .text_color(style.ink())
         .text_size(px(13.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .cursor_pointer()
@@ -91,31 +88,41 @@ pub fn small_button(
         .child(label.into())
 }
 
-/// Small key badge, dark ink on mauve fills and muted ink elsewhere.
+/// Small key badge. Mauve fills use crust ink on an 18% crust notch.
 #[must_use]
 pub fn keycap(
     label: impl Into<SharedString>,
     colors: Palette,
     on_accent: bool,
 ) -> Div {
-    let ink = if on_accent {
-        alpha(colors.crust, 0.18)
+    let (ink, fill) = if on_accent {
+        (colors.crust, alpha(colors.crust, 0.18))
     } else {
-        colors.subtext
+        (colors.subtext, colors.surface1)
     };
     div()
         .flex_none()
         .px(px(6.))
         .py(px(2.))
         .rounded(px(6.))
-        .bg(if on_accent {
-            alpha(colors.crust, 0.18)
-        } else {
-            colors.surface1
-        })
+        .bg(fill)
         .text_color(ink)
         .text_size(px(11.))
         .font_weight(gpui::FontWeight::BOLD)
+        .child(label.into())
+}
+
+/// Rounded tag chip from a note tag.
+#[must_use]
+pub fn chip(label: impl Into<SharedString>, colors: Palette) -> Div {
+    div()
+        .flex_none()
+        .px(px(10.))
+        .py(px(5.))
+        .rounded(px(10.))
+        .bg(colors.surface1)
+        .text_size(px(12.))
+        .font_weight(gpui::FontWeight::MEDIUM)
         .child(label.into())
 }
 
@@ -128,6 +135,7 @@ pub fn dot(color: Rgba, size: f32) -> Div {
         .bg(color)
         .flex_none()
 }
+
 #[must_use]
 pub fn progress_bar_width(fraction: f32, colors: Palette, width: f32) -> Div {
     let fill = fraction.clamp(0.0, 1.0) * width;
