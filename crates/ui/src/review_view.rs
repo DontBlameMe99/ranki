@@ -58,7 +58,7 @@ impl Root {
         let quick = self.motion_ms(MOTION_QUICK_MS);
         let progress_ms = self.motion_ms(MOTION_PROGRESS_MS);
         let active_queue = current.as_ref().map(|card| card.card_type);
-        let collection_start = self.store.collection_created().unwrap_or(0);
+        let collection_start = self.collection_start;
         let now = Self::now();
         let previews = if let Some(card) = current.as_ref() {
             [
