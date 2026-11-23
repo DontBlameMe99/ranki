@@ -149,6 +149,54 @@ pub fn deck_common(usn: i32, modified: i64) -> Vec<u8> {
     bytes
 }
 
+/// Builds a schema-18 `notetypes.config` blob: kind, CSS, stock kind.
+#[must_use]
+pub fn notetype_config(
+    kind: i32,
+    stock_kind: Option<i32>,
+    css: &str,
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    varint_field(&mut bytes, 1, u64::try_from(kind).unwrap_or(0));
+    string_field(&mut bytes, 3, css);
+    if let Some(stock) = stock_kind {
+        varint_field(&mut bytes, 9, u64::try_from(stock).unwrap_or(0));
+    }
+    bytes
+}
+
+/// Builds a schema-18 `fields.config` blob holding Anki's field tag.
+#[must_use]
+pub fn field_config(tag: Option<u32>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if let Some(value) = tag {
+        varint_field(&mut bytes, 10, u64::from(value));
+    }
+    bytes
+}
+
+/// Builds a schema-18 `templates.config` blob: question and answer formats.
+#[must_use]
+pub fn template_config(question: &str, answer: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    string_field(&mut bytes, 1, question);
+    string_field(&mut bytes, 2, answer);
+    bytes
+}
+
+fn varint_field(bytes: &mut Vec<u8>, field: u32, value: u64) {
+    let tag = u64::from(field).checked_shl(3).unwrap_or(0);
+    append_varint(bytes, tag);
+    append_varint(bytes, value);
+}
+
+fn string_field(bytes: &mut Vec<u8>, field: u32, value: &str) {
+    let tag = u64::from(field).checked_shl(3).unwrap_or(0) | 2;
+    append_varint(bytes, tag);
+    append_varint(bytes, u64::try_from(value.len()).unwrap_or(0));
+    bytes.extend_from_slice(value.as_bytes());
+}
+
 fn append_varint(bytes: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
         let byte = u8::try_from(value & 0x7f).unwrap_or(0) | 0x80;

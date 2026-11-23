@@ -23,10 +23,14 @@ use ranki_model::Rating;
 use ranki_model::RevLog;
 use ranki_model::RevLogKind;
 use ranki_model::ReviewDecision;
+use ranki_model::StockModelKind;
 use ranki_model::Store;
 use ranki_model::parse_image_occlusion_field;
 use ranki_storage::Collection;
 use ranki_sync::SyncTransport;
+use ranki_ui::occlusion::{
+    MaskShape, NormalizedRect, OcclusionMask, occlusion_field,
+};
 use std::env;
 use std::ffi::OsStr;
 use std::fmt;
@@ -172,8 +176,24 @@ enum Command {
         deck_id: Id,
         #[arg(long, value_name = "PATH")]
         image: PathBuf,
-        #[arg(long = "occlusion", value_name = "MARKER", required = true)]
+        #[arg(
+            long = "occlusion",
+            value_name = "MARKER",
+            required_unless_present_any = ["rects", "ellipses"]
+        )]
         occlusions: Vec<String>,
+        #[arg(
+            long = "rect",
+            value_name = "LEFT,TOP,WIDTH,HEIGHT",
+            value_parser = parse_rect
+        )]
+        rects: Vec<MaskRect>,
+        #[arg(
+            long = "ellipse",
+            value_name = "LEFT,TOP,WIDTH,HEIGHT",
+            value_parser = parse_rect
+        )]
+        ellipses: Vec<MaskRect>,
         #[arg(long, value_name = "TEXT")]
         header: Option<String>,
         #[arg(long = "back-extra", value_name = "TEXT")]
@@ -503,6 +523,8 @@ fn run_store_command(
             deck_id,
             image,
             occlusions,
+            rects,
+            ellipses,
             header,
             back_extra,
             comments,
@@ -513,6 +535,7 @@ fn run_store_command(
             deck_id,
             &image,
             &occlusions,
+            &shapes(&rects, &ellipses),
             header.as_deref(),
             back_extra.as_deref(),
             comments.as_deref(),
@@ -707,9 +730,70 @@ fn resolve_model(
             {
                 return Ok(model.id);
             }
-            Ok(collection.ensure_model(name)?.id)
+            let kind = StockModelKind::from_name(name).ok_or_else(|| {
+                CliError::Message(format!("unknown note type: {name}"))
+            })?;
+            Ok(collection.ensure_model(kind)?.id)
         }
     }
+}
+
+/// `--rect`/`--ellipse` coordinates: normalized, comma separated.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MaskRect {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
+fn parse_rect(value: &str) -> Result<MaskRect, String> {
+    let parts = value
+        .split(',')
+        .map(|part| part.trim().parse::<f32>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            format!("expected LEFT,TOP,WIDTH,HEIGHT in 0..1, got {value}")
+        })?;
+    let [left, top, width, height] = parts.as_slice() else {
+        return Err(format!(
+            "expected LEFT,TOP,WIDTH,HEIGHT in 0..1, got {value}"
+        ));
+    };
+    let inside = |number: &f32| (0.0..=1.0).contains(number);
+    if !inside(left)
+        || !inside(top)
+        || !inside(width)
+        || !inside(height)
+        || *width <= 0.0
+        || *height <= 0.0
+    {
+        return Err(format!("mask coordinates must stay in 0..1: {value}"));
+    }
+    Ok(MaskRect {
+        left: *left,
+        top: *top,
+        width: *width,
+        height: *height,
+    })
+}
+
+/// Rectangles first, then ellipses, in the order the flags were given.
+fn shapes(rects: &[MaskRect], ellipses: &[MaskRect]) -> Vec<OcclusionMask> {
+    let rect = |mask: &MaskRect, shape: MaskShape| OcclusionMask {
+        shape,
+        rect: NormalizedRect {
+            left: mask.left,
+            top: mask.top,
+            width: mask.width,
+            height: mask.height,
+        },
+    };
+    rects
+        .iter()
+        .map(|mask| rect(mask, MaskShape::Rect))
+        .chain(ellipses.iter().map(|mask| rect(mask, MaskShape::Ellipse)))
+        .collect()
 }
 
 #[expect(
@@ -722,12 +806,19 @@ fn add_image_occlusion(
     deck_id: Id,
     image: &Path,
     occlusions: &[String],
+    masks: &[OcclusionMask],
     header: Option<&str>,
     back_extra: Option<&str>,
     comments: Option<&str>,
     tags: &[String],
 ) -> CliResult<()> {
-    let occlusion = occlusions.join("<br>");
+    let built = occlusion_field(masks);
+    let raw = occlusions.join("<br>");
+    let occlusion = [built, raw]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("<br>");
     let parsed = parse_image_occlusion_field(&occlusion);
     if parsed.shapes.is_empty() {
         return Err(CliError::Message(
@@ -1011,6 +1102,82 @@ mod tests {
         assert_eq!(header.as_deref(), Some("Diagram"));
         assert_eq!(back_extra.as_deref(), Some("More"));
         assert_eq!(tags, ["io"]);
+    }
+
+    #[test]
+    fn add_image_occlusion_accepts_rects_and_ellipses() {
+        let cli = parse(&[
+            "ranki",
+            "add-image-occlusion",
+            "--deck",
+            "1",
+            "--image",
+            "/tmp/diagram.png",
+            "--rect",
+            "0.1,0.2,0.3,0.4",
+            "--ellipse",
+            "0.5,0.5,0.2,0.2",
+            "--rect",
+            "0,0,1,1",
+        ]);
+        let Some(Command::AddImageOcclusion {
+            rects,
+            ellipses,
+            occlusions,
+            ..
+        }) = cli.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(occlusions.len(), 0);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(ellipses.len(), 1);
+        let masks = super::shapes(&rects, &ellipses);
+        assert_eq!(
+            super::occlusion_field(&masks),
+            "{{c1::image-occlusion:rect:left=0.1:top=0.2:width=0.3:height=0.4}}<br>\
+             {{c2::image-occlusion:rect:left=0:top=0:width=1:height=1}}<br>\
+             {{c3::image-occlusion:ellipse:left=0.5:top=0.5:width=0.2:height=0.2}}"
+        );
+        let parsed = ranki_model::parse_image_occlusion_field(
+            &super::occlusion_field(&masks),
+        );
+        assert_eq!(parsed.shapes.len(), 3);
+        assert_eq!(parsed.shapes[2].ordinals, [3]);
+    }
+
+    #[test]
+    fn add_image_occlusion_rejects_out_of_range_rects() {
+        assert!(super::parse_rect("0.1,0.2,0.3").is_err());
+        assert!(super::parse_rect("0.1,0.2,0.3,1.4").is_err());
+        assert!(super::parse_rect("0.1,0.2,0,0.3").is_err());
+        assert!(super::parse_rect("left,top,width,height").is_err());
+        assert_eq!(
+            super::parse_rect(" 0.25 , 0.5, 0.125, 0.25 ").map(|mask| (
+                mask.left,
+                mask.top,
+                mask.width,
+                mask.height
+            )),
+            Ok((0.25, 0.5, 0.125, 0.25))
+        );
+    }
+
+    #[test]
+    fn add_image_occlusion_needs_markers_or_shapes() {
+        assert_eq!(super::shapes(&[], &[]).len(), 0);
+        assert_eq!(super::occlusion_field(&[]), "");
+        assert!(
+            Cli::try_parse_from([
+                "ranki",
+                "add-image-occlusion",
+                "--deck",
+                "1",
+                "--image",
+                "/tmp/diagram.png",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

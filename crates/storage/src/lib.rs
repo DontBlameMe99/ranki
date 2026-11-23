@@ -47,6 +47,7 @@ use ranki_model::NewNote;
 use ranki_model::NoteModel;
 use ranki_model::RevLog;
 use ranki_model::ReviewDecision;
+use ranki_model::StockModelKind;
 use ranki_model::Store;
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -147,54 +148,50 @@ impl Collection {
         &self.path
     }
 
-    /// Installs a stock note type when the collection has no model by that name.
+    /// Installs a stock note type and returns the stored model.
     ///
-    /// An existing model with the same name is returned unchanged. Stock ids
-    /// are placeholders, so installation always allocates a fresh id.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError::NotFound`] for an unknown name and a backend error
-    /// when the collection cannot be updated.
-    pub fn ensure_model(
+    /// The existing model is returned when the collection already has that
+    /// stock type. Schema-18 collections that keep note types in normalized
+    /// tables get rows there instead of `col.models`.
+    fn install_model(
         &mut self,
-        name: &str,
+        kind: StockModelKind,
     ) -> Result<NoteModel, StoreError> {
         let existing = self.model_list()?;
-        if let Some(model) = existing.iter().find(|model| model.name == name) {
+        if let Some(model) = existing
+            .iter()
+            .find(|model| StockModelKind::of(model) == Some(kind))
+        {
             return Ok(model.clone());
         }
-        let Some(stock) = stock_models()
-            .into_iter()
-            .find(|model| model.name.eq_ignore_ascii_case(name))
-        else {
-            return Err(StoreError::NotFound(format!("stock model {name}")));
-        };
-        let mut model = stock;
+        let mut model = kind.definition();
         model.id = fresh_model_id(&existing)?;
         let col = records::read_col(&self.conn)?;
         let stamp = col_stamp(&col)?;
-        let mut object: Map<String, Json> =
-            serde_json::from_str(&col.models).unwrap_or_default();
-        let json = models_to_json(slice::from_ref(&model));
-        if let Some(entry) = json.get(model.id.to_string()).cloned() {
-            let _ = object.insert(model.id.to_string(), entry);
-        }
-        let models = serde_json::to_string(&Json::Object(object))
-            .map_err(|error| invalid(error.to_string()))?;
+        let tables = models_in_tables(&self.conn, &col)?;
+        let models = if tables {
+            None
+        } else {
+            Some(models_json_installing(&col.models, &model)?)
+        };
         let transaction = self.conn.transaction().map_err(backend)?;
-        transaction
-            .execute(
-                "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4, models = ?5 WHERE id = 1",
-                params![
-                    stamp.modified,
-                    stamp.scm,
-                    stamp.usn,
-                    stamp.ls,
-                    models
-                ],
-            )
-            .map_err(backend)?;
+        if let Some(json) = models.as_deref() {
+            transaction
+                .execute(
+                    "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4, models = ?5 WHERE id = \
+                     1",
+                    params![stamp.modified, stamp.scm, stamp.usn, stamp.ls, json],
+                )
+                .map_err(backend)?;
+        } else {
+            transaction
+                .execute(
+                    "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
+                    params![stamp.modified, stamp.scm, stamp.usn, stamp.ls],
+                )
+                .map_err(backend)?;
+            insert_model_tables(&transaction, &model, &stamp)?;
+        }
         transaction.commit().map_err(backend)?;
         Ok(model)
     }
@@ -434,6 +431,13 @@ impl Store for Collection {
 
     fn models(&self) -> Result<Vec<NoteModel>, StoreError> {
         self.model_list()
+    }
+
+    fn ensure_model(
+        &mut self,
+        kind: StockModelKind,
+    ) -> Result<NoteModel, StoreError> {
+        self.install_model(kind)
     }
 
     fn find_cards(&self, query: &str) -> Result<Vec<Id>, StoreError> {
@@ -759,6 +763,112 @@ fn fresh_model_id(existing: &[NoteModel]) -> Result<Id, StoreError> {
             return Ok(id);
         }
     }
+}
+
+/// Adds one model to `col.models` JSON and returns the new document.
+fn models_json_installing(
+    json: &str,
+    model: &NoteModel,
+) -> Result<String, StoreError> {
+    let mut object: Map<String, Json> =
+        serde_json::from_str(json).unwrap_or_default();
+    if let Some(entry) = models_to_json(slice::from_ref(model)).as_object() {
+        object.extend(entry.clone());
+    }
+    serde_json::to_string(&Json::Object(object))
+        .map_err(|error| invalid(error.to_string()))
+}
+
+/// True when the collection keeps its note types in schema-18 tables.
+fn models_in_tables(
+    conn: &Connection,
+    col: &records::ColData,
+) -> Result<bool, StoreError> {
+    if !records::table_exists(conn, "notetypes")? {
+        return Ok(false);
+    }
+    Ok(records::models_from_json(&col.models)?.is_empty())
+}
+
+fn column_exists(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, StoreError> {
+    let mut statement = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(backend)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(backend)?;
+    for row in rows {
+        if row.map_err(backend)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Writes one note type into the schema-18 normalized tables.
+fn insert_model_tables(
+    conn: &Connection,
+    model: &NoteModel,
+    stamp: &ColStamp,
+) -> Result<(), StoreError> {
+    conn.execute(
+        "INSERT INTO notetypes (id, name, mtime_secs, usn, config) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            model.id,
+            model.name,
+            stamp.now_secs,
+            stamp.usn,
+            anki::notetype_config(
+                model.kind.code(),
+                model.original_stock_kind,
+                &model.css,
+            ),
+        ],
+    )
+    .map_err(backend)?;
+    for (index, name) in model.fields.iter().enumerate() {
+        let ord = i64::try_from(index).unwrap_or_default();
+        let tag = model.field_tags.get(index).copied().flatten();
+        conn.execute(
+            "INSERT INTO fields (ntid, ord, name, config) VALUES (?1, ?2, ?3, ?4)",
+            params![model.id, ord, name, anki::field_config(tag)],
+        )
+        .map_err(backend)?;
+    }
+    let stamped = column_exists(conn, "templates", "mtime_secs")?;
+    for template in &model.templates {
+        let ord = i64::from(template.ord);
+        let config = anki::template_config(
+            &template.question_format,
+            &template.answer_format,
+        );
+        if stamped {
+            conn.execute(
+                "INSERT INTO templates (ntid, ord, name, mtime_secs, usn, config) VALUES (?1, \
+                 ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    model.id,
+                    ord,
+                    template.name,
+                    stamp.now_secs,
+                    stamp.usn,
+                    config
+                ],
+            )
+            .map_err(backend)?;
+        } else {
+            conn.execute(
+                "INSERT INTO templates (ntid, ord, name, config) VALUES (?1, ?2, ?3, ?4)",
+                params![model.id, ord, template.name, config],
+            )
+            .map_err(backend)?;
+        }
+    }
+    Ok(())
 }
 
 fn placeholders(start: i64, count: usize) -> String {

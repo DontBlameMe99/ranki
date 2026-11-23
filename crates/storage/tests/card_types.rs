@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use ranki_model::NewNote;
 use ranki_model::NoteKind;
+use ranki_model::StockModelKind;
 use ranki_model::Store;
 use ranki_model::parse_image_occlusion_field;
 use ranki_storage::Collection;
@@ -179,10 +180,10 @@ fn ordinals(store: &Collection, ids: &[i64]) -> Vec<u16> {
 fn stock_models_are_installed_with_fresh_ids() {
     let (_dir, path) = fixture();
     let mut store = Collection::open(&path).expect("open");
-    let first = store.ensure_model("Cloze").expect("install");
+    let first = store.ensure_model(StockModelKind::Cloze).expect("install");
     assert_ne!(first.id, 0);
     assert_eq!(first.kind, NoteKind::Cloze);
-    let again = store.ensure_model("Cloze").expect("existing");
+    let again = store.ensure_model(StockModelKind::Cloze).expect("existing");
     assert_eq!(again.id, first.id);
     let models = store.models().expect("models");
     let installed = models
@@ -198,7 +199,7 @@ fn reversed_stock_model_creates_two_cards_with_explicit_ordinals() {
     let (_dir, path) = fixture();
     let mut store = Collection::open(&path).expect("open");
     let model = store
-        .ensure_model("Basic (and reversed card)")
+        .ensure_model(StockModelKind::BasicAndReversed)
         .expect("model");
     let note = NewNote {
         model_id: model.id,
@@ -215,7 +216,7 @@ fn reversed_stock_model_creates_two_cards_with_explicit_ordinals() {
 fn cloze_generates_one_card_per_distinct_positive_ordinal() {
     let (_dir, path) = fixture();
     let mut store = Collection::open(&path).expect("open");
-    let model = store.ensure_model("Cloze").expect("model");
+    let model = store.ensure_model(StockModelKind::Cloze).expect("model");
     let note = NewNote {
         model_id: model.id,
         deck_id: 1,
@@ -234,7 +235,9 @@ fn cloze_generates_one_card_per_distinct_positive_ordinal() {
 fn image_occlusion_markers_survive_field_encoding() {
     let (_dir, path) = fixture();
     let mut store = Collection::open(&path).expect("open");
-    let model = store.ensure_model("Image Occlusion").expect("model");
+    let model = store
+        .ensure_model(StockModelKind::ImageOcclusion)
+        .expect("model");
     let occlusion = concat!(
         "{{c1::image-occlusion:rect:left=.1:top=.2:width=.3:height=.4}}<br>",
         "{{c2::image-occlusion:text:text=label:fs=14}}",
@@ -260,6 +263,83 @@ fn image_occlusion_markers_survive_field_encoding() {
     assert_eq!(stored.fields[1], "<img src=\"diagram.png\">");
     let parsed = parse_image_occlusion_field(&stored.fields[0]);
     assert_eq!(parsed.shapes.len(), 2);
+}
+
+#[test]
+fn every_stock_kind_installs_once_and_persists() {
+    let (_dir, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let mut ids = Vec::new();
+    for kind in StockModelKind::ALL {
+        let model = store.ensure_model(kind).expect("install");
+        assert!(model.id > 0);
+        assert_eq!(model.name, kind.name());
+        assert_eq!(store.ensure_model(kind).expect("existing").id, model.id);
+        ids.push(model.id);
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 4);
+    let names = store
+        .models()
+        .expect("models")
+        .into_iter()
+        .map(|model| model.name)
+        .collect::<Vec<_>>();
+    for kind in StockModelKind::ALL {
+        assert!(names.iter().any(|name| name == kind.name()));
+    }
+}
+
+#[test]
+fn schema18_destination_gets_notetype_table_rows() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("modern-install.anki2");
+    drop(schema18(&path));
+    let mut store = Collection::open(&path).expect("open");
+    let model = store
+        .ensure_model(StockModelKind::ImageOcclusion)
+        .expect("install");
+    let stored = store
+        .models()
+        .expect("models")
+        .into_iter()
+        .find(|entry| entry.id == model.id)
+        .expect("stored");
+    assert!(stored.is_image_occlusion());
+    assert_eq!(stored.fields.len(), 5);
+    assert_eq!(
+        stored.field_tags,
+        [Some(0), Some(1), Some(2), Some(3), Some(4)]
+    );
+    assert_eq!(stored.templates.len(), 1);
+    assert!(
+        stored.templates[0]
+            .question_format
+            .contains("{{cloze:Occlusion}}")
+    );
+    assert_eq!(
+        store
+            .ensure_model(StockModelKind::ImageOcclusion)
+            .expect("again")
+            .id,
+        model.id
+    );
+
+    let conn = Connection::open(&path).expect("open");
+    register_collations(&conn).expect("collations");
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM notetypes", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(rows, 1);
+    let fields: i64 = conn
+        .query_row("SELECT COUNT(*) FROM fields", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(fields, 5);
+    let models: String = conn
+        .query_row("SELECT models FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("models");
+    assert_eq!(models, "");
 }
 
 #[test]

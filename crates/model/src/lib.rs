@@ -20,6 +20,7 @@ pub use image_occlusion::parse_image_occlusion_field;
 pub use raw::decode_hex;
 pub use raw::encode_hex;
 use std::collections::BTreeSet;
+pub use stock::StockModelKind;
 pub use stock::stock_models;
 
 use serde::{Deserialize, Serialize};
@@ -460,6 +461,25 @@ pub trait Store {
     /// # Errors
     /// Returns [`StoreError`] if the collection cannot be read.
     fn models(&self) -> Result<Vec<NoteModel>, StoreError>;
+    /// Installs a stock note type and returns the stored model.
+    ///
+    /// Returns the collection's existing model when it already has that stock
+    /// type, so the call is safe to repeat.
+    ///
+    /// Implementations that cannot install models return
+    /// [`StoreError::Unsupported`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the write fails.
+    fn ensure_model(
+        &mut self,
+        kind: StockModelKind,
+    ) -> Result<NoteModel, StoreError> {
+        Err(StoreError::Unsupported(format!(
+            "ensure_model is not supported for {}",
+            kind.name()
+        )))
+    }
 
     /// Finds card ids matching an Anki-style search query.
     ///

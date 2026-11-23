@@ -34,6 +34,7 @@ mod card_view;
 mod components;
 mod decks_view;
 mod nav;
+pub mod occlusion;
 mod review_view;
 mod text_field;
 mod theme;

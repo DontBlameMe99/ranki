@@ -813,9 +813,14 @@ impl ImageCache for LruImageCache {
 
 /// Convenience wrapper for a media image with a missing-file caption.
 #[must_use]
-pub fn media_image(path: String, colors: Palette, height: f32) -> AnyElement {
-    img(path.clone())
-        .id(SharedString::from(path))
+pub fn media_image(
+    path: std::path::PathBuf,
+    colors: Palette,
+    height: f32,
+) -> AnyElement {
+    let id = SharedString::from(path.to_string_lossy().into_owned());
+    img(path)
+        .id(id)
         .h(px(height))
         .max_w(px(520.))
         .object_fit(gpui::ObjectFit::Contain)
@@ -835,14 +840,20 @@ pub fn media_image(path: String, colors: Palette, height: f32) -> AnyElement {
 
 /// Renders field value media into a column of images and sound captions.
 #[must_use]
-pub fn media_column(refs: &[MediaRef], colors: Palette) -> Option<Div> {
+pub fn media_column(
+    refs: &[MediaRef],
+    media_dir: &std::path::Path,
+    colors: Palette,
+) -> Option<Div> {
     if refs.is_empty() {
         return None;
     }
     let mut column = div().flex().flex_col().items_center().gap(px(6.));
     for media in refs {
         column = column.child(match media.kind {
-            MediaKind::Image => media_image(media.name.clone(), colors, 180.),
+            MediaKind::Image => {
+                media_image(media_dir.join(&media.name), colors, 180.)
+            }
             MediaKind::Sound => div()
                 .flex()
                 .items_center()

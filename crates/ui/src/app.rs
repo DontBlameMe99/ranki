@@ -8,20 +8,25 @@ use std::{
 };
 
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, KeyBinding,
-    Render, Window, WindowAppearance, actions, div, prelude::*,
+    App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
+    KeyBinding, Pixels, Render, Window, WindowAppearance, actions, div,
+    prelude::*,
 };
 use ranki_core::{
     FsrsParams, FsrsPreset, FsrsScheduler, Scheduler, from_settings,
 };
 use ranki_model::{
     Card, Deck, DeckStats, Id, NewNote, Note, NoteModel, Rating,
-    ReviewDecision, Store,
+    ReviewDecision, StockModelKind, Store,
 };
 
 use crate::{
     Options, SchedulerKind, ThemeChoice,
     card_view::{self, RenderedCard, Side},
+    occlusion::{
+        self, MaskShape, NormalizedRect, OcclusionMask, default_mask,
+        image_occlusion_fields, media_images,
+    },
     text_field::{EditHook, TextField},
     theme::{self, Palette, Theme, interval_label},
 };
@@ -119,6 +124,50 @@ pub struct AddedNote {
     pub time: String,
 }
 
+/// Image-occlusion editor state.
+#[derive(Default)]
+pub struct OcclusionState {
+    /// Media file name chosen for the `Image` field.
+    pub image: Option<String>,
+    /// Image files found in the media directory.
+    pub media: Vec<String>,
+    pub masks: Vec<OcclusionMask>,
+    pub selected: Option<usize>,
+    /// Drag in progress, in image-relative coordinates.
+    pub drag: Option<(f32, f32, f32, f32)>,
+    /// Screen rectangle of the drawing area, from the last prepaint.
+    pub bounds: Option<Bounds<Pixels>>,
+}
+
+impl OcclusionState {
+    fn pointer(&self, position: (f32, f32)) -> Option<(f32, f32)> {
+        let bounds = self.bounds?;
+        Some(occlusion::relative_position(
+            position,
+            (f32::from(bounds.origin.x), f32::from(bounds.origin.y)),
+            (f32::from(bounds.size.width), f32::from(bounds.size.height)),
+        ))
+    }
+
+    /// Current drag as a mask, for the dashed preview outline.
+    #[must_use]
+    pub fn drag_rect(&self) -> Option<NormalizedRect> {
+        let (left, top, right, bottom) = self.drag?;
+        NormalizedRect::from_points((left, top), (right, bottom))
+    }
+
+    fn finish_drag(&mut self) {
+        if let Some(rect) = self.drag_rect() {
+            self.masks.push(OcclusionMask {
+                shape: MaskShape::Rect,
+                rect,
+            });
+            self.selected = Some(self.masks.len().saturating_sub(1));
+        }
+        self.drag = None;
+    }
+}
+
 /// Add-card form state.
 pub struct AddState {
     pub deck_index: usize,
@@ -129,6 +178,8 @@ pub struct AddState {
     pub preview_side: Side,
     pub errors: BTreeMap<String, String>,
     pub added: Vec<AddedNote>,
+    pub media_filter: Entity<TextField>,
+    pub occlusion: OcclusionState,
 }
 
 /// Review-session state owned by the root entity.
@@ -270,6 +321,7 @@ impl Root {
         let tags = cx.new(|cx| make_field(cx, "Add a tag"));
         let tag_hook = Self::tag_hook(cx);
         tags.update(cx, |field, _| field.set_edit_hook(tag_hook));
+        let media_filter = cx.new(|cx| make_field(cx, "Filter images"));
         let mut root = Self {
             scheduler: scheduler_from_options(&options),
             store,
@@ -300,6 +352,8 @@ impl Root {
                 preview_side: Side::Question,
                 errors: BTreeMap::new(),
                 added: Vec::new(),
+                media_filter,
+                occlusion: OcclusionState::default(),
             },
             toast: None,
             help_open: false,
@@ -314,13 +368,7 @@ impl Root {
         root.reset_fields(cx);
         root.refresh_field_colors(cx);
         if let Ok(prefill) = env::var("RANKI_UI_DEV_FIELDS") {
-            for (field, value) in
-                root.add.fields.iter().zip(prefill.split('\t'))
-            {
-                field.update(cx, |field, cx| {
-                    field.seed(value.to_owned(), cx);
-                });
-            }
+            root.seed_fields(&prefill, cx);
         }
         if let Ok(tags) = env::var("RANKI_UI_DEV_TAGS") {
             root.add.tag_chips =
@@ -338,7 +386,78 @@ impl Root {
             }
             _ => {}
         }
+        if let Ok(seed) = env::var("RANKI_UI_DEV_OCCLUSION") {
+            root.seed_occlusion(&seed, cx);
+            if let Ok(prefill) = env::var("RANKI_UI_DEV_FIELDS") {
+                root.seed_fields(&prefill, cx);
+            }
+        }
+        if env::var("RANKI_UI_DEV_SAVE").is_ok_and(|value| value == "1") {
+            root.view = View::AddCard;
+            let weak = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = weak.update(cx, |root, cx| {
+                    root.view = View::AddCard;
+                    root.save_note(cx);
+                });
+            });
+        }
         root
+    }
+
+    /// Fills the add-card fields from tab separated text.
+    fn seed_fields(&mut self, prefill: &str, cx: &mut Context<Self>) {
+        for (field, value) in self.add.fields.iter().zip(prefill.split('\t')) {
+            field.update(cx, |field, cx| {
+                field.seed(value.to_owned(), cx);
+            });
+        }
+    }
+
+    /// Seeds the occlusion editor from `image;l,t,w,h;l,t,w,h`.
+    ///
+    /// Masks go through the same path as drawn ones, so a scripted run saves
+    /// exactly what a pointer run would.
+    fn seed_occlusion(&mut self, seed: &str, cx: &mut Context<Self>) {
+        let Some(model) =
+            self.models.iter().position(NoteModel::is_image_occlusion)
+        else {
+            return;
+        };
+        self.select_model(model, cx);
+        let mut parts = seed.split(';');
+        if let Some(image) = parts.next().map(str::trim)
+            && !image.is_empty()
+        {
+            self.choose_occlusion_image(image.to_owned(), cx);
+        }
+        for part in parts {
+            let values = part
+                .split(',')
+                .filter_map(|value| value.trim().parse::<f32>().ok())
+                .collect::<Vec<_>>();
+            let Some(rect) = NormalizedRect::from_points(
+                (
+                    values.first().copied().unwrap_or(0.0),
+                    values.get(1).copied().unwrap_or(0.0),
+                ),
+                (
+                    values.first().copied().unwrap_or(0.0)
+                        + values.get(2).copied().unwrap_or(0.0),
+                    values.get(1).copied().unwrap_or(0.0)
+                        + values.get(3).copied().unwrap_or(0.0),
+                ),
+            ) else {
+                continue;
+            };
+            self.add_occlusion_mask(
+                OcclusionMask {
+                    shape: MaskShape::Rect,
+                    rect,
+                },
+                cx,
+            );
+        }
     }
     /// Keeps the chip list in step with the tag field as words are typed.
     fn tag_hook(cx: &mut Context<Self>) -> EditHook {
@@ -412,11 +531,23 @@ impl Root {
                 self.set_error(format!("Could not load decks: {error}"));
             }
         }
+        let chosen = self
+            .models
+            .get(self.add.model_index)
+            .map(|model| model.name.clone());
         match self.store.models() {
             Ok(models) => self.models = models_with_stock(models),
             Err(error) => {
                 self.set_error(format!("Could not load note types: {error}"));
             }
+        }
+        if let Some(name) = chosen
+            && let Some(index) = model_index(&self.models, &name)
+        {
+            self.add.model_index = index;
+        }
+        if self.add.model_index >= self.models.len() {
+            self.add.model_index = 0;
         }
         self.stats = self
             .decks
@@ -457,6 +588,9 @@ impl Root {
     fn reset_fields(&mut self, cx: &mut Context<Self>) {
         let model = self.models.get(self.add.model_index);
         let names = model.map_or_else(Vec::new, |item| item.fields.clone());
+        if model.is_some_and(NoteModel::is_image_occlusion) {
+            self.refresh_media();
+        }
         let hook = Self::edit_hook(cx);
         self.add.fields = names
             .into_iter()
@@ -475,13 +609,190 @@ impl Root {
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        if index >= self.models.len() {
+        let Some(model) = self.models.get(index).cloned() else {
             return;
-        }
+        };
         self.add.model_index = index;
         self.add.errors.clear();
-        self.reset_fields(cx);
+        if model.id > 0 {
+            self.reset_fields(cx);
+            cx.notify();
+            return;
+        }
+        match StockModelKind::of(&model) {
+            Some(kind) => match self.store.ensure_model(kind) {
+                Ok(installed) => {
+                    self.reload(cx);
+                    if let Some(found) =
+                        model_index(&self.models, &installed.name)
+                    {
+                        self.add.model_index = found;
+                    }
+                    self.reset_fields(cx);
+                    self.clear_toast();
+                }
+                Err(error) => {
+                    self.add.errors.insert(
+                        "model".into(),
+                        format!("Could not install {}: {error}", model.name),
+                    );
+                }
+            },
+            None => {
+                self.add.errors.insert(
+                    "model".into(),
+                    "This note type is not in the collection".into(),
+                );
+            }
+        }
         cx.notify();
+    }
+
+    fn refresh_media(&mut self) {
+        self.add.occlusion.media = media_images(&self.options.media_dir);
+    }
+
+    pub(crate) fn choose_occlusion_image(
+        &mut self,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.add.occlusion.image = Some(name);
+        let _ = self.add.errors.remove("occlusion");
+        cx.notify();
+    }
+
+    pub(crate) fn add_occlusion_mask(
+        &mut self,
+        mask: OcclusionMask,
+        cx: &mut Context<Self>,
+    ) {
+        self.add.occlusion.masks.push(mask);
+        self.add.occlusion.selected =
+            Some(self.add.occlusion.masks.len().saturating_sub(1));
+        let _ = self.add.errors.remove("masks");
+        cx.notify();
+    }
+
+    pub(crate) fn add_default_mask(&mut self, cx: &mut Context<Self>) {
+        let mask = default_mask(self.add.occlusion.masks.len());
+        self.add_occlusion_mask(mask, cx);
+    }
+
+    pub(crate) fn select_occlusion_mask(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if index < self.add.occlusion.masks.len() {
+            self.add.occlusion.selected = Some(index);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn remove_selected_mask(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self.add.occlusion.selected else {
+            return;
+        };
+        if index >= self.add.occlusion.masks.len() {
+            return;
+        }
+        let _ = self.add.occlusion.masks.remove(index);
+        self.add.occlusion.selected =
+            self.add.occlusion.masks.len().checked_sub(1);
+        cx.notify();
+    }
+
+    pub(crate) fn clear_occlusion_masks(&mut self, cx: &mut Context<Self>) {
+        self.add.occlusion.masks.clear();
+        self.add.occlusion.selected = None;
+        self.add.occlusion.drag = None;
+        cx.notify();
+    }
+
+    /// Records the drawing area so pointer positions can be normalized.
+    pub(crate) fn set_occlusion_bounds(&mut self, bounds: Bounds<Pixels>) {
+        self.add.occlusion.bounds = Some(bounds);
+    }
+
+    pub(crate) fn occlusion_press(
+        &mut self,
+        position: (f32, f32),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pointer) = self.add.occlusion.pointer(position) {
+            let corner = (pointer.0, pointer.1, pointer.0, pointer.1);
+            self.add.occlusion.drag = Some(corner);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn occlusion_drag_to(
+        &mut self,
+        position: (f32, f32),
+        cx: &mut Context<Self>,
+    ) {
+        let Some((left, top, _, _)) = self.add.occlusion.drag else {
+            return;
+        };
+        if let Some(pointer) = self.add.occlusion.pointer(position) {
+            self.add.occlusion.drag = Some((left, top, pointer.0, pointer.1));
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn occlusion_release(&mut self, cx: &mut Context<Self>) {
+        if self.add.occlusion.drag.is_some() {
+            self.add.occlusion.finish_drag();
+            let _ = self.add.errors.remove("masks");
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn cancel_occlusion_drag(&mut self, cx: &mut Context<Self>) {
+        if self.add.occlusion.drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn occlusion_headline(&self, cx: &mut Context<Self>) -> String {
+        let header = self
+            .add
+            .fields
+            .get(2)
+            .map(|field| field.read(cx).text())
+            .unwrap_or_default();
+        let text = if header.trim().is_empty() {
+            self.add
+                .occlusion
+                .image
+                .clone()
+                .unwrap_or_else(|| String::from("Image occlusion"))
+        } else {
+            header.trim().to_owned()
+        };
+        text.chars().take(32).collect()
+    }
+
+    /// Image Occlusion field values in the stock model order.
+    fn occlusion_fields(&self, cx: &mut Context<Self>) -> Vec<String> {
+        let field = |index: usize, cx: &mut Context<Self>| {
+            self.add
+                .fields
+                .get(index)
+                .map_or_else(String::new, |entry| entry.read(cx).text())
+        };
+        let header = field(2, cx);
+        let back_extra = field(3, cx);
+        let comments = field(4, cx);
+        let image = self.add.occlusion.image.clone().unwrap_or_default();
+        image_occlusion_fields(
+            &header,
+            &back_extra,
+            &comments,
+            &image,
+            &self.add.occlusion.masks,
+        )
     }
 
     pub(crate) fn study_deck(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -543,6 +854,7 @@ impl Root {
             &self.create_field,
             &self.rename_field,
             &self.add.tags,
+            &self.add.media_filter,
         ];
         for field in fields {
             field.update(cx, |field, _| field.set_placeholder_color(color));
@@ -748,30 +1060,46 @@ impl Root {
             cx.notify();
             return;
         };
-        let fields = self
-            .add
-            .fields
-            .iter()
-            .map(|field| field.read(cx).text())
-            .collect::<Vec<_>>();
+        let fields = if model.is_image_occlusion() {
+            self.occlusion_fields(cx)
+        } else {
+            self.add
+                .fields
+                .iter()
+                .map(|field| field.read(cx).text())
+                .collect::<Vec<_>>()
+        };
         let mut tags = self.add.tag_chips.clone();
         for tag in self.add.tags.read(cx).text().split_whitespace() {
             if !tags.iter().any(|known| known == tag) {
                 tags.push(tag.to_owned());
             }
         }
-        let errors = validate_draft(&deck, &model, &fields);
+        let errors = if model.is_image_occlusion() {
+            validate_occlusion(
+                &deck,
+                &model,
+                self.add.occlusion.image.as_deref(),
+                &self.add.occlusion.masks,
+            )
+        } else {
+            validate_draft(&deck, &model, &fields)
+        };
         self.add.errors = errors;
         if !self.add.errors.is_empty() {
             cx.notify();
             return;
         }
-        let headline = fields
-            .iter()
-            .map(|value| value.trim())
-            .find(|value| !value.is_empty())
-            .map(|value| value.chars().take(32).collect::<String>())
-            .unwrap_or_default();
+        let headline = if model.is_image_occlusion() {
+            self.occlusion_headline(cx)
+        } else {
+            fields
+                .iter()
+                .map(|value| value.trim())
+                .find(|value| !value.is_empty())
+                .map(|value| value.chars().take(32).collect::<String>())
+                .unwrap_or_default()
+        };
         let note = NewNote {
             model_id: model.id,
             deck_id: deck.id,
@@ -788,12 +1116,17 @@ impl Root {
                 let count = ids.len();
                 self.clear_toast();
                 for field in &self.add.fields {
-                    field.update(cx, super::text_field::TextField::clear);
+                    field.update(cx, |field, cx| {
+                        field.seed("", cx);
+                    });
                 }
-                self.add
-                    .tags
-                    .update(cx, super::text_field::TextField::clear);
+                self.add.tags.update(cx, |field, cx| {
+                    field.seed("", cx);
+                });
                 self.add.errors.clear();
+                self.add.occlusion.masks.clear();
+                self.add.occlusion.selected = None;
+                self.add.occlusion.image = None;
                 self.reload(cx);
                 self.set_error(format!("Added {count} cards"));
             }
@@ -1402,6 +1735,52 @@ pub fn validate_draft(
     errors
 }
 
+/// Inline validation for the image-occlusion editor.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the draft state and the note type belong to one check"
+)]
+#[must_use]
+pub fn validate_occlusion(
+    deck: &Deck,
+    model: &NoteModel,
+    image: Option<&str>,
+    masks: &[OcclusionMask],
+) -> BTreeMap<String, String> {
+    let mut errors = BTreeMap::new();
+    if deck.name.trim().is_empty() || deck.id <= 0 {
+        let _ =
+            errors.insert("deck".to_owned(), "Choose a deck first".to_owned());
+    }
+    if model.id <= 0 {
+        let _ = errors.insert(
+            "model".to_owned(),
+            "This note type is not in the collection".to_owned(),
+        );
+    }
+    if image.is_none_or(str::is_empty) {
+        let _ = errors.insert(
+            "occlusion".to_owned(),
+            "Choose an image from the media directory".to_owned(),
+        );
+    }
+    if masks.is_empty() {
+        let _ = errors.insert(
+            "masks".to_owned(),
+            "Draw at least one mask on the image".to_owned(),
+        );
+    }
+    errors
+}
+
+/// Index of the note type with this name, used after a reload.
+#[must_use]
+pub fn model_index(models: &[NoteModel], name: &str) -> Option<usize> {
+    models
+        .iter()
+        .position(|model| model.name.eq_ignore_ascii_case(name))
+}
+
 #[must_use]
 pub fn next_due_deck(
     decks: &[Deck],
@@ -1708,9 +2087,9 @@ mod tests {
     use super::{
         DeckRow, EmptyKind, Phase, SYNC_STATE, UiAction, View, build_deck_rows,
         collect_tags, date_label, deck_meta, due_total, empty_copy, empty_kind,
-        filter_decks, focused_delta, models_with_stock, next_due_deck,
-        next_view, note_type_name, relative_age, status_label, sum_leaf_counts,
-        validate_draft,
+        filter_decks, focused_delta, model_index, models_with_stock,
+        next_due_deck, next_view, note_type_name, relative_age, status_label,
+        sum_leaf_counts, validate_draft, validate_occlusion,
     };
     #[test]
     fn scheduler_follows_the_configured_algorithm() {
@@ -2041,6 +2420,55 @@ mod tests {
         let merged = models_with_stock(vec![installed]);
         assert_eq!(merged.len(), 4);
         assert_eq!(merged[0].id, 7);
+    }
+
+    #[test]
+    fn occlusion_validation_needs_an_image_and_a_mask() {
+        let deck = Deck {
+            id: 1,
+            name: "Default".into(),
+            description: String::new(),
+        };
+        let mut model =
+            ranki_model::StockModelKind::ImageOcclusion.definition();
+        model.id = 5;
+        let errors = validate_occlusion(&deck, &model, None, &[]);
+        assert_eq!(
+            errors.get("occlusion").map(String::as_str),
+            Some("Choose an image from the media directory")
+        );
+        assert_eq!(
+            errors.get("masks").map(String::as_str),
+            Some("Draw at least one mask on the image")
+        );
+        let mask = crate::occlusion::default_mask(0);
+        let errors = validate_occlusion(&deck, &model, Some("a.png"), &[mask]);
+        assert!(errors.is_empty(), "{errors:?}");
+        let placeholder = models_with_stock(Vec::new())
+            .into_iter()
+            .find(ranki_model::NoteModel::is_image_occlusion)
+            .expect("stock occlusion");
+        let errors =
+            validate_occlusion(&deck, &placeholder, Some("a.png"), &[mask]);
+        assert_eq!(
+            errors.get("model").map(String::as_str),
+            Some("This note type is not in the collection")
+        );
+    }
+
+    #[test]
+    fn installing_a_stock_type_keeps_its_tab_selected() {
+        let mut installed = ranki_model::StockModelKind::Cloze.definition();
+        installed.id = 77;
+        let models = models_with_stock(vec![installed]);
+        assert_eq!(model_index(&models, "Cloze"), Some(0));
+        assert_eq!(models[0].id, 77);
+        assert_eq!(model_index(&models, "cloze"), Some(0));
+        assert_eq!(model_index(&models, "Nope"), None);
+        assert_eq!(models.len(), 4);
+        let missing = models_with_stock(Vec::new());
+        assert_eq!(model_index(&missing, "Cloze"), Some(2));
+        assert_eq!(missing[2].id, 0);
     }
 
     #[test]

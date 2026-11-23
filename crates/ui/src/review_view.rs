@@ -321,20 +321,32 @@ impl Root {
                                 })
                         })),
                 );
-            if let Some(card) = question.as_ref()
-                && let Some(media) =
-                    card_view::media_column(&card.media, colors)
-            {
-                stage = stage.child(media);
-            }
-            if let Some(card) = question.as_ref()
-                && !card.masks.is_empty()
-            {
-                stage = stage.child(card_view::occlusion_layer(
-                    &card.masks,
+            if let Some(card) = question.as_ref() {
+                let masks = (!card.masks.is_empty()).then(|| {
+                    card_view::occlusion_layer(
+                        &card.masks,
+                        colors,
+                        phase == Phase::Answer,
+                    )
+                });
+                match card_view::media_column(
+                    &card.media,
+                    &self.options.media_dir,
                     colors,
-                    phase == Phase::Answer,
-                ));
+                ) {
+                    Some(media) => {
+                        let mut image = div().relative().child(media);
+                        if let Some(masks) = masks {
+                            image = image.child(masks);
+                        }
+                        stage = stage.child(image);
+                    }
+                    None => {
+                        if let Some(masks) = masks {
+                            stage = stage.child(masks);
+                        }
+                    }
+                }
             }
             let stage = gpui::image_cache(self.images.clone()).child(stage);
 
