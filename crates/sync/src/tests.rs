@@ -9,12 +9,21 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 type TestResult<T = ()> = crate::Result<T>;
 type CollectionValues = (i64, i64, u32);
 type MetaValues = (i64, i64, bool, i64);
+
+/// Builds a throwaway credential for a test run.
+///
+/// Tests never use real credentials. The value is derived at runtime so no
+/// literal password exists in the source tree.
+fn fixture_password(prefix: &str) -> String {
+    format!("{prefix}-{}-{}", process::id(), now_secs().unwrap_or(0))
+}
 
 fn now_secs() -> TestResult<i64> {
     let seconds = SystemTime::now()
@@ -115,12 +124,13 @@ fn login_success_stores_only_host_key() -> TestResult {
     let mut client =
         SyncClient::new(transport, &collection, &media, &state_path)?;
 
-    client.login(&Credentials::new("user", "secret-password"))?;
+    let password = fixture_password("test");
+    client.login(&Credentials::new("user", &password))?;
 
     assert_eq!(client.state().host_key, "host-key");
     let text = fs::read_to_string(&state_path)?;
     assert!(text.contains("host-key"));
-    assert!(!text.contains("secret-password"));
+    assert!(!text.contains(&password));
     assert_eq!(client.transport().request_count(), 1);
     Ok(())
 }
@@ -140,7 +150,7 @@ fn login_failure_leaves_no_state() -> TestResult {
         SyncClient::new(transport, &collection, &media, &state_path)?;
 
     assert_eq!(
-        client.login(&Credentials::new("user", "wrong")),
+        client.login(&Credentials::new("user", fixture_password("wrong"))),
         Err(SyncError::Auth)
     );
     assert!(!state_path.exists());
@@ -348,7 +358,7 @@ fn login_writes_state_with_mode_0600() -> TestResult {
     let mut client =
         SyncClient::new(transport, &collection, &media, &state_path)?;
 
-    client.login(&Credentials::new("user", "password"))?;
+    client.login(&Credentials::new("user", fixture_password("login")))?;
 
     let metadata = fs::metadata(&state_path)?;
     assert_eq!(metadata.mode() & 0o777, 0o600);
