@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use gpui::{
     ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, Rgba,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use crate::{
@@ -531,13 +531,28 @@ impl Root {
                     .child(icon("icon-more", 18., colors.overlay)),
             );
         }
+        let hover_bg = if is_selected {
+            crate::theme::blend(colors.surface0, colors.surface1, 0.5)
+        } else {
+            colors.surface0
+        };
         let mut row_div = div()
+            .id(SharedString::from(format!("deck-row-{}", row.path)))
             .flex()
             .items_center()
             .min_h(px(if row.depth == 0 { 60. } else { 45. }))
             .px(px(20.))
             .border_t_1()
             .border_color(colors.surface0)
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover_bg))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if let Some(index) = index {
+                    this.selected = Some(index);
+                    this.rebuild_deck_rows();
+                    cx.notify();
+                }
+            }))
             .bg(if is_selected {
                 colors.surface0
             } else {

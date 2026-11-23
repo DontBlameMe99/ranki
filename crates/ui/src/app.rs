@@ -16,7 +16,7 @@ use ranki_core::{
     FsrsParams, FsrsPreset, FsrsScheduler, Scheduler, from_settings,
 };
 use ranki_model::{
-    Card, Deck, DeckStats, Id, NewNote, Note, NoteModel, Rating,
+    Card, CardType, Deck, DeckStats, Id, NewNote, Note, NoteModel, Rating,
     ReviewDecision, StockModelKind, Store,
 };
 
@@ -44,6 +44,8 @@ actions!(
         GradeGood,
         GradeEasy,
         Retry,
+        Undo,
+        StudyAgain,
         EndSession,
         OpenDecks,
         OpenAdd,
@@ -103,13 +105,25 @@ pub enum Confirmation {
     SwitchScheduler { kind: SchedulerKind },
 }
 
+/// Tone of a toast. Errors keep the red role, everything else reports a
+/// completed action and must not look like a failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastKind {
+    Success,
+    Error,
+}
+
 #[derive(Clone, Debug)]
 pub struct Toast {
-    text: String,
-    created_at: Instant,
+    pub kind: ToastKind,
+    pub text: String,
+    pub created_at: Instant,
+    /// Monotonic id so the toast's fade replays for each new message.
+    pub seq: u64,
 }
 
 impl Toast {
+    /// A toast outlives its text only by the timer that clears it.
     fn expired(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.created_at) >= TOAST_LIFETIME
     }
@@ -181,6 +195,17 @@ pub struct AddState {
     pub occlusion: OcclusionState,
 }
 
+/// What one grade can be reversed into: the card before the write, the review
+/// log that recorded it, and the rating the user picked.
+#[derive(Clone, Debug)]
+pub struct UndoEntry {
+    pub card: Card,
+    pub revlog_id: Id,
+    pub rating: Rating,
+    /// Time the undone card contributed to the session total.
+    pub spent: Duration,
+}
+
 /// Review-session state owned by the root entity.
 #[derive(Default)]
 pub struct ReviewState {
@@ -199,6 +224,12 @@ pub struct ReviewState {
     pub again_count: usize,
     pub scope_all: bool,
     pub status: Option<String>,
+    /// Visible time spent on graded cards, accumulated per answer.
+    pub studied: Duration,
+    /// Fraction the progress bar had before the last grade, for its transition.
+    pub progress_from: f32,
+    /// Last grade this session, cleared once it is undone or replaced.
+    pub last_grade: Option<UndoEntry>,
 }
 
 /// Root entity. The store boundary stays identical to the previous UI.
@@ -394,6 +425,38 @@ impl Root {
                 root.seed_fields(&prefill, cx);
             }
         }
+        if let Some(count) = env::var("RANKI_UI_DEV_GRADE")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            let weak = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = weak.update(cx, |root, cx| {
+                    for _ in 0..count {
+                        if root.review.current.is_none() {
+                            break;
+                        }
+                        root.review.phase = Phase::Answer;
+                        root.review.last_grade_at = None;
+                        root.grade(Rating::Good, cx);
+                    }
+                });
+            });
+        }
+        if let Ok(spec) = env::var("RANKI_UI_DEV_TOAST") {
+            let (kind, text) = spec.split_once(':').map_or(
+                (ToastKind::Error, spec.as_str()),
+                |(kind, text)| {
+                    let kind = if kind.eq_ignore_ascii_case("success") {
+                        ToastKind::Success
+                    } else {
+                        ToastKind::Error
+                    };
+                    (kind, text)
+                },
+            );
+            root.show_toast(kind, text, cx);
+        }
         if env::var("RANKI_UI_DEV_SAVE").is_ok_and(|value| value == "1") {
             root.view = View::AddCard;
             let weak = cx.entity().downgrade();
@@ -535,7 +598,11 @@ impl Root {
         match self.store.decks() {
             Ok(decks) => self.decks = decks,
             Err(error) => {
-                self.set_error(format!("Could not load decks: {error}"));
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not load decks: {error}"),
+                    cx,
+                );
             }
         }
         let chosen = self
@@ -545,7 +612,11 @@ impl Root {
         match self.store.models() {
             Ok(models) => self.models = models_with_stock(models),
             Err(error) => {
-                self.set_error(format!("Could not load note types: {error}"));
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not load note types: {error}"),
+                    cx,
+                );
             }
         }
         if let Some(name) = chosen
@@ -591,22 +662,80 @@ impl Root {
         self.rebuild_deck_rows();
     }
 
-    pub(crate) fn set_error(&mut self, text: impl Into<String>) {
+    /// Reports a completed action. The toast retires on its own after
+    /// [`TOAST_LIFETIME`], or sooner when dismissed.
+    pub(crate) fn set_toast(
+        &mut self,
+        kind: ToastKind,
+        text: impl Into<String>,
+    ) {
+        static NEXT: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
         self.toast = Some(Toast {
+            kind,
             text: text.into(),
             created_at: Instant::now(),
+            seq: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         });
+    }
+
+    /// Clears the toast and arms its dismissal, so the window redraws even
+    /// when the pointer and keyboard stay idle.
+    pub(crate) fn show_toast(
+        &mut self,
+        kind: ToastKind,
+        text: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_toast(kind, text);
+        let created_at = self.toast.as_ref().map(|toast| toast.created_at);
+        let Some(created_at) = created_at else {
+            return;
+        };
+        let timer = cx.background_executor().timer(TOAST_LIFETIME);
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |root, cx| {
+                let same = root
+                    .toast
+                    .as_ref()
+                    .is_some_and(|toast| toast.created_at == created_at);
+                if same {
+                    root.clear_toast();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn clear_toast(&mut self) {
         self.toast = None;
     }
 
-    pub(crate) fn toast_text(&self) -> Option<&str> {
+    pub(crate) fn live_toast(&self) -> Option<&Toast> {
         self.toast
             .as_ref()
             .filter(|toast| !toast.expired(Instant::now()))
-            .map(|toast| toast.text.as_str())
+    }
+
+    /// Motion is on unless the setting or the desktop preference disables it.
+    pub(crate) fn motion_ms(&self, milliseconds: u64) -> u64 {
+        if theme::reduced_motion(self.options.reduce_motion) {
+            0
+        } else {
+            milliseconds
+        }
+    }
+
+    /// How long the current card has been on screen, for the session summary.
+    pub(crate) fn session_elapsed(&self) -> Duration {
+        let live = if self.review.current.is_some() {
+            self.review.focused_elapsed
+        } else {
+            Duration::ZERO
+        };
+        self.review.studied.saturating_add(live)
     }
 
     fn reset_fields(&mut self, cx: &mut Context<Self>) {
@@ -836,7 +965,11 @@ impl Root {
             ) {
                 Ok(cards) => self.review.queue.extend(cards),
                 Err(error) => {
-                    self.set_error(format!("Could not load cards: {error}"));
+                    self.show_toast(
+                        ToastKind::Error,
+                        format!("Could not load cards: {error}"),
+                        cx,
+                    );
                 }
             }
             self.review.session_total = self.review.queue.len();
@@ -857,7 +990,11 @@ impl Root {
         {
             Ok(cards) => self.review.queue.extend(cards),
             Err(error) => {
-                self.set_error(format!("Could not load cards: {error}"));
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not load cards: {error}"),
+                    cx,
+                );
             }
         }
         self.review.session_total = self.review.queue.len();
@@ -867,9 +1004,18 @@ impl Root {
         cx.notify();
     }
 
+    /// Restarts the session the summary just ended, with the same scope.
+    pub(crate) fn study_again(&mut self, cx: &mut Context<Self>) {
+        match self.selected {
+            Some(index) if !self.review.scope_all => self.study_deck(index, cx),
+            _ => self.study_all(cx),
+        }
+    }
+
     pub(crate) fn end_session(&mut self, cx: &mut Context<Self>) {
         self.review.queue.clear();
         self.review.current = None;
+        self.review.last_grade = None;
         self.review.phase = Phase::Question;
         self.view = View::Decks;
         self.refresh_stats();
@@ -902,50 +1048,65 @@ impl Root {
                 continue;
             }
             let _ = self.review.seen.insert(card.id);
-            let note = match self.store.note(card.note_id) {
-                Ok(note) => note,
-                Err(error) => {
-                    self.set_error(format!("Could not load card: {error}"));
-                    continue;
-                }
-            };
-            let model = note.as_ref().and_then(|note| {
-                self.models.iter().find(|model| model.id == note.model_id)
-            });
-            let (question, answer) = match (note.as_ref(), model) {
-                (Some(note), Some(model)) => (
-                    Some(card_view::render_card(
-                        model,
-                        note,
-                        card_view::CardRequest::question(card.ordinal),
-                    )),
-                    Some(card_view::render_card(
-                        model,
-                        note,
-                        card_view::CardRequest::answer_only(card.ordinal),
-                    )),
-                ),
-                _ => (None, None),
-            };
-            self.review.phase = if self.dev_reveal {
-                Phase::Answer
-            } else {
-                Phase::Question
-            };
-            self.review.current = Some(card);
-            self.review.note = note;
-            self.review.question = question;
-            self.review.answer = answer;
-            self.review.last_tick = Some(Instant::now());
-            self.review.last_grade_at = Some(Instant::now());
+            if !self.load_card(&card, cx) {
+                continue;
+            }
             break;
         }
         if self.review.current.is_none() {
             self.review.question = None;
             self.review.answer = None;
             self.review.note = None;
+            self.review.progress_from = self.progress_fraction();
+            self.refresh_stats();
         }
+    }
+
+    /// Renders one card into the review session. Returns false when its note
+    /// cannot be loaded, so the caller can try the next queued card.
+    fn load_card(&mut self, card: &Card, cx: &mut Context<Self>) -> bool {
+        let note = match self.store.note(card.note_id) {
+            Ok(note) => note,
+            Err(error) => {
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not load card: {error}"),
+                    cx,
+                );
+                return false;
+            }
+        };
+        let model = note.as_ref().and_then(|note| {
+            self.models.iter().find(|model| model.id == note.model_id)
+        });
+        let (question, answer) = match (note.as_ref(), model) {
+            (Some(note), Some(model)) => (
+                Some(card_view::render_card(
+                    model,
+                    note,
+                    card_view::CardRequest::question(card.ordinal),
+                )),
+                Some(card_view::render_card(
+                    model,
+                    note,
+                    card_view::CardRequest::answer_only(card.ordinal),
+                )),
+            ),
+            _ => (None, None),
+        };
+        self.review.phase = if self.dev_reveal {
+            Phase::Answer
+        } else {
+            Phase::Question
+        };
+        self.review.current = Some(card.clone());
+        self.review.note = note;
+        self.review.question = question;
+        self.review.answer = answer;
+        self.review.last_tick = Some(Instant::now());
+        self.review.last_grade_at = Some(Instant::now());
         let _ = cx;
+        true
     }
 
     pub(crate) fn reveal(&mut self, cx: &mut Context<Self>) {
@@ -983,8 +1144,13 @@ impl Root {
             Self::now(),
             collection_start,
         );
+        let before_progress = self.progress_fraction();
         if let Err(error) = self.store.apply_review(&decision) {
-            self.set_error(format!("Could not save review: {error}"));
+            self.show_toast(
+                ToastKind::Error,
+                format!("Could not save review: {error}"),
+                cx,
+            );
             cx.notify();
             return;
         }
@@ -997,6 +1163,17 @@ impl Root {
             rating_name(rating),
             interval_label(decision.revlog.interval)
         ));
+        self.review.progress_from = before_progress;
+        self.review.studied = self
+            .review
+            .studied
+            .saturating_add(self.review.focused_elapsed);
+        self.review.last_grade = Some(UndoEntry {
+            card,
+            revlog_id: decision.revlog.id,
+            rating,
+            spent: self.review.focused_elapsed,
+        });
         self.review.focused_elapsed = Duration::ZERO;
         self.review.current = None;
         self.review.note = None;
@@ -1006,6 +1183,66 @@ impl Root {
         self.review.last_tick = None;
         self.ensure_current(cx);
         cx.notify();
+    }
+
+    /// Fraction of the session that is graded, clamped for both ends of the
+    /// queue. Undo lowers it again because the answered count drops.
+    pub(crate) fn progress_fraction(&self) -> f32 {
+        session_progress(self.review.answered, self.review.session_total)
+    }
+
+    /// Reverses the last grade in this session: the review log is deleted, the
+    /// card returns to the question it was graded from, and the session counts
+    /// step back. Undo is one step deep, matching the single footer action.
+    pub(crate) fn undo_grade(&mut self, cx: &mut Context<Self>) {
+        if self.view != View::Review {
+            return;
+        }
+        let Some(entry) = self.review.last_grade.clone() else {
+            return;
+        };
+        match self.store.undo_review(&entry.card, entry.revlog_id) {
+            Ok(false) => {
+                self.review.last_grade = None;
+                self.show_toast(
+                    ToastKind::Error,
+                    "That review is already gone",
+                    cx,
+                );
+                cx.notify();
+            }
+            Ok(true) => {
+                let before = self.progress_fraction();
+                self.review.last_grade = None;
+                self.review.answered = self.review.answered.saturating_sub(1);
+                if entry.rating == Rating::Again {
+                    self.review.again_count =
+                        self.review.again_count.saturating_sub(1);
+                }
+                self.review.progress_from = before;
+                self.review.status = Some(format!(
+                    "Undone {}. Grade again.",
+                    rating_name(entry.rating)
+                ));
+                if let Some(current) = self.review.current.clone() {
+                    self.review.queue.push_front(current);
+                }
+                let _ = self.review.seen.remove(&entry.card.id);
+                let _ = self.load_card(&entry.card, cx);
+                self.review.studied =
+                    self.review.studied.saturating_sub(entry.spent);
+                self.refresh_stats();
+                cx.notify();
+            }
+            Err(error) => {
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not undo: {error}"),
+                    cx,
+                );
+                cx.notify();
+            }
+        }
     }
 
     pub(crate) fn toggle_scheduler(&mut self, cx: &mut Context<Self>) {
@@ -1019,11 +1256,14 @@ impl Root {
             Some(Confirmation::RemoveDeck { id, .. }) => {
                 match self.store.remove_deck(id) {
                     Ok(()) => {
-                        self.set_error("Deck removed");
+                        self.show_toast(ToastKind::Success, "Deck removed", cx);
                         self.reload(cx);
                     }
-                    Err(error) => self
-                        .set_error(format!("Could not remove deck: {error}")),
+                    Err(error) => self.show_toast(
+                        ToastKind::Error,
+                        format!("Could not remove deck: {error}"),
+                        cx,
+                    ),
                 }
             }
             Some(Confirmation::SwitchScheduler { kind }) => {
@@ -1039,7 +1279,7 @@ impl Root {
     pub(crate) fn create_deck(&mut self, cx: &mut Context<Self>) {
         let name = self.create_field.read(cx).text().trim().to_owned();
         if name.is_empty() {
-            self.set_error("Deck name cannot be empty");
+            self.show_toast(ToastKind::Error, "Deck name cannot be empty", cx);
             cx.notify();
             return;
         }
@@ -1051,7 +1291,11 @@ impl Root {
                 self.reload(cx);
             }
             Err(error) => {
-                self.set_error(format!("Could not create deck: {error}"));
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not create deck: {error}"),
+                    cx,
+                );
             }
         }
     }
@@ -1069,7 +1313,7 @@ impl Root {
         };
         let name = self.rename_field.read(cx).text().trim().to_owned();
         if name.is_empty() {
-            self.set_error("Deck name cannot be empty");
+            self.show_toast(ToastKind::Error, "Deck name cannot be empty", cx);
             cx.notify();
             return;
         }
@@ -1080,7 +1324,11 @@ impl Root {
                 self.reload(cx);
             }
             Err(error) => {
-                self.set_error(format!("Could not rename deck: {error}"));
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not rename deck: {error}"),
+                    cx,
+                );
             }
         }
     }
@@ -1168,10 +1416,18 @@ impl Root {
                 self.add.occlusion.selected = None;
                 self.add.occlusion.image = None;
                 self.reload(cx);
-                self.set_error(format!("Added {count} cards"));
+                self.show_toast(
+                    ToastKind::Success,
+                    format!("Added {count} cards"),
+                    cx,
+                );
             }
             Err(error) => {
-                self.set_error(format!("Could not add note: {error}"));
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not add note: {error}"),
+                    cx,
+                );
             }
         }
         cx.notify();
@@ -1205,10 +1461,6 @@ impl Root {
         self.review.last_tick = Some(now);
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one dispatcher entry point keeps every key and click handler on the same path"
-    )]
     pub(crate) fn dispatch(
         &mut self,
         action: UiAction,
@@ -1223,6 +1475,15 @@ impl Root {
             UiAction::Grade(Rating::Good) => self.grade(Rating::Good, cx),
             UiAction::Grade(Rating::Easy) => self.grade(Rating::Easy, cx),
             UiAction::Retry => self.reveal(cx),
+            UiAction::Undo => self.undo_grade(cx),
+            UiAction::StudyAgain => {
+                if self.view == View::Review
+                    && self.review.current.is_none()
+                    && self.review.answered > 0
+                {
+                    self.study_again(cx);
+                }
+            }
             UiAction::EndSession => {
                 if self.view == View::Review {
                     self.end_session(cx);
@@ -1302,6 +1563,8 @@ pub enum UiAction {
     Reveal,
     Grade(Rating),
     Retry,
+    Undo,
+    StudyAgain,
     EndSession,
     OpenDecks,
     OpenAdd,
@@ -1345,6 +1608,16 @@ impl From<&GradeEasy> for UiAction {
 impl From<&Retry> for UiAction {
     fn from(_: &Retry) -> Self {
         Self::Retry
+    }
+}
+impl From<&Undo> for UiAction {
+    fn from(_: &Undo) -> Self {
+        Self::Undo
+    }
+}
+impl From<&StudyAgain> for UiAction {
+    fn from(_: &StudyAgain) -> Self {
+        Self::StudyAgain
     }
 }
 impl From<&EndSession> for UiAction {
@@ -1433,6 +1706,10 @@ pub fn dispatch_app_action(
             window.dispatch_action(Box::new(GradeEasy), cx);
         }
         UiAction::Retry => window.dispatch_action(Box::new(Retry), cx),
+        UiAction::Undo => window.dispatch_action(Box::new(Undo), cx),
+        UiAction::StudyAgain => {
+            window.dispatch_action(Box::new(StudyAgain), cx);
+        }
         UiAction::EndSession => {
             window.dispatch_action(Box::new(EndSession), cx);
         }
@@ -1506,6 +1783,12 @@ impl Render for Root {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
             .on_action(cx.listener(|this, action: &Retry, window, cx| {
+                this.dispatch(UiAction::from(action), window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &Undo, window, cx| {
+                this.dispatch(UiAction::from(action), window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &StudyAgain, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
             .on_action(cx.listener(|this, action: &EndSession, window, cx| {
@@ -1712,6 +1995,57 @@ pub const fn due_total(stats: DeckStats) -> usize {
         .saturating_add(stats.review_cards)
 }
 
+/// Graded share of the session. An empty queue is never full.
+#[must_use]
+pub fn session_progress(answered: usize, total: usize) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+    let answered = u32::try_from(answered).unwrap_or(u32::MAX);
+    let total = u32::try_from(total).unwrap_or(u32::MAX);
+    (answered as f32 / total as f32).clamp(0.0, 1.0)
+}
+
+/// Remaining cards in the session, split by queue. The current card counts as
+/// remaining until it is graded, so the header never claims a card is done
+/// while it still fills the stage.
+#[must_use]
+pub fn queue_counts(
+    current: Option<&Card>,
+    queue: &VecDeque<Card>,
+) -> DeckStats {
+    let mut stats = DeckStats::default();
+    for card in current.into_iter().chain(queue.iter()) {
+        stats.total_cards = stats.total_cards.saturating_add(1);
+        match card.card_type {
+            CardType::New => {
+                stats.new_cards = stats.new_cards.saturating_add(1);
+            }
+            CardType::Learning | CardType::Relearning => {
+                stats.learning_cards = stats.learning_cards.saturating_add(1);
+            }
+            CardType::Review => {
+                stats.review_cards = stats.review_cards.saturating_add(1);
+            }
+        }
+    }
+    stats
+}
+
+/// Study time for the session summary: seconds under a minute, then minutes
+/// with a seconds remainder, then whole hours.
+#[must_use]
+pub fn duration_label(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    if seconds < 3_600 {
+        return format!("{}m {}s", seconds / 60, seconds % 60);
+    }
+    format!("{}h {}m", seconds / 3_600, (seconds % 3_600) / 60)
+}
+
 /// Sums only real leaf decks so parents never double count.
 #[must_use]
 #[cfg(test)]
@@ -1817,10 +2151,6 @@ pub fn validate_draft(
 }
 
 /// Inline validation for the image-occlusion editor.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the draft state and the note type belong to one check"
-)]
 #[must_use]
 pub fn validate_occlusion(
     deck: &Deck,
@@ -2136,9 +2466,13 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("3", GradeGood, Some(STUDY_CONTEXT)),
         KeyBinding::new("4", GradeEasy, Some(STUDY_CONTEXT)),
         KeyBinding::new("r", Retry, Some(STUDY_CONTEXT)),
+        KeyBinding::new("ctrl-z", Undo, Some(STUDY_CONTEXT)),
+        KeyBinding::new("s", StudyAgain, Some(STUDY_CONTEXT)),
         KeyBinding::new("d", OpenDecks, Some(STUDY_CONTEXT)),
         KeyBinding::new("a", OpenAdd, Some(STUDY_CONTEXT)),
         KeyBinding::new("?", ToggleHelp, Some(STUDY_CONTEXT)),
+        KeyBinding::new("shift-?", ToggleHelp, Some(STUDY_CONTEXT)),
+        KeyBinding::new("f1", ToggleHelp, Some(STUDY_CONTEXT)),
         KeyBinding::new("t", ToggleScheduler, Some(STUDY_CONTEXT)),
         KeyBinding::new("n", NextDeck, Some(STUDY_CONTEXT)),
         KeyBinding::new("esc", EndSession, Some("ranki")),
@@ -2156,17 +2490,76 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 
 #[cfg(test)]
 mod tests {
-    use ranki_model::{CardTemplate, Deck, NoteKind, NoteModel, SchedulerKind};
+    use std::collections::VecDeque;
+    use std::time::Duration;
+
+    use ranki_model::{
+        Card, CardTemplate, CardType, Deck, Id, NoteKind, NoteModel,
+        SchedulerKind,
+    };
 
     use crate::Options;
 
     use super::{
         DeckRow, EmptyKind, Phase, SYNC_STATE, UiAction, View, build_deck_rows,
-        collect_tags, date_label, deck_meta, due_total, empty_copy, empty_kind,
-        filter_decks, focused_delta, model_index, models_with_stock,
-        next_due_deck, next_view, note_type_name, relative_age, status_label,
+        collect_tags, date_label, deck_meta, due_total, duration_label,
+        empty_copy, empty_kind, filter_decks, focused_delta, model_index,
+        models_with_stock, next_due_deck, next_view, note_type_name,
+        queue_counts, relative_age, session_progress, status_label,
         sum_leaf_counts, validate_draft, validate_occlusion,
     };
+    #[test]
+    fn session_progress_never_fills_an_empty_queue() {
+        assert_eq!(session_progress(0, 0), 0.0);
+        assert_eq!(session_progress(0, 20), 0.0);
+        assert_eq!(session_progress(10, 20), 0.5);
+        assert_eq!(session_progress(20, 20), 1.0);
+        assert_eq!(session_progress(21, 20), 1.0);
+    }
+
+    #[test]
+    fn duration_labels_read_like_a_session_summary() {
+        assert_eq!(duration_label(Duration::from_secs(0)), "0s");
+        assert_eq!(duration_label(Duration::from_secs(59)), "59s");
+        assert_eq!(duration_label(Duration::from_secs(60)), "1m 0s");
+        assert_eq!(duration_label(Duration::from_secs(125)), "2m 5s");
+        assert_eq!(duration_label(Duration::from_mins(65)), "1h 5m");
+    }
+
+    #[test]
+    fn queue_counts_include_the_current_card() {
+        let make = |id: Id, kind| Card {
+            id,
+            note_id: 1,
+            deck_id: 1,
+            ordinal: 0,
+            modified: 0,
+            usn: 0,
+            card_type: kind,
+            queue: ranki_model::CardQueue::New,
+            due: 0,
+            interval: 0,
+            factor: 0,
+            reps: 0,
+            lapses: 0,
+            left: 0,
+            original_due: 0,
+            original_deck_id: 0,
+            flags: 0,
+            data: String::new(),
+        };
+        let mut queue = VecDeque::new();
+        queue.push_back(make(2, CardType::Learning));
+        queue.push_back(make(3, CardType::Review));
+        let stats = queue_counts(Some(&make(1, CardType::New)), &queue);
+        assert_eq!(stats.new_cards, 1);
+        assert_eq!(stats.learning_cards, 1);
+        assert_eq!(stats.review_cards, 1);
+        assert_eq!(stats.total_cards, 3);
+        let empty = queue_counts(None, &VecDeque::new());
+        assert_eq!(empty, ranki_model::DeckStats::default());
+    }
+
     #[test]
     fn scheduler_follows_the_configured_algorithm() {
         let mut options = Options {

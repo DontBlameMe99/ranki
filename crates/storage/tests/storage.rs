@@ -452,6 +452,58 @@ fn apply_review_updates_card_log_and_collection_metadata() {
 }
 
 #[test]
+fn undo_review_restores_card_and_deletes_log() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(&["undo me", "answer"], &[]))
+        .expect("add");
+    let now = now_secs();
+    let before = store
+        .due_cards(None, 1, now)
+        .expect("due")
+        .pop()
+        .expect("due card");
+    let decision = FsrsScheduler::default().schedule(
+        &before,
+        Rating::Good,
+        now,
+        store.collection_created().expect("created"),
+    );
+    store.apply_review(&decision).expect("apply");
+    assert_ne!(
+        store.card(before.id).expect("card").expect("exists"),
+        before
+    );
+    assert_eq!(store.review_history().expect("history").len(), 1);
+
+    assert!(
+        store
+            .undo_review(&before, decision.revlog.id)
+            .expect("undo")
+    );
+    let mut restored = store.card(before.id).expect("card").expect("exists");
+    assert!(restored.usn > before.usn, "undo stamps a new sync usn");
+    restored.usn = before.usn;
+    assert_eq!(restored, before);
+    assert_eq!(
+        store.review_history().expect("history"),
+        [] as [ranki_model::RevLog; 0]
+    );
+
+    let unchanged = store.card(before.id).expect("card").expect("exists");
+    assert!(
+        !store
+            .undo_review(&before, decision.revlog.id)
+            .expect("retry")
+    );
+    assert_eq!(
+        store.card(before.id).expect("card").expect("exists"),
+        unchanged
+    );
+}
+
+#[test]
 fn stats_and_collection_modified_track_writes() {
     let (_directory, path) = fixture();
     let mut store = Collection::open(&path).expect("open");

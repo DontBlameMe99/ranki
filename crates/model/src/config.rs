@@ -67,6 +67,8 @@ pub struct Settings {
     pub font_size: f32,
     pub review_batch_size: usize,
     pub show_keyboard_hints: bool,
+    /// `None` follows the desktop animation preference.
+    pub reduce_motion: Option<bool>,
     pub scheduler: SchedulerKind,
     pub desired_retention: f32,
     pub auto_optimize: bool,
@@ -114,6 +116,7 @@ impl Default for Settings {
             font_size: 16.0,
             review_batch_size: 20,
             show_keyboard_hints: true,
+            reduce_motion: None,
             scheduler: SchedulerKind::Fsrs,
             desired_retention: 0.9,
             auto_optimize: true,
@@ -160,6 +163,7 @@ impl Settings {
             font_size: config.ui.font_size,
             review_batch_size: config.ui.review_batch_size,
             show_keyboard_hints: config.ui.show_keyboard_hints,
+            reduce_motion: config.ui.reduce_motion,
             scheduler: config.scheduler.algorithm,
             desired_retention: config.scheduler.desired_retention,
             auto_optimize: config.scheduler.auto_optimize,
@@ -245,6 +249,8 @@ pub struct UiConfig {
     pub review_batch_size: usize,
     #[serde(deserialize_with = "hints_field")]
     pub show_keyboard_hints: bool,
+    #[serde(default, deserialize_with = "reduced_motion_field")]
+    pub reduce_motion: Option<bool>,
 }
 
 impl Default for UiConfig {
@@ -254,6 +260,7 @@ impl Default for UiConfig {
             font_size: 16.0,
             review_batch_size: 20,
             show_keyboard_hints: true,
+            reduce_motion: None,
         }
     }
 }
@@ -297,6 +304,7 @@ const UI_KEYS: &[&str] = &[
     "font_size",
     "review_batch_size",
     "show_keyboard_hints",
+    "reduce_motion",
 ];
 const SCHEDULER_KEYS: &[&str] = &[
     "algorithm",
@@ -470,6 +478,21 @@ where
         |_| {
             invalid("ui.show_keyboard_hints");
             Ok(true)
+        },
+        Ok,
+    )
+}
+
+fn reduced_motion_field<'de, D>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<bool>::deserialize(deserializer).map_or_else(
+        |_| {
+            invalid("ui.reduce_motion");
+            Ok(None)
         },
         Ok,
     )
@@ -684,6 +707,26 @@ mod tests {
              [scheduler]\nalgorithm = 'magic'\ndesired_retention = 2.0\n",
         );
         assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn reduced_motion_setting_is_optional_and_validated() {
+        assert_eq!(
+            parse("[ui]\nreduce_motion = true\n").ui.reduce_motion,
+            Some(true)
+        );
+        assert_eq!(
+            parse("[ui]\nreduce_motion = false\n").ui.reduce_motion,
+            Some(false)
+        );
+        assert_eq!(parse("").ui.reduce_motion, None);
+        assert_eq!(
+            parse("[ui]\nreduce_motion = 'yes'\n").ui.reduce_motion,
+            None
+        );
+        let config = parse("[ui]\nreduce_motion = true\n");
+        let settings = Settings::resolve(None, None, None, &config);
+        assert_eq!(settings.reduce_motion, Some(true));
     }
 
     #[test]

@@ -77,6 +77,7 @@ theme = "system"   # dark | light | system
 font_size = 16.0
 review_batch_size = 20
 show_keyboard_hints = true
+reduce_motion = false # omitted: follow the desktop animation preference
 [scheduler]
 algorithm = "fsrs" # fsrs | sm2
 desired_retention = 0.9

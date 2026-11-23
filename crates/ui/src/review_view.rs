@@ -2,18 +2,22 @@
 
 use gpui::{
     ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, Rgba,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 use ranki_model::{CardType, Note, NoteModel};
 
 use crate::{
-    app::{Phase, Root, UiAction, leaf_deck_totals, rating_name},
+    app::{
+        Phase, Root, UiAction, due_total, duration_label, leaf_deck_totals,
+        queue_counts, rating_name,
+    },
     card_view,
-    components::{chip, icon, keycap, progress_bar_width},
+    components::{ClickHandler, chip, fade_in, icon, keycap, progress_bar},
     theme::{
-        CONTROL_HEIGHT, FOOTER_HEIGHT, PROGRESS_WIDTH, RATING_GAP,
-        STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS, STAGE_WIDTH, TOPBAR_HEIGHT,
-        alpha, interval_label, rating_fill, rating_label,
+        CONTROL_HEIGHT, FOOTER_HEIGHT, MOTION_PROGRESS_MS, MOTION_QUICK_MS,
+        PROGRESS_WIDTH, RATING_GAP, STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS,
+        STAGE_WIDTH, TOPBAR_HEIGHT, accent_hover, accent_press, alpha,
+        interval_label, rating_fill, rating_label,
     },
 };
 
@@ -25,26 +29,31 @@ impl Root {
     ) -> impl IntoElement {
         let colors = self.colors();
         let style = self.style();
-        let stats = if self.review.scope_all {
-            leaf_deck_totals(&self.decks, &self.stats)
+        let theme = self.theme();
+        let session =
+            queue_counts(self.review.current.as_ref(), &self.review.queue);
+        let deck_due = if self.review.scope_all {
+            due_total(leaf_deck_totals(&self.decks, &self.stats))
         } else {
             self.selected
                 .and_then(|index| self.stats.get(index))
                 .copied()
-                .unwrap_or_default()
+                .map_or(0, due_total)
         };
-        let total = self.review.session_total;
-        let fraction = if total == 0 {
-            0.0
-        } else {
-            self.review.answered as f32 / total as f32
-        };
+        let fraction = self.progress_fraction();
+        let from = self.review.progress_from;
         let current = self.review.current.clone();
         let phase = self.review.phase;
         let question = self.review.question.clone();
         let answer = self.review.answer.clone();
         let note = self.review.note.clone();
         let status = self.review.status.clone();
+        let answered = self.review.answered;
+        let again = self.review.again_count;
+        let studied = duration_label(self.session_elapsed());
+        let can_undo = self.review.last_grade.is_some();
+        let quick = self.motion_ms(MOTION_QUICK_MS);
+        let progress_ms = self.motion_ms(MOTION_PROGRESS_MS);
         let active_queue = current.as_ref().map(|card| card.card_type);
         let collection_start = self.store.collection_created().unwrap_or(0);
         let now = Self::now();
@@ -85,7 +94,7 @@ impl Root {
                 .and_then(|index| self.decks.get(index))
                 .map_or_else(
                     || String::from("All decks"),
-                    |deck| deck.name.replace("::", " › "),
+                    |deck| deck.name.replace("::", " \u{203a} "),
                 )
         };
         let tags = note
@@ -157,6 +166,8 @@ impl Root {
                         .text_size(px(14.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .cursor_pointer()
+                        .hover(move |row| row.bg(colors.surface1))
+                        .active(move |row| row.bg(alpha(colors.text, 0.08)))
                         .on_click(end)
                         .child(icon("icon-arrow-left", 18., colors.text))
                         .child("End session")
@@ -174,9 +185,14 @@ impl Root {
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .child(deck_name),
                         )
-                        .children((total > 0).then(|| {
-                            progress_bar_width(fraction, colors, PROGRESS_WIDTH)
-                        })),
+                        .child(progress_bar(
+                            from,
+                            fraction,
+                            colors,
+                            PROGRESS_WIDTH,
+                            progress_ms,
+                            ("progress", answered),
+                        )),
                 )
                 .child(
                     div()
@@ -185,16 +201,16 @@ impl Root {
                         .gap(px(22.))
                         .child(queue_count(
                             "New",
-                            stats.new_cards,
+                            session.new_cards,
                             colors.blue,
-                            crate::theme::queue_text(0, self.theme()),
+                            crate::theme::queue_text(0, theme),
                             active_queue == Some(CardType::New),
                         ))
                         .child(queue_count(
                             "Learning",
-                            stats.learning_cards,
+                            session.learning_cards,
                             colors.red,
-                            crate::theme::queue_text(1, self.theme()),
+                            crate::theme::queue_text(1, theme),
                             matches!(
                                 active_queue,
                                 Some(CardType::Learning | CardType::Relearning)
@@ -202,15 +218,96 @@ impl Root {
                         ))
                         .child(queue_count(
                             "Review",
-                            stats.review_cards,
+                            session.review_cards,
                             colors.green,
-                            crate::theme::queue_text(2, self.theme()),
+                            crate::theme::queue_text(2, theme),
                             active_queue == Some(CardType::Review),
                         )),
                 ),
         );
 
-        let body = if current.is_none() {
+        let body = if current.is_none() && answered > 0 {
+            let practice = self.action_click(UiAction::StudyAgain);
+            let back = self.action_click(UiAction::EndSession);
+            let summary =
+                div().flex_1().flex().items_center().justify_center().child(
+                    div()
+                        .w(px(STAGE_WIDTH))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(18.))
+                        .p(px(32.))
+                        .rounded(px(STAGE_RADIUS))
+                        .bg(colors.surface0)
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(colors.subtext)
+                                .child("SESSION COMPLETE"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(32.))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .child(summary_title(answered)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(14.))
+                                .child(summary_tile(
+                                    "REVIEWED",
+                                    &format!("{answered}"),
+                                    colors.mauve,
+                                    colors,
+                                ))
+                                .child(summary_tile(
+                                    "AGAIN",
+                                    &format!("{again}"),
+                                    colors.red,
+                                    colors,
+                                ))
+                                .child(summary_tile(
+                                    "TIME",
+                                    &studied,
+                                    colors.green,
+                                    colors,
+                                )),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .text_color(colors.subtext)
+                                .child(if deck_due == 0 {
+                                    String::from("Nothing else is due here.")
+                                } else {
+                                    format!("{deck_due} cards are still due.")
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(10.))
+                                .child(footer_button(
+                                    "Back to decks",
+                                    colors,
+                                    false,
+                                    back,
+                                ))
+                                .children((deck_due > 0).then(|| {
+                                    footer_button(
+                                        "Study again",
+                                        colors,
+                                        true,
+                                        practice,
+                                    )
+                                })),
+                        ),
+                );
+            summary.into_any_element()
+        } else if current.is_none() {
             div()
                 .flex_1()
                 .flex()
@@ -222,7 +319,7 @@ impl Root {
                         .flex_col()
                         .items_center()
                         .justify_center()
-                        .gap(px(8.))
+                        .gap(px(10.))
                         .w(px(STAGE_WIDTH))
                         .h(px(240.))
                         .rounded(px(STAGE_RADIUS))
@@ -238,7 +335,14 @@ impl Root {
                                 .text_size(px(14.))
                                 .text_color(colors.subtext)
                                 .child("No cards are due right now"),
-                        ),
+                        )
+                        .child(footer_button(
+                            "Back to decks",
+                            colors,
+                            false,
+                            self.action_click(UiAction::EndSession),
+                        ))
+                        .into_any_element(),
                 )
                 .into_any_element()
         } else {
@@ -251,91 +355,70 @@ impl Root {
                 .p(px(STAGE_PADDING))
                 .rounded(px(STAGE_RADIUS))
                 .bg(colors.surface0)
-                .child(
+                .child(div().flex().items_center().justify_between().child(
+                    div().flex().gap(px(6.)).children(
+                        tags.iter().map(|tag| chip(tag.clone(), colors)),
+                    ),
+                ));
+            let mut center = div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(10.))
+                .children((phase == Phase::Question).then(|| {
                     div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(div().flex().gap(px(6.)).children(
-                            tags.iter().map(|tag| chip(tag.clone(), colors)),
-                        ))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .h(px(40.))
-                                .px(px(12.))
-                                .rounded(px(20.))
-                                .bg(alpha(colors.mauve, 0.16))
-                                .text_color(colors.mauve)
-                                .child(icon("icon-volume", 20., colors.mauve))
-                                .child(keycap("R", colors, false)),
-                        ),
-                )
-                .child(
+                        .text_size(px(11.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(colors.subtext)
+                        .child("RECALL THE MEANING")
+                }))
+                .child(if let Some(card) = question.as_ref() {
+                    card_view::rendered_text(card, colors.text, 84.)
+                        .into_any_element()
+                } else {
                     div()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(10.))
-                        .children((phase == Phase::Question).then(|| {
-                            div()
-                                .text_size(px(11.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(colors.subtext)
-                                .child("RECALL THE MEANING")
-                        }))
-                        .child(if let Some(card) = question.as_ref() {
-                            card_view::rendered_text(card, colors.text, 84.)
-                                .into_any_element()
-                        } else {
-                            div()
-                                .text_size(px(84.))
-                                .child("No cards due")
-                                .into_any_element()
-                        })
-                        .children(reading.as_ref().map(|text| {
-                            div()
-                                .text_size(px(18.))
-                                .text_color(colors.subtext)
-                                .child(text.clone())
-                        }))
-                        .children(
-                            (phase == Phase::Answer).then(|| separator(colors)),
-                        )
-                        .children((phase == Phase::Answer).then(|| {
-                            div()
-                                .text_size(px(36.))
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(colors.mauve)
-                                .child(if let Some(card) = answer.as_ref() {
-                                    card_view::rendered_text(
-                                        card,
-                                        colors.mauve,
-                                        32.,
-                                    )
-                                    .into_any_element()
-                                } else {
-                                    div().into_any_element()
-                                })
-                        }))
-                        .children(
-                            (phase == Phase::Answer)
-                                .then(|| {
-                                    answer.as_ref().and_then(|card| {
-                                        card_view::media_column(
-                                            &card.media,
-                                            &self.options.media_dir,
-                                            colors,
-                                        )
-                                    })
-                                })
-                                .flatten(),
-                        ),
-                );
+                        .text_size(px(84.))
+                        .child("No cards due")
+                        .into_any_element()
+                })
+                .children(reading.as_ref().map(|text| {
+                    div()
+                        .text_size(px(18.))
+                        .text_color(colors.subtext)
+                        .child(text.clone())
+                }));
+            if phase == Phase::Answer {
+                let mut answer_group = div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(separator(colors))
+                    .child(if let Some(card) = answer.as_ref() {
+                        card_view::rendered_text(card, colors.mauve, 32.)
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    });
+                if let Some(card) = answer.as_ref()
+                    && let Some(media) = card_view::media_column(
+                        &card.media,
+                        &self.options.media_dir,
+                        colors,
+                    )
+                {
+                    answer_group = answer_group.child(media);
+                }
+                let key = current
+                    .as_ref()
+                    .map_or(0, |card| usize::try_from(card.id).unwrap_or(0));
+                center =
+                    center.child(fade_in(answer_group, ("answer", key), quick));
+            }
+            stage = stage.child(center);
             if let Some(card) = question.as_ref() {
                 let masks = (!card.masks.is_empty()).then(|| {
                     card_view::occlusion_layer(
@@ -364,6 +447,9 @@ impl Root {
                 }
             }
             let stage = gpui::image_cache(self.images.clone()).child(stage);
+            let key = current
+                .as_ref()
+                .map_or(0, |card| usize::try_from(card.id).unwrap_or(0));
 
             div()
                 .flex_1()
@@ -372,7 +458,7 @@ impl Root {
                 .items_center()
                 .justify_center()
                 .gap(px(24.))
-                .child(stage)
+                .child(fade_in(stage, ("stage", key), quick))
                 .child(if phase == Phase::Question {
                     div()
                         .id("review-reveal")
@@ -388,6 +474,8 @@ impl Root {
                         .text_size(px(17.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .cursor_pointer()
+                        .hover(move |button| button.bg(accent_hover(theme)))
+                        .active(move |button| button.bg(accent_press(theme)))
                         .on_click(reveal)
                         .child("Show answer")
                         .child(keycap("Space", colors, true))
@@ -405,6 +493,10 @@ impl Root {
         };
         screen = screen.child(body);
 
+        let undo = self.action_click(UiAction::Undo);
+        let help = self.action_click(UiAction::ToggleHelp);
+        let add = self.action_click(UiAction::OpenAdd);
+        let scheduler = self.action_click(UiAction::ToggleScheduler);
         screen.child(
             div()
                 .h(px(FOOTER_HEIGHT))
@@ -417,18 +509,87 @@ impl Root {
                     div()
                         .flex()
                         .gap(px(4.))
-                        .child(footer_action("Undo", "Z", colors))
-                        .child(footer_action("Flag", "F", colors)),
+                        .child(footer_action(
+                            "Undo",
+                            "Ctrl Z",
+                            Some("icon-undo"),
+                            colors,
+                            can_undo,
+                            undo,
+                        ))
+                        .child(footer_action(
+                            "Shortcuts",
+                            "?",
+                            None,
+                            colors,
+                            true,
+                            help,
+                        )),
                 )
                 .child(
                     div()
                         .flex()
                         .gap(px(4.))
-                        .child(footer_action("Edit", "E", colors))
-                        .child(footer_action("Bury", "B", colors)),
+                        .child(footer_action(
+                            "Scheduler",
+                            "T",
+                            Some("icon-clock"),
+                            colors,
+                            true,
+                            scheduler,
+                        ))
+                        .child(footer_action(
+                            "Add card",
+                            "A",
+                            Some("icon-plus"),
+                            colors,
+                            true,
+                            add,
+                        )),
                 ),
         )
     }
+}
+
+/// Headline for a finished session, sized by what actually happened.
+fn summary_title(answered: usize) -> String {
+    match answered {
+        0 => String::from("Nothing due"),
+        1 => String::from("One card reviewed"),
+        _ => format!("{answered} cards reviewed"),
+    }
+}
+
+fn summary_tile(
+    label: &str,
+    value: &str,
+    hue: Rgba,
+    colors: crate::theme::Palette,
+) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .w(px(160.))
+        .p(px(14.))
+        .rounded(px(16.))
+        .border_1()
+        .border_color(colors.surface1)
+        .bg(colors.mantle)
+        .child(
+            div()
+                .text_size(px(11.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(colors.subtext)
+                .child(label.to_owned()),
+        )
+        .child(
+            div()
+                .text_size(px(22.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(hue)
+                .child(value.to_owned()),
+        )
 }
 
 fn separator(colors: crate::theme::Palette) -> gpui::Div {
@@ -499,9 +660,13 @@ fn rating_row(
         let theme = theme_from(colors);
         let hue = rating_fill(code, theme);
         let label_color = rating_label(code, theme);
+        let hover_fill = alpha(hue, 0.22);
+        let hover_border = alpha(hue, 0.6);
+        let press_fill = alpha(hue, 0.3);
+        let press_border = alpha(hue, 0.8);
         row = row.child(
             div()
-                .id("review-rating")
+                .id(SharedString::from(format!("review-rating-{code}")))
                 .flex_1()
                 .h(px(CONTROL_HEIGHT))
                 .flex()
@@ -514,6 +679,12 @@ fn rating_row(
                 .border_1()
                 .border_color(alpha(hue, 0.4))
                 .cursor_pointer()
+                .hover(move |button| {
+                    button.bg(hover_fill).border_color(hover_border)
+                })
+                .active(move |button| {
+                    button.bg(press_fill).border_color(press_border)
+                })
                 .on_click(cx.listener(
                     move |this, _: &ClickEvent, window, cx| {
                         this.dispatch(action.clone(), window, cx);
@@ -557,18 +728,24 @@ fn theme_from(colors: crate::theme::Palette) -> crate::theme::Theme {
     }
 }
 
+/// Footer hint row. Disabled actions keep their key badge off and explain the
+/// reason through their label, so a dead control never looks live.
 fn footer_action(
-    label: &str,
-    key: &str,
+    label: &'static str,
+    key: &'static str,
+    icon_name: Option<&'static str>,
     colors: crate::theme::Palette,
-) -> gpui::Div {
-    let icon_name = match label {
-        "Undo" => "icon-undo",
-        "Flag" => "icon-flag",
-        "Edit" => "icon-more",
-        _ => "icon-x",
+    enabled: bool,
+    on_click: ClickHandler,
+) -> gpui::Stateful<gpui::Div> {
+    let ink = if enabled {
+        colors.subtext
+    } else {
+        alpha(colors.subtext, 0.4)
     };
-    div()
+    let hover = colors.surface0;
+    let mut row = div()
+        .id(SharedString::from(format!("footer-{label}")))
         .flex()
         .items_center()
         .gap(px(8.))
@@ -576,10 +753,59 @@ fn footer_action(
         .px(px(12.))
         .rounded(px(10.))
         .text_size(px(13.))
-        .text_color(colors.subtext)
-        .child(icon(icon_name, 16., colors.subtext))
+        .text_color(ink)
+        .children(icon_name.map(|name| icon(name, 16., ink)))
         .child(label.to_owned())
-        .child(keycap(key.to_owned(), colors, false))
+        .children(enabled.then(|| keycap(key.to_owned(), colors, false)));
+    if enabled {
+        row = row
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .on_click(on_click);
+    }
+    row
+}
+
+/// One filled or outlined button for the session summary.
+fn footer_button(
+    label: &'static str,
+    colors: crate::theme::Palette,
+    primary: bool,
+    on_click: ClickHandler,
+) -> impl IntoElement {
+    let theme = theme_from(colors);
+    let (bg, ink) = if primary {
+        (colors.mauve, crate::theme::accent_ink(theme))
+    } else {
+        (colors.mantle, colors.text)
+    };
+    let hover = if primary {
+        accent_hover(theme)
+    } else {
+        colors.surface0
+    };
+    div()
+        .id(SharedString::from(format!("summary-{label}")))
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(44.))
+        .px(px(20.))
+        .rounded(px(14.))
+        .bg(bg)
+        .border_1()
+        .border_color(if primary {
+            colors.mauve
+        } else {
+            colors.surface1
+        })
+        .text_color(ink)
+        .text_size(px(15.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover))
+        .on_click(on_click)
+        .child(label)
 }
 
 #[cfg(test)]
@@ -597,5 +823,12 @@ mod tests {
     #[test]
     fn rating_palette_uses_peach_for_hard() {
         assert_eq!(rating_fill(2, Theme::Dark), crate::theme::MOCHA.peach);
+    }
+
+    #[test]
+    fn summary_titles_count_cards() {
+        assert_eq!(super::summary_title(0), "Nothing due");
+        assert_eq!(super::summary_title(1), "One card reviewed");
+        assert_eq!(super::summary_title(12), "12 cards reviewed");
     }
 }

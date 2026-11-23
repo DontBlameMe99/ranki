@@ -631,6 +631,63 @@ impl Store for Collection {
         Ok(())
     }
 
+    fn undo_review(
+        &mut self,
+        before: &Card,
+        revlog_id: Id,
+    ) -> Result<bool, StoreError> {
+        let transaction = self.conn.transaction().map_err(backend)?;
+        let logged = transaction
+            .query_row(
+                "SELECT 1 FROM revlog WHERE id = ?1 AND cid = ?2",
+                params![revlog_id, before.id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(backend)?
+            .is_some();
+        if !logged {
+            return Ok(false);
+        }
+        let usn = update_col(&transaction, true)?;
+        transaction
+            .execute(
+                "DELETE FROM revlog WHERE id = ?1 AND cid = ?2",
+                params![revlog_id, before.id],
+            )
+            .map_err(backend)?;
+        let updated = transaction
+            .execute(
+                "UPDATE cards SET did = ?1, mod = ?2, usn = ?3, type = ?4, queue = ?5, due = ?6, \
+                 ivl = ?7, factor = ?8, reps = ?9, lapses = ?10, left = ?11, odue = ?12, odid = \
+                 ?13, flags = ?14, data = ?15 WHERE id = ?16",
+                params![
+                    before.deck_id,
+                    before.modified,
+                    usn,
+                    before.card_type.code(),
+                    before.queue.code(),
+                    before.due,
+                    before.interval,
+                    before.factor,
+                    before.reps,
+                    before.lapses,
+                    before.left,
+                    before.original_due,
+                    before.original_deck_id,
+                    before.flags,
+                    before.data,
+                    before.id,
+                ],
+            )
+            .map_err(backend)?;
+        if updated == 0 {
+            return Err(StoreError::NotFound(format!("card {}", before.id)));
+        }
+        transaction.commit().map_err(backend)?;
+        Ok(true)
+    }
+
     fn stats(
         &self,
         deck_id: Option<Id>,

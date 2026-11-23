@@ -112,6 +112,134 @@ pub const fn accent_ink(theme: Theme) -> Rgba {
         Theme::Light => c(0xffffff),
     }
 }
+
+/// Motion durations for the two purposeful transitions. Both stay under the
+/// 150 ms ceiling the mockup spec allows for a state swap, and neither blocks
+/// input: gpui advances animations on the frame clock, not on the action.
+pub const MOTION_QUICK_MS: u64 = 120;
+pub const MOTION_PROGRESS_MS: u64 = 180;
+
+/// Mixes two roles. Used only to derive hover and pressed shades of an
+/// existing role, never to introduce a new hue.
+#[must_use]
+pub fn blend(from: Rgba, to: Rgba, amount: f32) -> Rgba {
+    let amount = amount.clamp(0.0, 1.0);
+    let mix = |start: f32, end: f32| start + (end - start) * amount;
+    Rgba {
+        r: mix(from.r, to.r),
+        g: mix(from.g, to.g),
+        b: mix(from.b, to.b),
+        a: from.a + (to.a - from.a) * amount,
+    }
+}
+
+/// Hover shade for an accent fill: mauve lifted toward white.
+#[must_use]
+pub fn accent_hover(theme: Theme) -> Rgba {
+    blend(palette(theme).mauve, c(0xffffff), 0.12)
+}
+
+/// Pressed shade for an accent fill: mauve pulled toward crust.
+#[must_use]
+pub fn accent_press(theme: Theme) -> Rgba {
+    let colors = palette(theme);
+    blend(colors.mauve, colors.crust, 0.14)
+}
+
+/// Keycap ink on a `surface1` notch. Mockup `subtext` reaches 4.2:1 at 11px,
+/// below WCAG AA. `text` clears it in Mocha, and Latte needs a 15% darker
+/// shade of the same role to clear 4.5:1 on the light notch.
+#[must_use]
+pub fn keycap_ink(colors: Palette) -> Rgba {
+    if colors.base.r > 0.5 {
+        blend(
+            colors.text,
+            Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            0.15,
+        )
+    } else {
+        colors.text
+    }
+}
+
+/// True when the user asked for reduced motion. The explicit setting wins over
+/// the desktop preference, which wins over the default of full motion.
+#[must_use]
+pub fn reduced_motion(setting: Option<bool>) -> bool {
+    setting.unwrap_or_else(system_reduced_motion)
+}
+
+/// Reads the desktop animation preference once. gpui 0.2.2 has no
+/// reduced-motion API and the portal exposes no motion key, so the GTK and KDE
+/// conventions are the only sources available.
+fn system_reduced_motion() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Some(value) = std::env::var("RANKI_REDUCE_MOTION")
+            .ok()
+            .and_then(|raw| parse_flag_bool(&raw))
+        {
+            return value;
+        }
+        dconf_animations_disabled()
+            || std::fs::read_to_string(kdeglobals_path())
+                .is_ok_and(|text| kde_animations_disabled(&text))
+    })
+}
+
+/// Parses the boolean spellings used by GTK settings, environment variables,
+/// and `dconf`. Unknown text is `None`, so callers keep their fallback.
+#[must_use]
+pub fn parse_flag_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// KDE exposes reduced motion as a zero animation duration factor.
+#[must_use]
+pub fn kde_animations_disabled(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        key.trim() == "AnimationDurationFactor"
+            && value
+                .trim()
+                .parse::<f32>()
+                .is_ok_and(|factor| factor <= 0.0)
+    })
+}
+
+fn dconf_animations_disabled() -> bool {
+    let Ok(output) = std::process::Command::new("dconf")
+        .args(["read", "/org/gnome/desktop/interface/enable-animations"])
+        .output()
+    else {
+        return false;
+    };
+    output.status.success()
+        && parse_flag_bool(&String::from_utf8_lossy(&output.stdout))
+            == Some(false)
+}
+
+fn kdeglobals_path() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME").map_or_else(
+        || {
+            std::env::var_os("HOME")
+                .map_or_else(std::path::PathBuf::new, std::path::PathBuf::from)
+        },
+        std::path::PathBuf::from,
+    );
+    base.join("kdeglobals")
+}
 /// Palette plus resolved theme, passed by value to shared element helpers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Style {
@@ -335,10 +463,12 @@ mod tests {
     use gpui::rgb;
 
     use super::{
-        LATTE, MOCHA, PROGRESS_HEIGHT, PROGRESS_WIDTH, STAGE_HEIGHT,
-        STAGE_RADIUS, STAGE_WIDTH, Theme, alpha, font_candidates,
-        interval_label, palette, placeholder_color, rating_fill, rating_label,
-        resolve_theme,
+        LATTE, MOCHA, MOTION_PROGRESS_MS, MOTION_QUICK_MS, PROGRESS_HEIGHT,
+        PROGRESS_WIDTH, STAGE_HEIGHT, STAGE_RADIUS, STAGE_WIDTH, Theme,
+        accent_hover, accent_press, alpha, blend, font_candidates,
+        interval_label, kde_animations_disabled, keycap_ink, palette,
+        parse_flag_bool, placeholder_color, rating_fill, rating_label,
+        reduced_motion, resolve_theme,
     };
     use crate::ThemeChoice;
 
@@ -447,5 +577,58 @@ mod tests {
             assert!(contrast(ink, input) >= 4.5, "{theme:?} on base");
             assert!(contrast(ink, raised) >= 4.5, "{theme:?} on surface0");
         }
+    }
+    #[test]
+    fn keycaps_clear_4_5_to_1_on_the_notch_and_the_sidebar() {
+        for theme in [Theme::Dark, Theme::Light] {
+            let colors = palette(theme);
+            let ink = keycap_ink(colors);
+            assert!(contrast(ink, colors.surface1) >= 4.5, "{theme:?} notch");
+            assert!(contrast(ink, colors.crust) >= 4.5, "{theme:?} sidebar");
+        }
+    }
+
+    #[test]
+    fn blend_keeps_the_hue_between_its_inputs() {
+        let hover = accent_hover(Theme::Dark);
+        let press = accent_press(Theme::Dark);
+        assert!(hover.r > MOCHA.mauve.r && hover.b >= MOCHA.mauve.b);
+        assert!(press.r < MOCHA.mauve.r && press.b < MOCHA.mauve.b);
+        assert_eq!(hover.a, 1.0);
+        let close = |left: gpui::Rgba, right: gpui::Rgba| {
+            (left.r - right.r).abs() < 0.01
+                && (left.g - right.g).abs() < 0.01
+                && (left.b - right.b).abs() < 0.01
+        };
+        assert!(close(blend(MOCHA.mauve, MOCHA.crust, 0.0), MOCHA.mauve));
+        assert!(close(blend(MOCHA.mauve, MOCHA.crust, 1.0), MOCHA.crust));
+    }
+
+    #[test]
+    fn motion_durations_stay_under_the_spec_ceiling() {
+        const { assert!(MOTION_QUICK_MS <= 150) };
+        const { assert!(MOTION_PROGRESS_MS <= 200) };
+        assert!(reduced_motion(Some(true)));
+        assert!(!reduced_motion(Some(false)));
+    }
+
+    #[test]
+    fn flag_booleans_cover_the_desktop_spellings() {
+        assert_eq!(parse_flag_bool("true"), Some(true));
+        assert_eq!(parse_flag_bool(" FALSE\n"), Some(false));
+        assert_eq!(parse_flag_bool("1"), Some(true));
+        assert_eq!(parse_flag_bool("off"), Some(false));
+        assert_eq!(parse_flag_bool("maybe"), None);
+    }
+
+    #[test]
+    fn kde_zero_animation_factor_disables_motion() {
+        assert!(kde_animations_disabled(
+            "[KDE]\nAnimationDurationFactor=0\n"
+        ));
+        assert!(kde_animations_disabled("AnimationDurationFactor=0.0\n"));
+        assert!(!kde_animations_disabled("AnimationDurationFactor=1\n"));
+        assert!(!kde_animations_disabled("[KDE]\nSingleClick=false\n"));
+        assert!(!kde_animations_disabled("not a pair"));
     }
 }

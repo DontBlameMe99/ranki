@@ -6,7 +6,7 @@ use gpui::{
     svg,
 };
 
-use crate::theme::{Palette, Style, alpha};
+use crate::theme::{Palette, Style, alpha, keycap_ink};
 
 pub type ClickHandler =
     Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -46,8 +46,12 @@ pub fn secondary_button(
     colors: Palette,
     on_click: ClickHandler,
 ) -> impl IntoElement {
+    let label = label.into();
+    let id = SharedString::from(format!("secondary-{label}"));
+    let hover = colors.surface0;
+    let press = colors.surface1;
     div()
-        .id("auto-components-2")
+        .id(id)
         .flex()
         .items_center()
         .justify_center()
@@ -61,8 +65,10 @@ pub fn secondary_button(
         .text_size(px(14.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .cursor_pointer()
+        .hover(move |style| style.bg(hover))
+        .active(move |style| style.bg(press))
         .on_click(on_click)
-        .child(label.into())
+        .child(label)
 }
 
 #[must_use]
@@ -71,8 +77,12 @@ pub fn small_button(
     style: Style,
     on_click: ClickHandler,
 ) -> impl IntoElement {
+    let label = label.into();
+    let id = SharedString::from(format!("small-{label}"));
+    let hover = crate::theme::accent_hover(style.theme);
+    let press = crate::theme::accent_press(style.theme);
     div()
-        .id("auto-components-3")
+        .id(id)
         .flex()
         .items_center()
         .justify_center()
@@ -84,8 +94,34 @@ pub fn small_button(
         .text_size(px(13.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .cursor_pointer()
+        .hover(move |style| style.bg(hover))
+        .active(move |style| style.bg(press))
         .on_click(on_click)
-        .child(label.into())
+        .child(label)
+}
+
+/// Fades an element in where it first paints. The clock starts on the frame
+/// that mounts `id`; changing the id replays the fade for new content. A zero
+/// duration returns the element unwrapped, which is what reduced motion uses.
+pub fn fade_in(
+    element: impl IntoElement + gpui::Styled + 'static,
+    id: impl Into<gpui::ElementId>,
+    milliseconds: u64,
+) -> gpui::AnyElement {
+    use gpui::AnimationExt as _;
+    if milliseconds == 0 {
+        return element.into_any_element();
+    }
+    element
+        .with_animation(
+            id,
+            gpui::Animation::new(std::time::Duration::from_millis(
+                milliseconds,
+            ))
+            .with_easing(|delta| 1.0 - (1.0 - delta) * (1.0 - delta)),
+            gpui::Styled::opacity,
+        )
+        .into_any_element()
 }
 
 /// Small key badge. Mauve fills use crust ink on an 18% crust notch.
@@ -98,7 +134,7 @@ pub fn keycap(
     let (ink, fill) = if on_accent {
         (colors.crust, alpha(colors.crust, 0.18))
     } else {
-        (colors.subtext, colors.surface1)
+        (keycap_ink(colors), colors.surface1)
     };
     div()
         .flex_none()
@@ -190,21 +226,44 @@ pub fn dot(color: Rgba, size: f32) -> Div {
         .flex_none()
 }
 
+/// Session progress track. The fill moves from `from` to `to` over
+/// `milliseconds`; a zero duration draws the target immediately.
 #[must_use]
-pub fn progress_bar_width(fraction: f32, colors: Palette, width: f32) -> Div {
-    let fill = fraction.clamp(0.0, 1.0) * width;
+pub fn progress_bar(
+    from: f32,
+    to: f32,
+    colors: Palette,
+    width: f32,
+    milliseconds: u64,
+    id: impl Into<gpui::ElementId> + 'static,
+) -> impl IntoElement {
+    use gpui::AnimationExt as _;
+    let from = from.clamp(0.0, 1.0);
+    let to = to.clamp(0.0, 1.0);
+    let height = crate::theme::PROGRESS_HEIGHT;
+    let fill = div().h(px(height)).rounded(px(3.)).bg(colors.mauve);
+    let animated = if milliseconds == 0 {
+        fill.w(px(to * width)).into_any_element()
+    } else {
+        fill.with_animation(
+            id,
+            gpui::Animation::new(std::time::Duration::from_millis(
+                milliseconds,
+            ))
+            .with_easing(|delta| 1.0 - (1.0 - delta) * (1.0 - delta)),
+            move |fill, delta| {
+                let value = from + (to - from) * delta;
+                fill.w(px(value * width))
+            },
+        )
+        .into_any_element()
+    };
     div()
         .w(px(width))
-        .h(px(crate::theme::PROGRESS_HEIGHT))
+        .h(px(height))
         .rounded(px(3.))
         .bg(colors.surface0)
-        .child(
-            div()
-                .w(px(fill))
-                .h(px(crate::theme::PROGRESS_HEIGHT))
-                .rounded(px(3.))
-                .bg(colors.mauve),
-        )
+        .child(animated)
 }
 
 #[cfg(test)]
