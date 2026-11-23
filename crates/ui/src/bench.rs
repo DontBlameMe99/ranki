@@ -45,6 +45,7 @@ pub struct BenchApp {
     decks: Vec<Deck>,
     stats: Vec<DeckStats>,
     expanded: HashSet<String>,
+    collection_start: i64,
 }
 
 impl BenchApp {
@@ -61,6 +62,7 @@ impl BenchApp {
                 let _ = store.create_deck(&format!("{root}::Deck {index}"));
             }
         }
+        let collection_start = store.collection_created().unwrap_or(0);
         let models = store.models().unwrap_or_default();
         let decks = store.decks().unwrap_or_default();
         let stats = deck_stats(&*store, &decks);
@@ -75,6 +77,7 @@ impl BenchApp {
             decks,
             stats,
             expanded: roots.into_iter().collect(),
+            collection_start,
         }
     }
 
@@ -84,7 +87,7 @@ impl BenchApp {
         if matches!(key, Some(BenchKey::Space)) && self.current.is_some() {
             self.revealed = true;
         }
-        let collection_start = self.store.collection_created().unwrap_or(0);
+        let collection_start = self.collection_start;
         if let Some(card) = self.current.clone() {
             let _ = [
                 self.scheduler.preview(

@@ -268,6 +268,7 @@ pub struct Root {
     pub(crate) dev_reveal: bool,
     pub(crate) external_change: bool,
     pub(crate) collection_modified: i64,
+    pub(crate) collection_start: i64,
     pub(crate) images: Entity<card_view::LruImageCache>,
     pub(crate) font_family: &'static str,
 }
@@ -401,6 +402,7 @@ impl Root {
                 .is_ok_and(|value| value == "1"),
             external_change: false,
             collection_modified: 0,
+            collection_start: 0,
             images: card_view::LruImageCache::new(cx),
             font_family: theme::ui_font_family(),
         };
@@ -635,6 +637,7 @@ impl Root {
             self.add.model_index = 0;
         }
         self.refresh_stats();
+        self.collection_start = self.store.collection_created().unwrap_or(0);
         self.collection_modified =
             self.store.collection_modified().unwrap_or(0);
         self.external_change = false;
@@ -1173,12 +1176,11 @@ impl Root {
         {
             return;
         }
-        let collection_start = self.store.collection_created().unwrap_or(0);
         let decision: ReviewDecision = self.scheduler.schedule(
             &card,
             rating,
             Self::now(),
-            collection_start,
+            self.collection_start,
         );
         let before_progress = self.progress_fraction();
         if let Err(error) = self.store.apply_review(&decision) {
@@ -1884,14 +1886,27 @@ impl Render for Root {
     }
 }
 
-/// Builds deck rows with virtual parents and stable depth-first ordering.
+/// Adds one deck's counts onto another, saturating at the type limits.
+fn add_deck_stats(total: &mut DeckStats, counts: DeckStats) {
+    total.new_cards = total.new_cards.saturating_add(counts.new_cards);
+    total.learning_cards =
+        total.learning_cards.saturating_add(counts.learning_cards);
+    total.review_cards = total.review_cards.saturating_add(counts.review_cards);
+    total.total_cards = total.total_cards.saturating_add(counts.total_cards);
+}
+
 /// Sums only decks that are not prefixes of another deck.
 #[must_use]
 pub fn leaf_deck_totals(decks: &[Deck], stats: &[DeckStats]) -> DeckStats {
     let mut total = DeckStats::default();
     for (index, deck) in decks.iter().enumerate() {
-        let prefix = format!("{}::", deck.name);
-        if decks.iter().any(|other| other.name.starts_with(&prefix)) {
+        let is_parent = decks.iter().any(|other| {
+            other
+                .name
+                .strip_prefix(deck.name.as_str())
+                .is_some_and(|rest| rest.starts_with("::"))
+        });
+        if is_parent {
             continue;
         }
         let Some(stat) = stats.get(index) else {
@@ -1907,126 +1922,145 @@ pub fn leaf_deck_totals(decks: &[Deck], stats: &[DeckStats]) -> DeckStats {
     total
 }
 
+/// One deck tree node while rows are built.
+struct DeckNode<'a> {
+    path: String,
+    deck: Option<&'a Deck>,
+    own: DeckStats,
+    total: DeckStats,
+    parent: Option<usize>,
+}
+
+/// Builds deck rows with virtual parents and stable depth-first ordering.
 #[must_use]
 pub fn build_deck_rows(
     decks: &[Deck],
     stats: &[DeckStats],
     expanded: &HashSet<String>,
 ) -> Vec<DeckRow> {
-    let mut nodes: Vec<(String, Option<&Deck>, DeckStats)> = Vec::new();
+    let capacity = decks.len().saturating_mul(2);
+    let mut nodes: Vec<DeckNode<'_>> = Vec::with_capacity(capacity);
+    let mut positions: HashMap<String, usize> =
+        HashMap::with_capacity(capacity);
     for (deck, stat) in decks.iter().zip(stats.iter()) {
         let path = deck.name.as_str();
         if path.is_empty() {
             continue;
         }
-        let segments = path.split("::").collect::<Vec<_>>();
-        let mut prefix = String::new();
-        for (index, segment) in segments.iter().enumerate() {
-            if index > 0 {
-                prefix.push_str("::");
+        let mut prefix_end = 0usize;
+        let mut segments = path.split("::").peekable();
+        while let Some(segment) = segments.next() {
+            if prefix_end > 0 {
+                prefix_end = prefix_end.saturating_add(2);
             }
-            prefix.push_str(segment);
-            if index + 1 == segments.len() {
-                let existing = nodes.iter().position(|(path, node, _)| {
-                    node.is_none() && path == &prefix
-                });
-                if let Some(position) = existing {
-                    if let Some(slot) = nodes.get_mut(position) {
-                        *slot = (prefix.clone(), Some(deck), *stat);
-                    }
-                } else {
-                    nodes.push((prefix.clone(), Some(deck), *stat));
-                }
-            } else if !nodes.iter().any(|(path, _, _)| path == &prefix) {
-                nodes.push((prefix.clone(), None, DeckStats::default()));
-            }
-        }
-    }
-    nodes.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut children: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (index, (path, _, _)) in nodes.iter().enumerate() {
-        let parent = path.rsplit_once("::").map_or("", |(parent, _)| parent);
-        children.entry(parent.to_owned()).or_default().push(index);
-    }
-    fn subtree(
-        index: usize,
-        nodes: &[(String, Option<&Deck>, DeckStats)],
-        children: &BTreeMap<String, Vec<usize>>,
-    ) -> DeckStats {
-        let (_, deck, stats) = nodes[index];
-        let mut total = if deck.is_some() {
-            stats
-        } else {
-            DeckStats::default()
-        };
-        if let Some(kids) = children.get(&nodes[index].0) {
-            for kid in kids {
-                let child = subtree(*kid, nodes, children);
-                total.new_cards =
-                    total.new_cards.saturating_add(child.new_cards);
-                total.learning_cards =
-                    total.learning_cards.saturating_add(child.learning_cards);
-                total.review_cards =
-                    total.review_cards.saturating_add(child.review_cards);
-                total.total_cards =
-                    total.total_cards.saturating_add(child.total_cards);
-            }
-        }
-        total
-    }
-    struct Tree<'a> {
-        nodes: &'a [(String, Option<&'a Deck>, DeckStats)],
-        children: &'a BTreeMap<String, Vec<usize>>,
-        expanded: &'a HashSet<String>,
-        rows: Vec<DeckRow>,
-    }
-
-    impl Tree<'_> {
-        fn visit(&mut self, path: &str, depth: usize) {
-            let Some(indices) = self.children.get(path) else {
-                return;
+            prefix_end = prefix_end.saturating_add(segment.len());
+            let Some(prefix) = path.get(..prefix_end) else {
+                break;
             };
-            for index in indices.clone() {
-                let child_path = self.nodes[index].0.clone();
-                let deck = self.nodes[index].1;
-                let stats = self.nodes[index].2;
-                let has_children = self.children.contains_key(&child_path);
-                let aggregate = if has_children {
-                    subtree(index, self.nodes, self.children)
-                } else {
-                    stats
-                };
-                let name = child_path
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or(&child_path)
-                    .to_owned();
-                let expanded = self.expanded.contains(&child_path);
-                self.rows.push(DeckRow {
-                    id: deck.map(|item| item.id),
-                    path: child_path.clone(),
-                    name,
-                    depth,
-                    stats: aggregate,
-                    virtual_group: deck.is_none(),
-                    has_children,
-                    expanded,
-                });
-                if expanded {
-                    self.visit(&child_path, depth.saturating_add(1));
+            let leaf = segments.peek().is_none();
+            match positions.get(prefix).copied() {
+                Some(position) if leaf => {
+                    let placeholder = nodes
+                        .get(position)
+                        .is_some_and(|node| node.deck.is_none());
+                    if placeholder {
+                        if let Some(node) = nodes.get_mut(position) {
+                            node.deck = Some(deck);
+                            node.own = *stat;
+                        }
+                    } else {
+                        nodes.push(DeckNode {
+                            path: prefix.to_owned(),
+                            deck: Some(deck),
+                            own: *stat,
+                            total: DeckStats::default(),
+                            parent: None,
+                        });
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    let position = nodes.len();
+                    nodes.push(DeckNode {
+                        path: prefix.to_owned(),
+                        deck: leaf.then_some(deck),
+                        own: if leaf { *stat } else { DeckStats::default() },
+                        total: DeckStats::default(),
+                        parent: None,
+                    });
+                    let _ = positions.insert(prefix.to_owned(), position);
                 }
             }
         }
     }
-
-    let mut tree = Tree {
-        nodes: &nodes,
-        children: &children,
-        expanded,
-        rows: Vec::new(),
-    };
-    tree.visit("", 0);
-    tree.rows
+    nodes.sort_by(|left, right| left.path.cmp(&right.path));
+    positions.clear();
+    for (position, node) in nodes.iter().enumerate() {
+        let _ = positions.insert(node.path.clone(), position);
+    }
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+    let mut roots: Vec<usize> = Vec::new();
+    for (position, node) in nodes.iter_mut().enumerate() {
+        let parent = node
+            .path
+            .rsplit_once("::")
+            .and_then(|(parent, _)| positions.get(parent).copied());
+        node.parent = parent;
+        match parent.and_then(|parent| children.get_mut(parent)) {
+            Some(list) => list.push(position),
+            None => roots.push(position),
+        }
+    }
+    for position in (0..nodes.len()).rev() {
+        let Some(node) = nodes.get(position) else {
+            continue;
+        };
+        let mut total = node.total;
+        add_deck_stats(&mut total, node.own);
+        let parent = node.parent;
+        if let Some(node) = nodes.get_mut(position) {
+            node.total = total;
+        }
+        if let Some(node) = parent.and_then(|parent| nodes.get_mut(parent)) {
+            add_deck_stats(&mut node.total, total);
+        }
+    }
+    let mut rows = Vec::with_capacity(nodes.len());
+    let mut stack = roots
+        .iter()
+        .rev()
+        .map(|position| (*position, 0usize))
+        .collect::<Vec<_>>();
+    while let Some((position, depth)) = stack.pop() {
+        let Some(node) = nodes.get(position) else {
+            continue;
+        };
+        let has_children =
+            children.get(position).is_some_and(|list| !list.is_empty());
+        let name = node
+            .path
+            .rsplit("::")
+            .next()
+            .unwrap_or(&node.path)
+            .to_owned();
+        let open = expanded.contains(&node.path);
+        rows.push(DeckRow {
+            id: node.deck.map(|deck| deck.id),
+            path: node.path.clone(),
+            name,
+            depth,
+            stats: node.total,
+            virtual_group: node.deck.is_none(),
+            has_children,
+            expanded: open,
+        });
+        if open && let Some(list) = children.get(position) {
+            for child in list.iter().rev() {
+                stack.push((*child, depth.saturating_add(1)));
+            }
+        }
+    }
+    rows
 }
 
 #[must_use]
@@ -2109,6 +2143,19 @@ pub fn sum_leaf_counts(rows: &[DeckRow]) -> DeckStats {
     total
 }
 
+/// Matches `needle` inside `haystack` the way a lowercased search would.
+fn contains_lowercase(haystack: &str, needle: &str) -> bool {
+    if haystack.is_ascii() && needle.is_ascii() {
+        let window = needle.len();
+        return window > 0
+            && haystack
+                .as_bytes()
+                .windows(window)
+                .any(|part| part.eq_ignore_ascii_case(needle.as_bytes()));
+    }
+    haystack.to_lowercase().contains(needle)
+}
+
 /// Keeps a matching row and every ancestor of a match.
 #[must_use]
 pub fn filter_decks(rows: &[DeckRow], query: &str) -> Vec<DeckRow> {
@@ -2118,7 +2165,7 @@ pub fn filter_decks(rows: &[DeckRow], query: &str) -> Vec<DeckRow> {
     }
     let mut keep = HashSet::new();
     for row in rows {
-        if row.path.to_lowercase().contains(&needle) {
+        if contains_lowercase(&row.path, &needle) {
             let _ = keep.insert(row.path.as_str());
             for (index, _) in row.path.match_indices("::") {
                 let _ = keep.insert(&row.path[..index]);

@@ -13,26 +13,26 @@ pub struct SearchQuery {
 }
 
 pub fn build(
-    query: &str,
+    tokens: &[String],
     decks: &[Deck],
     models: &[NoteModel],
 ) -> Result<SearchQuery, StoreError> {
     let mut conditions = Vec::new();
     let mut params = Vec::new();
-    for token in tokenize(query)? {
+    for token in tokens {
         let condition = match token.split_once(':') {
             Some(("deck", value)) => deck_condition(value, decks, &mut params),
             Some(("tag", value)) => {
                 params.push(SqlValue::Text(like_pattern(value, true)));
-                "lower(' ' || n.tags || ' ') LIKE ? ESCAPE '\\'".into()
+                "(' ' || n.tags || ' ') LIKE ? ESCAPE '\\'".into()
             }
             Some(("note", value)) => {
                 model_condition(value, models, &mut params)
             }
             Some(("is", value)) => state_condition(value)?,
             _ => {
-                params.push(SqlValue::Text(like_pattern(&token, false)));
-                "lower(n.flds) LIKE ? ESCAPE '\\'".into()
+                params.push(SqlValue::Text(like_pattern(token, false)));
+                "n.flds LIKE ? ESCAPE '\\'".into()
             }
         };
         conditions.push(condition);
@@ -46,7 +46,24 @@ pub fn build(
     })
 }
 
-fn tokenize(query: &str) -> Result<Vec<String>, StoreError> {
+/// Whether a token set needs a deck or note-type lookup to build its clause.
+///
+/// Deck and note-type filters resolve names against the collection, and that
+/// lookup reads and parses the whole collection row. Plain field text and
+/// `is:`/`tag:` filters never need it.
+pub fn needs_decks(tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .any(|token| matches!(token.split_once(':'), Some(("deck", _))))
+}
+
+pub fn needs_models(tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .any(|token| matches!(token.split_once(':'), Some(("note", _))))
+}
+
+pub fn tokenize(query: &str) -> Result<Vec<String>, StoreError> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut quoted = false;

@@ -10,7 +10,6 @@
     clippy::inconsistent_struct_constructor,
     clippy::indexing_slicing,
     clippy::integer_division,
-    clippy::items_after_statements,
     clippy::match_same_arms,
     clippy::missing_const_for_fn,
     clippy::needless_pass_by_ref_mut,

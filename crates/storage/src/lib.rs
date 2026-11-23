@@ -22,6 +22,7 @@ mod records;
 mod schema;
 mod search;
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Display;
@@ -68,6 +69,7 @@ pub const SEARCH_SYNTAX: &str = "deck:, tag:, note:, is:new/learn/review/suspend
 pub struct Collection {
     conn: Connection,
     path: PathBuf,
+    created: OnceCell<i64>,
 }
 
 impl Collection {
@@ -143,6 +145,7 @@ impl Collection {
         Ok(Self {
             conn,
             path: path.to_path_buf(),
+            created: OnceCell::new(),
         })
     }
 
@@ -205,9 +208,15 @@ impl Collection {
     ///
     /// Returns an error when the database cannot be read.
     pub fn collection_created(&self) -> Result<i64, StoreError> {
-        self.conn
+        if let Some(created) = self.created.get() {
+            return Ok(*created);
+        }
+        let created = self
+            .conn
             .query_row("SELECT crt FROM col WHERE id = 1", [], |row| row.get(0))
-            .map_err(backend)
+            .map_err(backend)?;
+        let _ = self.created.set(created);
+        Ok(created)
     }
 
     /// Checkpoints the write-ahead log, if the collection uses one.
@@ -464,8 +473,18 @@ impl Store for Collection {
     }
 
     fn find_cards(&self, query: &str) -> Result<Vec<Id>, StoreError> {
-        let search =
-            search::build(query, &self.deck_list()?, &self.model_list()?)?;
+        let tokens = search::tokenize(query)?;
+        let decks = if search::needs_decks(&tokens) {
+            self.deck_list()?
+        } else {
+            Vec::new()
+        };
+        let models = if search::needs_models(&tokens) {
+            self.model_list()?
+        } else {
+            Vec::new()
+        };
+        let search = search::build(&tokens, &decks, &models)?;
         let sql = format!(
             "SELECT c.id FROM cards c JOIN notes n ON n.id = c.nid WHERE {} ORDER BY c.id",
             search.clause
@@ -1061,16 +1080,25 @@ fn next_stamp(previous: i64, now: i64) -> i64 {
 }
 
 fn col_stamp(col: &records::ColData) -> Result<ColStamp, StoreError> {
-    let usn = col
+    stamp_from(&Stamps {
+        modified: col.modified,
+        scm: col.scm,
+        last_sync: col.last_sync,
+        usn: col.usn,
+    })
+}
+
+fn stamp_from(stamps: &Stamps) -> Result<ColStamp, StoreError> {
+    let usn = stamps
         .usn
         .checked_add(1)
         .ok_or_else(|| invalid("usn overflow"))?;
     let now = anki::now_ms()?;
     Ok(ColStamp {
         usn,
-        modified: next_stamp(col.modified, now),
-        scm: next_stamp(col.scm, now),
-        ls: next_stamp(col.last_sync, now),
+        modified: next_stamp(stamps.modified, now),
+        scm: next_stamp(stamps.scm, now),
+        ls: next_stamp(stamps.last_sync, now),
         now_secs: anki::now_secs()?,
     })
 }
@@ -1316,15 +1344,42 @@ fn write_graves(
     Ok(())
 }
 fn update_col(conn: &Connection, bump_scm: bool) -> Result<i32, StoreError> {
-    let col = records::read_col(conn)?;
-    let stamp = col_stamp(&col)?;
-    let scm = if bump_scm { stamp.scm } else { col.scm };
+    let stamps = read_stamps(conn)?;
+    let stamp = stamp_from(&stamps)?;
+    let scm = if bump_scm { stamp.scm } else { stamps.scm };
     conn.execute(
         "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
         params![stamp.modified, scm, stamp.usn, stamp.ls],
     )
     .map_err(backend)?;
     Ok(stamp.usn)
+}
+
+/// Collection stamps that every write bumps.
+struct Stamps {
+    modified: i64,
+    scm: i64,
+    last_sync: i64,
+    usn: i32,
+}
+
+/// Reads the stamps without decoding the note types, decks, and configuration
+/// JSON that the same row carries.
+fn read_stamps(conn: &Connection) -> Result<Stamps, StoreError> {
+    conn.query_row(
+        "SELECT mod, scm, ls, usn FROM col WHERE id = 1",
+        [],
+        |row| {
+            let usn = row.get::<_, i64>(3)?;
+            Ok(Stamps {
+                modified: row.get(0)?,
+                scm: row.get(1)?,
+                last_sync: row.get(2)?,
+                usn: i32::try_from(usn).unwrap_or(i32::MAX),
+            })
+        },
+    )
+    .map_err(backend)
 }
 
 /// Writes one scheduled card and its review log entry inside `transaction`.
