@@ -22,6 +22,7 @@ mod records;
 mod schema;
 mod search;
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::path::Path;
@@ -42,6 +43,7 @@ use ranki_model::Card;
 use ranki_model::DEFAULT_DECK_ID;
 use ranki_model::Deck;
 use ranki_model::DeckStats;
+use ranki_model::DeckTotals;
 use ranki_model::Id;
 use ranki_model::NewNote;
 use ranki_model::NoteModel;
@@ -251,6 +253,26 @@ impl Collection {
             )
             .optional()
             .map_err(backend)
+    }
+
+    /// Persists several scheduled reviews and their log entries in one
+    /// transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any card does not exist or the write fails. A
+    /// failed batch writes nothing.
+    pub fn apply_reviews(
+        &mut self,
+        decisions: &[ReviewDecision],
+    ) -> Result<(), StoreError> {
+        let transaction = self.conn.transaction().map_err(backend)?;
+        let usn = update_col(&transaction, true)?;
+        for decision in decisions {
+            write_review(&transaction, usn, decision)?;
+        }
+        transaction.commit().map_err(backend)?;
+        Ok(())
     }
 
     fn deck_list(&self) -> Result<Vec<Deck>, StoreError> {
@@ -602,53 +624,7 @@ impl Store for Collection {
     ) -> Result<(), StoreError> {
         let transaction = self.conn.transaction().map_err(backend)?;
         let usn = update_col(&transaction, true)?;
-        let card = &decision.card;
-        let updated = transaction
-            .execute(
-                "UPDATE cards SET did = ?1, mod = ?2, usn = ?3, type = ?4, queue = ?5, due = ?6, \
-                 ivl = ?7, factor = ?8, reps = ?9, lapses = ?10, left = ?11, odue = ?12, odid = \
-                 ?13, flags = ?14, data = ?15 WHERE id = ?16",
-                params![
-                    card.deck_id,
-                    card.modified,
-                    usn,
-                    card.card_type.code(),
-                    card.queue.code(),
-                    card.due,
-                    card.interval,
-                    card.factor,
-                    card.reps,
-                    card.lapses,
-                    card.left,
-                    card.original_due,
-                    card.original_deck_id,
-                    card.flags,
-                    card.data,
-                    card.id,
-                ],
-            )
-            .map_err(backend)?;
-        if updated == 0 {
-            return Err(StoreError::NotFound(format!("card {}", card.id)));
-        }
-        let log = &decision.revlog;
-        transaction
-            .execute(
-                "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type) VALUES \
-                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    log.id,
-                    card.id,
-                    usn,
-                    log.ease.code(),
-                    log.interval,
-                    log.last_interval,
-                    log.factor,
-                    log.time_ms,
-                    log.kind.code(),
-                ],
-            )
-            .map_err(backend)?;
+        write_review(&transaction, usn, decision)?;
         transaction.commit().map_err(backend)?;
         Ok(())
     }
@@ -678,15 +654,28 @@ impl Store for Collection {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })
             .map_err(backend)?;
-        Ok(DeckStats {
-            new_cards: usize::try_from(counts.0.unwrap_or_default())
-                .unwrap_or_default(),
-            learning_cards: usize::try_from(counts.1.unwrap_or_default())
-                .unwrap_or_default(),
-            review_cards: usize::try_from(counts.2.unwrap_or_default())
-                .unwrap_or_default(),
-            total_cards: usize::try_from(counts.3).unwrap_or_default(),
-        })
+        Ok(stats_from_counts(counts))
+    }
+
+    fn deck_stats(&self) -> Result<DeckTotals, StoreError> {
+        let decks = self.deck_list()?;
+        let counts = deck_card_counts(&self.conn)?;
+        let ids_by_name = decks
+            .iter()
+            .map(|deck| (deck.name.as_str(), deck.id))
+            .collect::<HashMap<_, _>>();
+        let mut totals: HashMap<Id, DeckStats> = HashMap::new();
+        for deck in &decks {
+            let subdeck = counts.get(&deck.id).copied().unwrap_or_default();
+            let ids = deck_and_ancestor_ids(deck, &ids_by_name);
+            add_deck_totals(&mut totals, &ids, subdeck);
+        }
+        Ok(decks
+            .iter()
+            .map(|deck| {
+                (deck.id, totals.get(&deck.id).copied().unwrap_or_default())
+            })
+            .collect())
     }
     fn review_history(&self) -> Result<Vec<RevLog>, StoreError> {
         let mut statement = self
@@ -889,6 +878,80 @@ fn deck_list_from(conn: &Connection) -> Result<Vec<Deck>, StoreError> {
         return records::decks_from_tables(conn);
     }
     Ok(decks)
+}
+
+/// Counts cards per deck id in one grouped query.
+fn deck_card_counts(
+    conn: &Connection,
+) -> Result<HashMap<Id, DeckStats>, StoreError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT c.did, SUM(CASE WHEN c.queue = 0 THEN 1 ELSE 0 END), \
+             SUM(CASE WHEN c.queue IN (1, 3) THEN 1 ELSE 0 END), \
+             SUM(CASE WHEN c.queue = 2 THEN 1 ELSE 0 END), COUNT(*) FROM cards c GROUP BY \
+             c.did",
+        )
+        .map_err(backend)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Id>(0)?,
+                (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?),
+            ))
+        })
+        .map_err(backend)?;
+    let mut counts = HashMap::new();
+    for row in rows {
+        let (id, tally) = row.map_err(backend)?;
+        let _ = counts.insert(id, stats_from_counts(tally));
+    }
+    Ok(counts)
+}
+
+/// Adds one deck's counts to the deck and each id in `ids`.
+fn add_deck_totals(
+    totals: &mut HashMap<Id, DeckStats>,
+    ids: &[Id],
+    subdeck: DeckStats,
+) {
+    for id in ids {
+        add_deck_stats(totals.entry(*id).or_default(), subdeck);
+    }
+}
+
+/// Ids of a deck followed by each ancestor deck that is named in the map.
+fn deck_and_ancestor_ids(
+    deck: &Deck,
+    ids_by_name: &HashMap<&str, Id>,
+) -> Vec<Id> {
+    let mut ids = vec![deck.id];
+    for (index, _) in deck.name.match_indices("::") {
+        let Some(&ancestor) = ids_by_name.get(&deck.name[..index]) else {
+            continue;
+        };
+        ids.push(ancestor);
+    }
+    ids
+}
+
+const fn add_deck_stats(total: &mut DeckStats, counts: DeckStats) {
+    total.new_cards = total.new_cards.saturating_add(counts.new_cards);
+    total.learning_cards =
+        total.learning_cards.saturating_add(counts.learning_cards);
+    total.review_cards = total.review_cards.saturating_add(counts.review_cards);
+    total.total_cards = total.total_cards.saturating_add(counts.total_cards);
+}
+
+fn stats_from_counts(counts: Counts) -> DeckStats {
+    DeckStats {
+        new_cards: usize::try_from(counts.0.unwrap_or_default())
+            .unwrap_or_default(),
+        learning_cards: usize::try_from(counts.1.unwrap_or_default())
+            .unwrap_or_default(),
+        review_cards: usize::try_from(counts.2.unwrap_or_default())
+            .unwrap_or_default(),
+        total_cards: usize::try_from(counts.3).unwrap_or_default(),
+    }
 }
 
 fn deck_subtree_ids(decks: &[Deck], deck_id: Id) -> Vec<Id> {
@@ -1196,6 +1259,62 @@ fn update_col(conn: &Connection, bump_scm: bool) -> Result<i32, StoreError> {
     )
     .map_err(backend)?;
     Ok(stamp.usn)
+}
+
+/// Writes one scheduled card and its review log entry inside `transaction`.
+fn write_review(
+    transaction: &Transaction<'_>,
+    usn: i32,
+    decision: &ReviewDecision,
+) -> Result<(), StoreError> {
+    let card = &decision.card;
+    let updated = transaction
+        .execute(
+            "UPDATE cards SET did = ?1, mod = ?2, usn = ?3, type = ?4, queue = ?5, due = ?6, \
+             ivl = ?7, factor = ?8, reps = ?9, lapses = ?10, left = ?11, odue = ?12, odid = \
+             ?13, flags = ?14, data = ?15 WHERE id = ?16",
+            params![
+                card.deck_id,
+                card.modified,
+                usn,
+                card.card_type.code(),
+                card.queue.code(),
+                card.due,
+                card.interval,
+                card.factor,
+                card.reps,
+                card.lapses,
+                card.left,
+                card.original_due,
+                card.original_deck_id,
+                card.flags,
+                card.data,
+                card.id,
+            ],
+        )
+        .map_err(backend)?;
+    if updated == 0 {
+        return Err(StoreError::NotFound(format!("card {}", card.id)));
+    }
+    let log = &decision.revlog;
+    transaction
+        .execute(
+            "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type) VALUES \
+             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                log.id,
+                card.id,
+                usn,
+                log.ease.code(),
+                log.interval,
+                log.last_interval,
+                log.factor,
+                log.time_ms,
+                log.kind.code(),
+            ],
+        )
+        .map_err(backend)?;
+    Ok(())
 }
 
 fn next_position(conn: &Connection) -> Result<i64, StoreError> {

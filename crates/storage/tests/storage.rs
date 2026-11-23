@@ -891,3 +891,107 @@ fn rename_and_remove_work_with_modern_deck_tables() {
         .expect("count");
     assert_eq!(count, 0);
 }
+
+#[test]
+fn deck_stats_matches_per_deck_stats_for_a_hierarchy() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let root = store.create_deck("Root").expect("root");
+    let child = store.create_deck("Root::Child").expect("child");
+    let leaf = store.create_deck("Root::Child::Leaf").expect("leaf");
+    for (index, deck_id) in
+        [root.id, child.id, leaf.id, 1].into_iter().enumerate()
+    {
+        store
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id,
+                fields: vec![format!("front {index}"), "back".to_owned()],
+                tags: Vec::new(),
+            })
+            .expect("add");
+    }
+    let batch = store.deck_stats().expect("deck stats");
+    let decks = store.decks().expect("decks");
+    assert_eq!(batch.len(), decks.len());
+    for (id, stats) in batch {
+        assert_eq!(
+            stats,
+            store.stats(Some(id), now_secs()).expect("stats"),
+            "deck {id}"
+        );
+    }
+    let root_stats = store
+        .deck_stats()
+        .expect("deck stats")
+        .into_iter()
+        .find(|(id, _)| *id == root.id)
+        .expect("root entry");
+    assert_eq!(root_stats.1.total_cards, 3);
+    assert_eq!(root_stats.1.new_cards, 3);
+}
+
+#[test]
+fn apply_reviews_writes_a_batch_atomically() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let mut decisions = Vec::with_capacity(1000);
+    for index in 0..1000_u32 {
+        let ids = store
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![format!("card {index}"), "back".to_owned()],
+                tags: Vec::new(),
+            })
+            .expect("add");
+        let card = store.card(ids[0]).expect("card").expect("exists");
+        let mut changed = card.clone();
+        changed.queue = CardQueue::Review;
+        changed.card_type = CardType::Review;
+        changed.due = i64::from(index);
+        changed.interval = 4;
+        decisions.push(ReviewDecision {
+            card: changed,
+            revlog: RevLog {
+                id: 20_000 + i64::from(index),
+                card_id: card.id,
+                usn: 0,
+                ease: Rating::Good,
+                interval: 4,
+                last_interval: 0,
+                factor: 2500,
+                time_ms: 400,
+                kind: RevLogKind::Review,
+            },
+        });
+    }
+    store.apply_reviews(&decisions).expect("batch");
+    for (index, decision) in decisions.iter().enumerate() {
+        let saved =
+            store.card(decision.card.id).expect("card").expect("exists");
+        assert_eq!(saved.queue, CardQueue::Review);
+        assert_eq!(saved.interval, 4);
+        assert_eq!(saved.due, i64::from(u32::try_from(index).expect("index")));
+        let log = store
+            .revlog(20_000 + i64::try_from(index).expect("index"))
+            .expect("revlog")
+            .expect("entry");
+        assert_eq!(log.card_id, decision.card.id);
+    }
+
+    let mut failing = decisions[0].clone();
+    failing.revlog.id = 90_000;
+    failing.card.interval = 9;
+    let mut missing = failing.clone();
+    missing.card.id = -1;
+    missing.revlog.id = 90_001;
+    assert!(store.apply_reviews(&[failing, missing]).is_err());
+    let saved = store
+        .card(decisions[0].card.id)
+        .expect("card")
+        .expect("exists");
+    assert_eq!(saved.interval, 4, "a failed batch writes nothing");
+    assert!(store.revlog(90_000).expect("revlog").is_none());
+    assert!(store.revlog(90_001).expect("revlog").is_none());
+}

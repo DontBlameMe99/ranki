@@ -383,6 +383,9 @@ pub struct ReviewDecision {
     pub revlog: RevLog,
 }
 
+/// Card counts for every deck in a collection, in deck order.
+pub type DeckTotals = Vec<(Id, DeckStats)>;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DeckStats {
     pub new_cards: usize,
@@ -550,6 +553,19 @@ pub trait Store {
         deck_id: Option<Id>,
         now_secs: i64,
     ) -> Result<DeckStats, StoreError>;
+
+    /// Returns card counts for every deck, each including its subdecks.
+    ///
+    /// Implementations without a batch query return
+    /// [`StoreError::Unsupported`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
+    fn deck_stats(&self) -> Result<DeckTotals, StoreError> {
+        Err(StoreError::Unsupported(
+            "deck_stats is not supported by this store".to_owned(),
+        ))
+    }
 
     /// Returns the collection modification timestamp in seconds.
     ///

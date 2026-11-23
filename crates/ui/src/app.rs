@@ -1,7 +1,7 @@
 //! Root application state, keyboard dispatcher, and store-backed actions.
 
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     env,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -549,13 +549,24 @@ impl Root {
         if self.add.model_index >= self.models.len() {
             self.add.model_index = 0;
         }
-        self.stats = self
-            .decks
-            .iter()
-            .map(|deck| {
-                self.store.stats(Some(deck.id), now).unwrap_or_default()
-            })
-            .collect();
+        self.stats = match self.store.deck_stats() {
+            Ok(stats) => {
+                let lookup = stats.into_iter().collect::<HashMap<_, _>>();
+                self.decks
+                    .iter()
+                    .map(|deck| {
+                        lookup.get(&deck.id).copied().unwrap_or_default()
+                    })
+                    .collect()
+            }
+            Err(_) => self
+                .decks
+                .iter()
+                .map(|deck| {
+                    self.store.stats(Some(deck.id), now).unwrap_or_default()
+                })
+                .collect(),
+        };
         self.collection_modified =
             self.store.collection_modified().unwrap_or(0);
         self.external_change = false;
@@ -1657,19 +1668,17 @@ pub fn filter_decks(rows: &[DeckRow], query: &str) -> Vec<DeckRow> {
     if needle.is_empty() {
         return rows.to_vec();
     }
-    let matched = rows
-        .iter()
-        .filter(|row| row.path.to_lowercase().contains(&needle))
-        .map(|row| row.path.clone())
-        .collect::<Vec<_>>();
+    let mut keep = HashSet::new();
+    for row in rows {
+        if row.path.to_lowercase().contains(&needle) {
+            let _ = keep.insert(row.path.as_str());
+            for (index, _) in row.path.match_indices("::") {
+                let _ = keep.insert(&row.path[..index]);
+            }
+        }
+    }
     rows.iter()
-        .filter(|row| {
-            matched.iter().any(|path| {
-                path == &row.path
-                    || path.starts_with(&format!("{}::", row.path))
-                    || row.path.starts_with(&format!("{path}::"))
-            })
-        })
+        .filter(|row| keep.contains(row.path.as_str()))
         .cloned()
         .collect()
 }
@@ -2188,44 +2197,38 @@ mod tests {
         assert_eq!(due_total(total), 5);
     }
 
+    fn row(id: i64, path: &str, depth: usize) -> DeckRow {
+        DeckRow {
+            id: Some(id),
+            path: path.into(),
+            name: path.rsplit("::").next().unwrap_or(path).into(),
+            depth,
+            stats: ranki_model::DeckStats::default(),
+            virtual_group: false,
+            has_children: false,
+            expanded: false,
+        }
+    }
+
     #[test]
     fn search_keeps_ancestors_and_sorts_stable() {
         let rows = vec![
-            DeckRow {
-                id: Some(1),
-                path: "A".into(),
-                name: "A".into(),
-                depth: 0,
-                stats: ranki_model::DeckStats::default(),
-                virtual_group: false,
-                has_children: false,
-                expanded: false,
-            },
-            DeckRow {
-                id: Some(2),
-                path: "A::B".into(),
-                name: "B".into(),
-                depth: 1,
-                stats: ranki_model::DeckStats::default(),
-                virtual_group: false,
-                has_children: false,
-                expanded: true,
-            },
-            DeckRow {
-                id: Some(3),
-                path: "Z".into(),
-                name: "Z".into(),
-                depth: 0,
-                stats: ranki_model::DeckStats::default(),
-                virtual_group: false,
-                has_children: false,
-                expanded: false,
-            },
+            row(1, "A", 0),
+            row(2, "A::B", 1),
+            row(3, "A::B::C", 2),
+            row(4, "A::X", 1),
+            row(5, "Z", 0),
         ];
-        let filtered = filter_decks(&rows, "b");
-        assert_eq!(filtered.len(), 2);
-        assert_eq!(filtered[0].path, "A");
-        assert_eq!(filter_decks(&rows, "nothing").len(), 0);
+        let paths = |query: &str| {
+            filter_decks(&rows, query)
+                .iter()
+                .map(|row| row.path.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(paths("b"), ["A", "A::B", "A::B::C"]);
+        assert_eq!(paths("x"), ["A", "A::X"]);
+        assert_eq!(paths("nothing"), Vec::<String>::new());
+        assert_eq!(paths("").len(), 5);
     }
 
     #[test]
