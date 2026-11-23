@@ -88,3 +88,8 @@ needless_pass_by_ref_mut      = "deny"
 integer_division              = "deny"
 use_self                      = "deny"
 redundant_clone               = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
