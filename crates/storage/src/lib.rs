@@ -31,6 +31,10 @@ use std::slice;
 pub use ranki_model::StoreError;
 pub use ranki_model::stock_models;
 
+pub use anki::deck_common;
+pub use anki::decode_deck_name;
+pub use anki::encode_deck_name;
+
 pub use records::models_from_tables_with_prefix;
 pub use records::models_to_json;
 

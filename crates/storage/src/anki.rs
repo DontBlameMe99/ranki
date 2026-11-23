@@ -130,14 +130,17 @@ pub fn as_u16(value: i64) -> Result<u16, StoreError> {
     })
 }
 
+#[must_use]
 pub fn decode_deck_name(name: &str) -> String {
     name.replace('\u{001f}', "::")
 }
 
+#[must_use]
 pub fn encode_deck_name(name: &str) -> String {
     name.replace("::", "\u{001f}")
 }
 
+#[must_use]
 pub fn deck_common(usn: i32, modified: i64) -> Vec<u8> {
     let mut bytes = vec![0x08];
     append_varint(&mut bytes, u64::try_from(usn).unwrap_or(0));
