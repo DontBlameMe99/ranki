@@ -12,7 +12,6 @@ use self::macos::*;
 
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::mem;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
 use std::path::Path;
@@ -36,10 +35,7 @@ impl Clone for XAttrs {
     }
     fn clone_from(&mut self, other: &XAttrs) {
         self.offset = other.offset;
-
-        let mut data = mem::replace(&mut self.data, Box::new([])).into_vec();
-        data.extend(other.data.iter().cloned());
-        self.data = data.into_boxed_slice();
+        self.data = other.data.clone();
     }
 }
 

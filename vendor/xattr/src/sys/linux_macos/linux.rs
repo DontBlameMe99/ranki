@@ -20,7 +20,7 @@ pub unsafe fn fsetxattr(
     name: *const c_char,
     value: *const c_void,
     size: size_t,
-) -> ssize_t {
+) -> c_int {
     extern "C" {
         fn fsetxattr(
             fd: c_int,
@@ -28,7 +28,7 @@ pub unsafe fn fsetxattr(
             value: *const c_void,
             size: size_t,
             flags: c_int,
-        ) -> ssize_t;
+        ) -> c_int;
     }
     fsetxattr(fd, name, value, size, 0)
 }
@@ -38,7 +38,7 @@ pub unsafe fn lsetxattr(
     name: *const c_char,
     value: *const c_void,
     size: size_t,
-) -> ssize_t {
+) -> c_int {
     extern "C" {
         fn lsetxattr(
             path: *const c_char,
@@ -46,7 +46,7 @@ pub unsafe fn lsetxattr(
             value: *const c_void,
             size: size_t,
             flags: c_int,
-        ) -> ssize_t;
+        ) -> c_int;
     }
     lsetxattr(path, name, value, size, 0)
 }

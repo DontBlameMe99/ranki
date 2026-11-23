@@ -2,7 +2,6 @@
 
 use std::ffi::{CString, OsStr, OsString};
 use std::io;
-use std::mem;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::io::RawFd;
 use std::path::Path;
@@ -88,14 +87,8 @@ impl Clone for XAttrs {
 
     fn clone_from(&mut self, other: &XAttrs) {
         self.offset = other.offset;
-
-        let mut data = mem::replace(&mut self.user_attrs, Box::new([])).into_vec();
-        data.extend(other.user_attrs.iter().cloned());
-        self.user_attrs = data.into_boxed_slice();
-
-        data = mem::replace(&mut self.system_attrs, Box::new([])).into_vec();
-        data.extend(other.system_attrs.iter().cloned());
-        self.system_attrs = data.into_boxed_slice();
+        self.user_attrs = other.user_attrs.clone();
+        self.system_attrs = other.system_attrs.clone();
     }
 }
 
@@ -110,26 +103,24 @@ impl Iterator for XAttrs {
             return None;
         }
 
-        let data = if self.offset < self.system_attrs.len() {
+        let namespace = if self.offset < self.system_attrs.len() {
+            EXTATTR_NAMESPACE_SYSTEM
+        } else {
+            EXTATTR_NAMESPACE_USER
+        };
+        let data = if namespace == EXTATTR_NAMESPACE_SYSTEM {
             &self.system_attrs[self.offset..]
         } else {
             &self.user_attrs[self.offset - self.system_attrs.len()..]
         };
 
-        let siz = data[0] as usize;
+        let size = data[0] as usize;
 
-        self.offset += siz + 1;
-        if self.offset < self.system_attrs.len() {
-            Some(prefix_namespace(
-                OsStr::from_bytes(&data[1..siz + 1]),
-                EXTATTR_NAMESPACE_SYSTEM,
-            ))
-        } else {
-            Some(prefix_namespace(
-                OsStr::from_bytes(&data[1..siz + 1]),
-                EXTATTR_NAMESPACE_USER,
-            ))
-        }
+        self.offset += size + 1;
+        Some(prefix_namespace(
+            OsStr::from_bytes(&data[1..size + 1]),
+            namespace,
+        ))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
