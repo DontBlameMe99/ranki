@@ -19,15 +19,20 @@ type MetaValues = (i64, i64, bool, i64);
 
 /// Builds a throwaway login value for a test run.
 ///
-/// Tests never use real credentials, and the value is derived at runtime so no
-/// secret literal exists in the source tree.
+/// Only digits are used, derived from the process id and the clock, so the
+/// source tree carries no credential-shaped literal.
 fn fixture_login() -> String {
-    format!("login-{}-{}", process::id(), now_secs().unwrap_or(0))
+    let clock = now_secs().unwrap_or(0);
+    format!("{}{}", process::id(), clock)
 }
 
 /// Builds a throwaway session key for a test run.
+///
+/// Distinct from [`fixture_login`] so a state-file check can prove the two
+/// values differ, and digit-only so no credential literal exists.
 fn fixture_key() -> String {
-    format!("key-{}-{}", process::id(), now_secs().unwrap_or(0))
+    let clock = now_secs().unwrap_or(0);
+    format!("{}{}0", clock, process::id())
 }
 
 fn now_secs() -> TestResult<i64> {
@@ -191,7 +196,8 @@ fn full_upload_sends_checkpointed_collection() -> TestResult {
     let media = directory.path().join("media");
     let state_path = directory.path().join("sync.json");
     make_collection(&collection, (100, 100, 2))?;
-    write_state(&state_path, &seeded_state(&fixture_key()))?;
+    let seeded_key = fixture_key();
+    write_state(&state_path, &seeded_state(&seeded_key))?;
     let transport = MockTransport::new().with_response(
         SyncMethod::Upload,
         MockResponse::ok_bytes(b"OK".to_vec())?,
@@ -207,7 +213,7 @@ fn full_upload_sends_checkpointed_collection() -> TestResult {
         .first()
         .ok_or_else(|| SyncError::State("missing upload request".to_owned()))?;
     assert_eq!(request.method, SyncMethod::Upload);
-    assert!(request.host_key.starts_with('k'));
+    assert_eq!(request.host_key, seeded_key);
     let sent = decode_request(request)?;
     assert_eq!(sent, fs::read(&collection)?);
     let connection = Connection::open(&collection)?;
@@ -312,7 +318,7 @@ fn empty_local_collection_downloads_a_populated_remote() -> TestResult {
     let state_path = directory.path().join("sync.json");
     make_collection(&source, (900, 500, 1))?;
     make_collection(&collection, (100, 100, 0))?;
-    write_state(&state_path, &seeded_state("host-key"))?;
+    write_state(&state_path, &seeded_state(&fixture_key()))?;
     let transport = MockTransport::new()
         .with_response(
             SyncMethod::Meta,
