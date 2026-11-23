@@ -161,7 +161,7 @@ Images: replace `card_view::ImageCache` with `ImageSource` plus `img()`, an `Ass
 
 ## 5. Rendering the four mockup views
 
-Design inputs: [design system](docs/mockup-design-system.md), [decks and add](docs/mockup-decks-add-spec.md), [learning](docs/mockup-learning-spec.md), [card types](docs/card-types-research.md).
+Design inputs: [design system](mockup-design-system.md), [decks and add](mockup-decks-add-spec.md), [learning](mockup-learning-spec.md), [card types](card-types-research.md).
 
 State model: one `Entity<Root>` holding `store: Box<dyn Store>`, `view: View`, options, `decks`, `models`, `stats`, `selected`, queue and current card, `phase: Phase`, `add_draft`, `theme`, toast, and focus handles. Split pure logic into the view modules proposed in the specs, but have each module return `impl IntoElement` or a `Div` instead of drawing into an `egui::Ui`. Keep `Store` ownership in the root entity and call its `&self`/`&mut self` methods inside `cx.update` closures. A single root view avoids cross-window state plumbing.
 
