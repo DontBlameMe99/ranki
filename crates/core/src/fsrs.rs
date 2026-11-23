@@ -305,7 +305,13 @@ impl FsrsScheduler {
             data: write_memory(
                 &ctx.card.data,
                 memory,
-                clamp_desired_retention(self.preset.desired_retention),
+                MemoryWrite {
+                    desired_retention: clamp_desired_retention(
+                        self.preset.desired_retention,
+                    ),
+                    decay: self.params.decay(),
+                    now_secs: ctx.now_secs,
+                },
             ),
             factor: factor_or_default(ctx.card.factor),
             graduation,
@@ -366,6 +372,7 @@ impl FsrsScheduler {
                 },
             );
             outcome.lapses = 1;
+            outcome.kind = RevLogKind::Review;
             return outcome;
         }
         ReviewOutcome {
@@ -381,12 +388,9 @@ impl FsrsScheduler {
             left: 0,
             factor: prepared.factor,
             data: prepared.data,
-            kind: if ctx.rating == Rating::Again {
-                RevLogKind::Relearn
-            } else {
-                RevLogKind::Review
-            },
+            kind: RevLogKind::Review,
             step_seconds: None,
+            last_interval: None,
         }
     }
 }
@@ -534,8 +538,9 @@ fn same_day_stability(
     rating: Rating,
 ) -> f32 {
     let grade = f32::from(rating.code());
-    let raw_factor =
-        (weight(params, 17) * (grade - 3.0 + weight(params, 18))).exp();
+    let raw_factor = (weight(params, 17) * (grade - 3.0 + weight(params, 18)))
+        .exp()
+        * stability.powf(-weight(params, 19).max(0.0));
     let factor = if rating.code() >= 2 {
         raw_factor.max(1.0)
     } else {
@@ -599,17 +604,39 @@ fn json_number(value: f32) -> Value {
         Number::from_f64(f64::from(value)).unwrap_or_else(|| Number::from(0)),
     )
 }
-fn write_memory(data: &str, memory: Memory, desired_retention: f32) -> String {
+fn rounded(value: f32, factor: f32) -> f32 {
+    (value * factor).round() / factor
+}
+
+#[derive(Clone, Copy)]
+struct MemoryWrite {
+    desired_retention: f32,
+    decay: f32,
+    now_secs: i64,
+}
+
+fn write_memory(data: &str, memory: Memory, write: MemoryWrite) -> String {
+    let stability = rounded(memory.stability, 10_000.0);
+    let difficulty = rounded(memory.difficulty, 1_000.0);
+    let retention = rounded(
+        write
+            .desired_retention
+            .clamp(MIN_DESIRED_RETENTION, MAX_DESIRED_RETENTION),
+        100.0,
+    );
+    let decay = rounded(write.decay, 1_000.0);
+    if data.trim().is_empty() {
+        return format!(
+            "{{\"s\":{stability},\"d\":{difficulty},\"dr\":{retention},\"decay\":{decay},\"lrt\":{}}}",
+            write.now_secs
+        );
+    }
     let mut object: Map<String, Value> =
         serde_json::from_str(data).ok().unwrap_or_default();
-    object.insert(String::from("s"), json_number(memory.stability));
-    object.insert(String::from("d"), json_number(memory.difficulty));
-    object.insert(
-        String::from("dr"),
-        json_number(
-            desired_retention
-                .clamp(MIN_DESIRED_RETENTION, MAX_DESIRED_RETENTION),
-        ),
-    );
+    object.insert(String::from("s"), json_number(stability));
+    object.insert(String::from("d"), json_number(difficulty));
+    object.insert(String::from("dr"), json_number(retention));
+    object.insert(String::from("decay"), json_number(decay));
+    object.insert(String::from("lrt"), Value::from(write.now_secs));
     serde_json::to_string(&object).unwrap_or_default()
 }

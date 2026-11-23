@@ -34,12 +34,28 @@ use std::str;
 pub use ranki_model::StoreError;
 pub use ranki_model::stock_models;
 
+pub use anki::ProtoValue;
 pub use anki::deck_common;
+pub use anki::deck_kind;
 pub use anki::decode_deck_name;
 pub use anki::encode_deck_name;
+pub use anki::proto_bytes;
+pub use anki::proto_float;
+pub use anki::proto_floats;
+pub use anki::proto_string;
+pub use anki::proto_varint;
+pub use anki::protobuf_fields;
 
+pub use records::deck_config_blob;
+pub use records::deck_config_json;
+pub use records::deck_configs_json_from_tables;
+pub use records::decks_json_from_tables;
 pub use records::models_from_tables_with_prefix;
 pub use records::models_to_json;
+pub use schema::default_col;
+pub use schema::default_deck;
+pub use schema::default_deck_config;
+pub use schema::drop_legacy_schema11_indexes;
 
 use ranki_model::Card;
 use ranki_model::DEFAULT_DECK_ID;
@@ -142,6 +158,7 @@ impl Collection {
         if !records::table_exists(&conn, "col")? {
             return Err(invalid("not an Anki collection"));
         }
+        schema::drop_legacy_schema11_indexes(&conn)?;
         Ok(Self {
             conn,
             path: path.to_path_buf(),
@@ -359,8 +376,8 @@ impl Store for Collection {
                         anki::encode_deck_name(deck_name),
                         stamp.now_secs,
                         stamp.usn,
-                        anki::deck_common(stamp.usn, stamp.now_secs),
-                        Vec::<u8>::new(),
+                        anki::deck_common(),
+                        anki::deck_kind(1),
                     ],
                 )
                 .map_err(backend)?;
@@ -378,7 +395,7 @@ impl Store for Collection {
                 .ok_or_else(|| invalid("decks is not an object"))?;
             object.insert(
                 id.to_string(),
-                json!({"id": id, "name": deck_name, "usn": stamp.usn, "mod": stamp.now_secs, "conf": 1, "desc": "", "dyn": 0}),
+                schema::default_deck(id, deck_name, stamp.now_secs, stamp.usn),
             );
             let decks_json = serde_json::to_string(&value)
                 .map_err(|error| invalid(error.to_string()))?;
@@ -642,12 +659,12 @@ impl Store for Collection {
     fn apply_review(
         &mut self,
         decision: &ReviewDecision,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Id, StoreError> {
         let transaction = self.conn.transaction().map_err(backend)?;
         let usn = update_col(&transaction, true)?;
-        write_review(&transaction, usn, decision)?;
+        let id = write_review(&transaction, usn, decision)?;
         transaction.commit().map_err(backend)?;
-        Ok(())
+        Ok(id)
     }
 
     fn undo_review(
@@ -950,8 +967,8 @@ fn placeholders(start: i64, count: usize) -> String {
 }
 
 fn deck_list_from(conn: &Connection) -> Result<Vec<Deck>, StoreError> {
-    let col = records::read_col(conn)?;
-    let decks = records::decks_from_json(&col.decks)?;
+    let decks_json = records::read_decks(conn)?;
+    let decks = records::decks_from_json(&decks_json)?;
     if decks.is_empty() && records::table_exists(conn, "decks")? {
         return records::decks_from_tables(conn);
     }
@@ -1275,12 +1292,11 @@ fn rename_in_deck_table(
     for (deck_id, deck_name) in changes {
         let updated = conn
             .execute(
-                "UPDATE decks SET name = ?1, mtime_secs = ?2, usn = ?3, common = ?4 WHERE id = ?5",
+                "UPDATE decks SET name = ?1, mtime_secs = ?2, usn = ?3 WHERE id = ?4",
                 params![
                     anki::encode_deck_name(deck_name),
                     stamp.now_secs,
                     stamp.usn,
-                    anki::deck_common(stamp.usn, stamp.now_secs),
                     deck_id,
                 ],
             )
@@ -1382,13 +1398,42 @@ fn read_stamps(conn: &Connection) -> Result<Stamps, StoreError> {
     .map_err(backend)
 }
 
+/// Anki stores the last review time on every answered card, including SM-2.
+fn with_last_review(data: &str, at: i64) -> String {
+    let mut object: Map<String, Json> =
+        serde_json::from_str(data).ok().unwrap_or_default();
+    let _ = object.insert(String::from("lrt"), Json::from(at));
+    serde_json::to_string(&object).unwrap_or_default()
+}
+
+/// Anki's revlog id is the answer time in milliseconds. Separate Ranki
+/// processes can produce the same second-based id, so keep the first free one.
+fn unique_revlog_id(
+    transaction: &Transaction<'_>,
+    wanted: Id,
+) -> Result<Id, StoreError> {
+    let mut id = wanted;
+    while transaction
+        .query_row("SELECT 1 FROM revlog WHERE id = ?1", [id], |_| Ok(()))
+        .optional()
+        .map_err(backend)?
+        .is_some()
+    {
+        id = id.checked_add(1).ok_or_else(|| {
+            StoreError::Backend("review log id overflow".into())
+        })?;
+    }
+    Ok(id)
+}
+
 /// Writes one scheduled card and its review log entry inside `transaction`.
 fn write_review(
     transaction: &Transaction<'_>,
     usn: i32,
     decision: &ReviewDecision,
-) -> Result<(), StoreError> {
+) -> Result<Id, StoreError> {
     let card = &decision.card;
+    let data = with_last_review(&card.data, card.modified);
     let updated = transaction
         .execute(
             "UPDATE cards SET did = ?1, mod = ?2, usn = ?3, type = ?4, queue = ?5, due = ?6, \
@@ -1409,7 +1454,7 @@ fn write_review(
                 card.original_due,
                 card.original_deck_id,
                 card.flags,
-                card.data,
+                data,
                 card.id,
             ],
         )
@@ -1418,12 +1463,13 @@ fn write_review(
         return Err(StoreError::NotFound(format!("card {}", card.id)));
     }
     let log = &decision.revlog;
+    let log_id = unique_revlog_id(transaction, log.id)?;
     transaction
         .execute(
             "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type) VALUES \
              (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                log.id,
+                log_id,
                 card.id,
                 usn,
                 log.ease.code(),
@@ -1435,7 +1481,7 @@ fn write_review(
             ],
         )
         .map_err(backend)?;
-    Ok(())
+    Ok(log_id)
 }
 
 /// Reads the next new-card position.

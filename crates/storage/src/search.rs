@@ -22,10 +22,7 @@ pub fn build(
     for token in tokens {
         let condition = match token.split_once(':') {
             Some(("deck", value)) => deck_condition(value, decks, &mut params),
-            Some(("tag", value)) => {
-                params.push(SqlValue::Text(like_pattern(value, true)));
-                "(' ' || n.tags || ' ') LIKE ? ESCAPE '\\'".into()
-            }
+            Some(("tag", value)) => tag_condition(value, &mut params),
             Some(("note", value)) => {
                 model_condition(value, models, &mut params)
             }
@@ -99,6 +96,17 @@ fn flush_token(tokens: &mut Vec<String>, current: &mut String) {
         tokens.push(mem::take(current));
     }
 }
+fn tag_condition(value: &str, params: &mut Vec<SqlValue>) -> String {
+    params.push(SqlValue::Text(like_pattern(value, true)));
+    if value.contains('*') {
+        return "(' ' || n.tags || ' ') LIKE ? ESCAPE '\\'".into();
+    }
+    params.push(SqlValue::Text(like_pattern(&format!(" {value}::"), false)));
+    "((' ' || n.tags || ' ') LIKE ? ESCAPE '\\' OR \
+     (' ' || n.tags || ' ') LIKE ? ESCAPE '\\')"
+        .into()
+}
+
 fn deck_matches(name: &str, pattern: &str) -> bool {
     if wildcard_match(name, pattern) {
         return true;

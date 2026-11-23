@@ -17,6 +17,7 @@ use ranki_format::export_apkg;
 use ranki_format::export_colpkg;
 use ranki_format::import_apkg;
 use ranki_format::import_colpkg;
+use ranki_model::NewNote;
 use ranki_model::Store;
 use ranki_storage::Collection as AnkiCollection;
 use rusqlite::Connection;
@@ -690,14 +691,14 @@ fn media_names_are_sanitized_and_rewritten() {
 
     let (collection, media, report) = fixture.import(&package, "sanitized");
     assert_eq!(report.media, 1);
-    assert!(media.join("bad_name_.png").exists());
+    assert!(media.join("badname.png").exists());
     let connection = Connection::open(collection).unwrap();
     let fields = query_string(
         &connection,
         "SELECT flds FROM notes WHERE guid = ?",
         "guid-a",
     );
-    assert!(fields.contains("bad_name_.png"));
+    assert!(fields.contains("badname.png"));
     assert!(!fields.contains("bad:name?.png"));
 }
 
@@ -993,7 +994,7 @@ fn colpkg_extracts_numbered_media_mapping() {
         b"image".to_vec()
     );
     assert_eq!(
-        fs::read(destination.join("media/bad_name_.png")).unwrap(),
+        fs::read(destination.join("media/badname.png")).unwrap(),
         b"pixel".to_vec()
     );
 }
@@ -1851,6 +1852,172 @@ fn schema18_destination_copies_new_deck_and_note_type_rows() {
 }
 
 #[test]
+fn import_does_not_change_destination_current_deck() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("selection.anki2");
+    AnkiCollection::create(&destination)
+        .unwrap()
+        .close()
+        .unwrap();
+    let meta = SourceMeta {
+        models: SourceMeta::fixture().models,
+        decks: entry_map(&[deck_json(1, "Other")]),
+    };
+    let seed = Seed {
+        notes: vec![],
+        cards: vec![],
+        revlog: false,
+    };
+    let package = merge_package(dir.path(), &meta, &seed);
+
+    let connection = import_into(dir.path(), &package, &destination);
+
+    let conf = col_column(&connection, "conf");
+    assert_eq!(conf["curDeck"], 1);
+    assert_eq!(conf["activeDecks"], json!([1]));
+}
+
+#[test]
+fn schema18_copy_rewrites_deck_preset_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("modern-copy.anki2");
+    write_schema18_collection(
+        &destination,
+        &[(1, "Default")],
+        &[],
+        &Seed {
+            notes: vec![],
+            cards: vec![],
+            revlog: false,
+        },
+    );
+    let source = dir.path().join("modern-source.anki2");
+    write_schema18_collection(
+        &source,
+        &[(1, "Default"), (700, "Flags")],
+        &[],
+        &Seed {
+            notes: vec![],
+            cards: vec![],
+            revlog: false,
+        },
+    );
+    let connection = Connection::open(&source).unwrap();
+    let blob = ranki_storage::deck_config_blob(&json!({
+        "rev": {"maxIvl": 180},
+    }));
+    connection
+        .execute(
+            "UPDATE deck_config SET config = ?1 WHERE id = 2",
+            params![blob],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE decks SET kind = ?1 WHERE id = 700",
+            params![ranki_storage::deck_kind(2)],
+        )
+        .unwrap();
+    drop(connection);
+    let package = schema18_package(dir.path(), &source);
+
+    let connection = import_into(dir.path(), &package, &destination);
+
+    let kind: Vec<u8> = connection
+        .query_row("SELECT kind FROM decks WHERE id = 700", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let outer = ranki_storage::protobuf_fields(&kind).unwrap();
+    let normal = ranki_storage::proto_bytes(&outer, 1).unwrap();
+    let fields = ranki_storage::protobuf_fields(normal).unwrap();
+    let config_id = ranki_storage::proto_varint(&fields, 1).unwrap();
+    assert_ne!(config_id, 2, "the preset id collided with the destination");
+    let config: Vec<u8> = connection
+        .query_row(
+            "SELECT config FROM deck_config WHERE id = ?1",
+            [i64::try_from(config_id).unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let decoded = ranki_storage::deck_config_json(&config);
+    assert_eq!(decoded["rev"]["maxIvl"], 180);
+}
+
+#[test]
+fn schema18_destination_writes_legacy_deck_presets() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("modern-presets.anki2");
+    write_schema18_collection(
+        &destination,
+        &[(1, "Default")],
+        &[],
+        &Seed {
+            notes: vec![],
+            cards: vec![],
+            revlog: false,
+        },
+    );
+    let source = dir.path().join("legacy-presets.anki2");
+    let mut meta = SourceMeta::fixture();
+    meta.decks = entry_map(&[deck_json(700, "Flags")]);
+    write_collection_with(
+        &source,
+        &Seed {
+            notes: vec![],
+            cards: vec![],
+            revlog: false,
+        },
+        &meta,
+    );
+    let dconf = json!({
+        "1": {"id": 1, "name": "Default"},
+        "2": {
+            "id": 2,
+            "name": "Custom",
+            "new": {"perDay": 0},
+            "rev": {"maxIvl": 180},
+            "lapse": {"leechAction": 0},
+        }
+    });
+    let mut decks = meta.decks;
+    decks["700"]["conf"] = json!(2);
+    let connection = Connection::open(&source).unwrap();
+    connection
+        .execute(
+            "UPDATE col SET dconf = ?1, decks = ?2",
+            params![dconf.to_string(), decks.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    let package = schema18_package(dir.path(), &source);
+
+    let connection = import_into(dir.path(), &package, &destination);
+
+    let kind: Vec<u8> = connection
+        .query_row("SELECT kind FROM decks WHERE id = 700", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let outer = ranki_storage::protobuf_fields(&kind).unwrap();
+    let normal = ranki_storage::proto_bytes(&outer, 1).unwrap();
+    let fields = ranki_storage::protobuf_fields(normal).unwrap();
+    let config_id = ranki_storage::proto_varint(&fields, 1).unwrap();
+    assert_ne!(config_id, 2, "the preset id collided with the destination");
+    let config: Vec<u8> = connection
+        .query_row(
+            "SELECT config FROM deck_config WHERE id = ?1",
+            [i64::try_from(config_id).unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let decoded = ranki_storage::deck_config_json(&config);
+    assert_eq!(decoded["new"]["perDay"], 0);
+    assert_eq!(decoded["rev"]["maxIvl"], 180);
+    assert_eq!(decoded["lapse"]["leechAction"], 0);
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "fixture and assertions read better in one test"
@@ -2005,4 +2172,241 @@ fn real_world_import_into_existing_collection_keeps_one_default_deck() {
     assert_eq!(entry_ids(&decks, "Default"), [1]);
     let models = col_column(&connection, "models");
     assert_eq!(entry_ids(&models, "Basic"), [1]);
+}
+
+fn pb_varint(field: u32, value: u64) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    pb_tag(&mut bytes, field, 0);
+    let mut rest = value;
+    while rest >= 0x80 {
+        bytes.push(u8::try_from(rest & 0x7f).unwrap() | 0x80);
+        rest >>= 7;
+    }
+    bytes.push(u8::try_from(rest & 0x7f).unwrap());
+    bytes
+}
+
+fn pb_tag(bytes: &mut Vec<u8>, field: u32, wire: u8) {
+    let tag = (field << 3) | u32::from(wire);
+    let mut rest = tag;
+    while rest >= 0x80 {
+        bytes.push(u8::try_from(rest & 0x7f).unwrap() | 0x80);
+        rest >>= 7;
+    }
+    bytes.push(u8::try_from(rest & 0x7f).unwrap());
+}
+
+fn pb_string(field: u32, value: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    pb_tag(&mut bytes, field, 2);
+    let mut length = value.len();
+    while length >= 0x80 {
+        bytes.push(u8::try_from(length & 0x7f).unwrap() | 0x80);
+        length >>= 7;
+    }
+    bytes.push(u8::try_from(length & 0x7f).unwrap());
+    bytes.extend_from_slice(value.as_bytes());
+    bytes
+}
+
+fn pb_message(field: u32, body: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    pb_tag(&mut bytes, field, 2);
+    let mut length = body.len();
+    while length >= 0x80 {
+        bytes.push(u8::try_from(length & 0x7f).unwrap() | 0x80);
+        length >>= 7;
+    }
+    bytes.push(u8::try_from(length & 0x7f).unwrap());
+    bytes.extend_from_slice(body);
+    bytes
+}
+
+fn pb_float(field: u32, value: f32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    pb_tag(&mut bytes, field, 5);
+    bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+    bytes
+}
+
+fn pb_packed_floats(field: u32, values: &[f32]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for value in values {
+        payload.extend_from_slice(&value.to_bits().to_le_bytes());
+    }
+    pb_message(field, &payload)
+}
+
+#[test]
+fn schema18_deck_config_and_description_survive_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("schema18-source.anki2");
+    write_schema18_collection(
+        &source,
+        &[(1, "Default"), (700, "Flags")],
+        &[Schema18Notetype {
+            id: 77,
+            name: "Extra",
+            fields: &["Front", "Back"],
+        }],
+        &schema18_seed(77, 700),
+    );
+
+    let weights: Vec<f32> = (1..=21)
+        .map(|value| f32::from(u8::try_from(value).unwrap_or(1)) / 10.0)
+        .collect();
+    let mut config = Vec::new();
+    config.extend(pb_packed_floats(1, &[2.0, 15.0]));
+    config.extend(pb_packed_floats(2, &[7.0]));
+    config.extend(pb_packed_floats(3, &[0.2, 1.3]));
+    config.extend(pb_packed_floats(6, &weights));
+    config.extend(pb_varint(9, 123));
+    config.extend(pb_varint(10, 456));
+    config.extend(pb_varint(16, 180));
+    config.extend(pb_varint(18, 3));
+    config.extend(pb_varint(19, 9));
+    config.extend(pb_varint(24, 45));
+    config.extend(pb_float(37, 0.85));
+    let mut kind = pb_varint(1, 2);
+    kind.extend(pb_string(4, "Flags deck"));
+    let mut common = pb_varint(1, 1);
+    common.extend(pb_varint(3, 5));
+    common.extend(pb_varint(4, 3));
+
+    let connection = Connection::open(&source).unwrap();
+    connection
+        .execute(
+            "UPDATE deck_config SET config = ?1 WHERE id = 2",
+            params![config],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE decks SET common = ?1, kind = ?2 WHERE id = 700",
+            params![common, pb_message(1, &kind)],
+        )
+        .unwrap();
+    drop(connection);
+    let package = schema18_package(dir.path(), &source);
+
+    let collection = dir.path().join("fresh.anki2");
+    let connection = import_into(dir.path(), &package, &collection);
+
+    let decks = col_column(&connection, "decks");
+    let deck = &decks["700"];
+    assert_eq!(deck["name"], "Flags");
+    assert_eq!(deck["desc"], "Flags deck");
+    assert_eq!(deck["conf"], 2);
+    assert_eq!(deck["collapsed"], true);
+    assert_eq!(deck["newToday"], json!([5, 3]));
+
+    let dconf = col_column(&connection, "dconf");
+    let config = &dconf["2"];
+    assert_eq!(config["maxTaken"], 45);
+    assert_eq!(config["new"]["delays"], json!([2.0, 15.0]));
+    assert_eq!(config["new"]["ints"], json!([3, 9, 0]));
+    assert_eq!(config["new"]["perDay"], 123);
+    assert_eq!(config["rev"]["perDay"], 456);
+    assert_eq!(config["rev"]["maxIvl"], 180);
+    assert_eq!(config["lapse"]["delays"], json!([7.0]));
+    let retention = config["desiredRetention"].as_f64().unwrap_or_default();
+    assert!((retention - 0.85).abs() < 1e-6, "{retention}");
+    assert_eq!(config["fsrsParams6"].as_array().unwrap().len(), 21);
+}
+
+#[test]
+fn real_world_import_keeps_deck_options_and_description() {
+    if !Path::new(REAL_FIXTURE).exists() {
+        eprintln!("skipping real-world apkg test: {REAL_FIXTURE} is absent");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("WorldFlags.apkg");
+    fs::copy(REAL_FIXTURE, &package).unwrap();
+    let collection = dir.path().join("fresh.anki2");
+    let connection = import_into(dir.path(), &package, &collection);
+
+    let decks = col_column(&connection, "decks");
+    let world_flags = decks
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|deck| deck["name"] == "WorldFlags")
+        .unwrap()
+        .clone();
+    let description = world_flags["desc"].as_str().unwrap_or_default();
+    assert!(
+        description.contains("shared deck page"),
+        "deck description was {description:?}"
+    );
+    let config_id = world_flags["conf"].as_i64().unwrap().to_string();
+    let dconf = col_column(&connection, "dconf");
+    let config = &dconf[&config_id];
+    assert_eq!(config["maxTaken"], 60);
+    assert_eq!(config["rev"]["maxIvl"], 180);
+    assert_eq!(config["new"]["delays"], json!([1.0, 10.0]));
+    let retention = config["desiredRetention"].as_f64().unwrap_or_default();
+    assert!((retention - 0.9).abs() < 1e-6, "{retention}");
+    assert_ne!(config["fsrsParams6"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn numeric_sort_field_round_trips_through_a_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("numeric.anki2");
+    let media = dir.path().join("numeric-media");
+    fs::create_dir_all(&media).unwrap();
+    fs::write(media.join("a[b].png"), b"pixel").unwrap();
+    {
+        let mut store = AnkiCollection::create(&source).unwrap();
+        store
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![String::from("42"), String::from("answer")],
+                tags: Vec::new(),
+            })
+            .unwrap();
+        store.close().unwrap();
+    }
+    let package = dir.path().join("numeric.apkg");
+    export_apkg(&source, &media, &package).unwrap();
+
+    let destination = dir.path().join("numeric-destination.anki2");
+    let destination_media = dir.path().join("numeric-destination-media");
+    import_apkg(&package, &destination, &destination_media).unwrap();
+
+    let connection = Connection::open(&destination).unwrap();
+    let sort_field: String = connection
+        .query_row("SELECT CAST(sfld AS TEXT) FROM notes", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(sort_field, "42");
+}
+
+#[test]
+fn colpkg_rejects_media_names_that_collide_after_sanitizing() {
+    let fixture = Fixture::new();
+    let package = fixture.dir.path().join("collision.colpkg");
+    let mapping = json!({"0": "a:b.png", "1": "a?b.png"})
+        .to_string()
+        .into_bytes();
+    build_zip(
+        &package,
+        &[
+            ("collection.anki21", fs::read(&fixture.source).unwrap()),
+            ("0", b"first".to_vec()),
+            ("1", b"second".to_vec()),
+            ("media", mapping),
+            ("meta", vec![0x08, 0x02]),
+        ],
+    );
+
+    let destination = fixture.dir.path().join("collision");
+    let error = import_colpkg(&package, &destination).unwrap_err();
+    assert!(error.to_string().contains("collision"), "{error}");
+    assert!(
+        !destination.join("collection.anki21").exists(),
+        "failed extraction must not leave a collection"
+    );
 }

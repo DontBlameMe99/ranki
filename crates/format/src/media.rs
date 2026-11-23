@@ -10,6 +10,8 @@ use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 
+use unicode_normalization::UnicodeNormalization;
+
 use crate::FormatError;
 
 use crate::error::io_error;
@@ -35,58 +37,116 @@ pub struct MediaFile {
     pub path: PathBuf,
 }
 
+/// The maximum media filename length Anki enforces, in bytes.
+const MAX_FILENAME_BYTES: usize = 120;
+const MAX_EXTENSION_BYTES: usize = 10;
+
+/// Adjusts a package media name the way Anki's `normalize_filename` does.
+///
+/// Disallowed characters are removed, names are NFC, non-breaking spaces
+/// become regular spaces, Windows device names get an underscore, a trailing
+/// space or dot gets an underscore, and long names are truncated.
+///
+/// Two deliberate differences: a path component is reduced to its basename so
+/// a package cannot write outside the media directory, and unassigned code
+/// points are kept because Ranki has no Unicode category table.
+#[must_use]
 pub fn sanitize_filename(name: &str) -> String {
-    let trimmed = name.trim();
-    let base = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
-    let cleaned: String = base
-        .trim_matches(|character| character == '.' || character == ' ')
-        .chars()
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let mut cleaned: String = base
+        .nfc()
+        .filter(|character| !is_disallowed_media_char(*character))
         .map(|character| {
-            if is_allowed_media_char(character) {
-                character
+            if character == '\u{a0}' {
+                ' '
             } else {
-                '_'
+                character
             }
         })
         .collect();
-
-    if cleaned.is_empty()
-        || cleaned == "."
-        || cleaned == ".."
-        || is_reserved_name(&cleaned)
-    {
+    cleaned = prefix_windows_device_name(&cleaned);
+    if cleaned.ends_with(' ') || cleaned.ends_with('.') {
+        cleaned.push('_');
+    }
+    let truncated = truncate_filename(&cleaned);
+    if truncated.is_empty() || truncated == "." || truncated == ".." {
         String::new()
     } else {
-        cleaned
+        truncated
     }
 }
 
-fn is_allowed_media_char(character: char) -> bool {
-    character.is_alphanumeric()
-        || matches!(
-            character,
-            '-' | '_'
-                | '.'
-                | ' '
-                | '('
-                | ')'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '+'
-                | ','
-                | '\''
-                | '!'
-                | '~'
-        )
+const fn is_disallowed_media_char(character: char) -> bool {
+    matches!(
+        character,
+        '[' | ']' | '<' | '>' | ':' | '"' | '/' | '?' | '*' | '^' | '\\' | '|'
+    ) || character.is_ascii_control()
 }
 
-fn is_reserved_name(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
-    let base =
-        stem.trim_end_matches(|character: char| character.is_ascii_digit());
-    matches!(base, "CON" | "PRN" | "AUX" | "NUL" | "COM" | "LPT")
+fn prefix_windows_device_name(name: &str) -> String {
+    let upper = name.to_ascii_uppercase();
+    for device in ["CON", "PRN", "AUX", "NUL"] {
+        if upper == device || upper.starts_with(&format!("{device}.")) {
+            let original = name.get(..device.len()).unwrap_or(device);
+            let rest = name.get(device.len()..).unwrap_or_default();
+            return format!("{original}_{rest}");
+        }
+    }
+    for prefix in ["COM", "LPT"] {
+        let Some(rest) = upper.strip_prefix(prefix) else {
+            continue;
+        };
+        let mut characters = rest.chars();
+        let Some(digit) = characters.next() else {
+            continue;
+        };
+        if matches!(digit, '1'..='9')
+            && (characters.next().is_none()
+                || rest.starts_with(&format!("{digit}.")))
+        {
+            let original =
+                name.get(..prefix.len().saturating_add(1)).unwrap_or(prefix);
+            let tail = name
+                .get(prefix.len().saturating_add(1)..)
+                .unwrap_or_default();
+            return format!("{original}_{tail}");
+        }
+    }
+    name.to_owned()
+}
+
+fn truncate_filename(name: &str) -> String {
+    if name.len() <= MAX_FILENAME_BYTES {
+        return name.to_owned();
+    }
+    let (stem, extension) = name
+        .rsplit_once('.')
+        .map_or((name, ""), |(stem, extension)| (stem, extension));
+    let shortened_extension =
+        truncated_to_char_boundary(extension, MAX_EXTENSION_BYTES);
+    let stem_limit = MAX_FILENAME_BYTES
+        .saturating_sub(shortened_extension.len())
+        .saturating_sub(2);
+    let shortened_stem = truncated_to_char_boundary(stem, stem_limit);
+    let mut truncated = if shortened_extension.is_empty() {
+        shortened_stem.to_owned()
+    } else {
+        format!("{shortened_stem}.{shortened_extension}")
+    };
+    if truncated.ends_with(' ') || truncated.ends_with('.') {
+        truncated.push('_');
+    }
+    truncated
+}
+
+fn truncated_to_char_boundary(value: &str, mut limit: usize) -> &str {
+    if limit >= value.len() {
+        return value;
+    }
+    while !value.is_char_boundary(limit) {
+        limit = limit.saturating_sub(1);
+    }
+    value.get(..limit).unwrap_or_default()
 }
 
 pub fn collect_media_files(
@@ -437,5 +497,36 @@ mod tests {
         let text = "no media here";
 
         assert!(matches!(matcher.rewrite(text), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn sanitized_names_follow_anki_rules() {
+        assert_eq!(super::sanitize_filename("CON.txt"), "CON_.txt");
+        assert_eq!(super::sanitize_filename("COM3.mp3"), "COM3_.mp3");
+        assert_eq!(super::sanitize_filename("COM10.mp3"), "COM10.mp3");
+        assert_eq!(super::sanitize_filename("a[b]<c>.png"), "abc.png");
+        assert_eq!(super::sanitize_filename("pic\u{a0}one.png"), "pic one.png");
+        assert_eq!(super::sanitize_filename("starts. "), "starts. _");
+        assert_eq!(super::sanitize_filename("../escape.png"), "escape.png");
+        assert_eq!(
+            super::sanitize_filename("na\u{ef}ve r\u{e9}sum\u{e9}.png"),
+            "na\u{ef}ve r\u{e9}sum\u{e9}.png"
+        );
+    }
+
+    #[test]
+    fn long_media_names_are_truncated_to_anki_limit() {
+        let long = format!("{}.jpeg", "a".repeat(200));
+        let sanitized = super::sanitize_filename(&long);
+        assert!(sanitized.len() <= 120, "{}", sanitized.len());
+        assert!(sanitized.rsplit_once('.').is_some_and(|(_, extension)| {
+            extension.eq_ignore_ascii_case("jpeg")
+        }));
+    }
+
+    #[test]
+    fn nfd_names_become_nfc() {
+        let decomposed = "nai\u{308}ve.png";
+        assert_eq!(super::sanitize_filename(decomposed), "na\u{ef}ve.png");
     }
 }

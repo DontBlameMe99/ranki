@@ -22,6 +22,7 @@ use ranki_storage::Collection;
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
 use serde_json::Value;
+use serde_json::json;
 use sha1::Digest;
 use sha1::Sha1;
 use tempfile::TempDir;
@@ -78,7 +79,13 @@ fn create_writes_anki_schema_and_default_json() {
         .map(|row| row.expect("row"))
         .collect();
     assert!(indexes.contains(&"ix_cards_sched".to_owned()));
-    assert!(indexes.contains(&"idx_graves_pending".to_owned()));
+    assert!(indexes.contains(&"ix_notes_usn".to_owned()));
+    for modern in ["idx_graves_pending", "idx_notes_mid", "idx_cards_odid"] {
+        assert!(
+            !indexes.contains(&modern.to_owned()),
+            "{modern} belongs to the schema-18 upgrade, not schema 11"
+        );
+    }
     let (configuration, models, decks, dconf, tags): (
         String,
         String,
@@ -110,6 +117,18 @@ fn create_writes_anki_schema_and_default_json() {
     assert_eq!(model_json["1"]["tmpls"][0]["qfmt"], "{{Front}}");
     let deck_json: Value = serde_json::from_str(&decks).expect("decks");
     assert_eq!(deck_json["1"]["name"], "Default");
+    for key in ["lrnToday", "revToday", "newToday", "timeToday"] {
+        assert_eq!(deck_json["1"][key], json!([0, 0]), "deck needs {key}");
+    }
+    assert_eq!(deck_json["1"]["collapsed"], false);
+    assert_eq!(deck_json["1"]["dyn"], 0);
+    let dconf_json: Value = serde_json::from_str(&dconf).expect("dconf");
+    assert_eq!(dconf_json["1"]["maxTaken"], 60);
+    assert_eq!(dconf_json["1"]["autoplay"], true);
+    assert_eq!(dconf_json["1"]["new"]["delays"], json!([1.0, 10.0]));
+    assert_eq!(dconf_json["1"]["new"]["ints"], json!([1, 4, 0]));
+    assert_eq!(dconf_json["1"]["rev"]["maxIvl"], 36_500);
+    assert_eq!(dconf_json["1"]["lapse"]["leechFails"], 8);
 }
 
 #[test]
@@ -391,6 +410,66 @@ fn find_cards_matches_deck_tag_and_model() {
 }
 
 #[test]
+fn tag_search_matches_child_tags_like_anki() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let parent = store
+        .add_note(&note(&["parent", "a"], &["animal"]))
+        .expect("add");
+    let child = store
+        .add_note(&note(&["child", "b"], &["animal::mammal"]))
+        .expect("add");
+    let other = store
+        .add_note(&note(&["other", "c"], &["vegan"]))
+        .expect("add");
+    let prefixed = store
+        .add_note(&note(&["prefixed", "d"], &["myanimal::x"]))
+        .expect("add");
+    let mut expected = parent;
+    expected.extend(child.iter().copied());
+    expected.sort_unstable();
+    assert_eq!(store.find_cards("tag:animal").expect("find"), expected);
+    assert_eq!(store.find_cards("tag:animal::mammal").expect("find"), child);
+    assert_eq!(store.find_cards("tag:animal*").expect("find"), expected);
+    assert!(
+        !store
+            .find_cards("tag:animal")
+            .expect("find")
+            .iter()
+            .any(|id| other.contains(id) || prefixed.contains(id))
+    );
+}
+
+#[test]
+fn open_drops_indexes_that_belong_to_anki_upgrades() {
+    let (_directory, path) = fixture();
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.execute_batch(
+        "CREATE INDEX idx_notes_mid ON notes (mid);
+         CREATE INDEX idx_cards_odid ON cards (odid) WHERE odid != 0;
+         CREATE INDEX idx_graves_pending ON graves (usn);",
+    )
+    .expect("legacy indexes");
+    drop(conn);
+
+    let _store = Collection::open(&path).expect("open");
+    let conn = rusqlite::Connection::open(&path).expect("read");
+    let indexes: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+        .expect("prepare")
+        .query_map([], |row| row.get(0))
+        .expect("query")
+        .map(|row| row.expect("row"))
+        .collect();
+    for legacy in ["idx_notes_mid", "idx_cards_odid", "idx_graves_pending"] {
+        assert!(
+            !indexes.iter().any(|name| name == legacy),
+            "{legacy} survived open"
+        );
+    }
+}
+
+#[test]
 fn find_cards_does_not_interpret_sql_injection() {
     let (_directory, path) = fixture();
     let mut store = Collection::open(&path).expect("open");
@@ -443,11 +522,22 @@ fn apply_review_updates_card_log_and_collection_metadata() {
     let saved = store.card(card.id).expect("card").expect("exists");
     assert_eq!(saved.queue, CardQueue::Review);
     assert_eq!(saved.due, 42);
+    let data: Value = serde_json::from_str(&saved.data).expect("card data");
+    assert_eq!(
+        data["lrt"].as_i64(),
+        Some(decision.card.modified),
+        "every answer records the last review time"
+    );
     let log = store.revlog(9_000).expect("revlog").expect("entry");
     assert_eq!(log.card_id, card.id);
     assert_eq!(log.ease, Rating::Good);
     assert!(store.collection_modified().expect("modified") > before);
-    assert!(store.apply_review(&decision).is_err());
+    store.apply_review(&decision).expect("repeat answer");
+    let connection = rusqlite::Connection::open(&path).expect("read");
+    let reviews: i64 = connection
+        .query_row("SELECT COUNT(*) FROM revlog", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(reviews, 2);
     assert_eq!(
         store.revlog(9_000).expect("revlog").expect("entry").ease,
         Rating::Good
@@ -1076,4 +1166,46 @@ fn apply_reviews_writes_a_batch_atomically() {
     assert_eq!(saved.interval, 4, "a failed batch writes nothing");
     assert!(store.revlog(90_000).expect("revlog").is_none());
     assert!(store.revlog(90_001).expect("revlog").is_none());
+}
+
+#[test]
+fn repeated_answer_keeps_revlog_ids_unique() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let ids = store
+        .add_note(&note(&["first", "back"], &[]))
+        .expect("add note");
+    let card = store.card(ids[0]).expect("card").expect("exists");
+    let mut changed = card.clone();
+    changed.queue = CardQueue::Review;
+    changed.card_type = CardType::Review;
+    changed.interval = 4;
+    let decision = ReviewDecision {
+        card: changed,
+        revlog: RevLog {
+            id: 1_700_000_000_000,
+            card_id: card.id,
+            usn: 0,
+            ease: Rating::Good,
+            interval: 4,
+            last_interval: 0,
+            factor: 2500,
+            time_ms: 400,
+            kind: RevLogKind::Review,
+        },
+    };
+    let first = store.apply_review(&decision).expect("first");
+    assert_eq!(first, 1_700_000_000_000);
+    let second = store.apply_review(&decision).expect("second");
+    assert_ne!(second, first);
+    assert!(store.undo_review(&decision.card, second).expect("undo"));
+    let connection = rusqlite::Connection::open(&path).expect("read");
+    let count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM revlog", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(count, 1);
+    let logged: i64 = connection
+        .query_row("SELECT id FROM revlog", [], |row| row.get(0))
+        .expect("row");
+    assert_eq!(logged, first);
 }

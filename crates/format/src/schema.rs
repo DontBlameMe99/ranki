@@ -5,7 +5,6 @@ use std::time::UNIX_EPOCH;
 
 use rusqlite::Connection;
 use serde_json::Value;
-use serde_json::json;
 
 use crate::FormatError;
 use crate::error::db_error;
@@ -36,7 +35,7 @@ CREATE TABLE IF NOT EXISTS notes (
     usn INTEGER NOT NULL,
     tags TEXT NOT NULL,
     flds TEXT NOT NULL,
-    sfld TEXT NOT NULL,
+    sfld INTEGER NOT NULL,
     csum INTEGER NOT NULL,
     flags INTEGER NOT NULL,
     data TEXT NOT NULL
@@ -77,9 +76,13 @@ CREATE TABLE IF NOT EXISTS graves (
     oid INTEGER NOT NULL,
     type INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ix_notes_guid ON notes (guid);
+CREATE INDEX IF NOT EXISTS ix_notes_csum ON notes (csum);
+CREATE INDEX IF NOT EXISTS ix_notes_usn ON notes (usn);
 CREATE INDEX IF NOT EXISTS ix_cards_nid ON cards (nid);
+CREATE INDEX IF NOT EXISTS ix_cards_sched ON cards (did, queue, due);
+CREATE INDEX IF NOT EXISTS ix_cards_usn ON cards (usn);
 CREATE INDEX IF NOT EXISTS ix_revlog_cid ON revlog (cid);
+CREATE INDEX IF NOT EXISTS ix_revlog_usn ON revlog (usn);
 ";
 
 pub fn ensure_parent(path: &Path) -> Result<(), FormatError> {
@@ -120,6 +123,14 @@ pub fn open_or_create(
     if count == 0 {
         insert_default_col(&connection, crt)?;
     }
+    ranki_storage::drop_legacy_schema11_indexes(&connection).map_err(
+        |error| {
+            FormatError::with_source(
+                "cannot remove legacy collection indexes",
+                error,
+            )
+        },
+    )?;
     Ok(connection)
 }
 
@@ -128,17 +139,30 @@ fn insert_default_col(
     crt: Option<i64>,
 ) -> Result<(), FormatError> {
     let creation_time = crt.map_or_else(current_time, Ok)?;
+    let col = ranki_storage::default_col(creation_time, current_millis()?);
+    let field = |key: &str| -> Result<&Value, FormatError> {
+        col.get(key)
+            .ok_or_else(|| FormatError::new("default collection is incomplete"))
+    };
+    let number = |key: &str| -> Result<i64, FormatError> {
+        col.get(key)
+            .and_then(Value::as_i64)
+            .ok_or_else(|| FormatError::new("default collection is incomplete"))
+    };
     connection
         .execute(
             "INSERT INTO col (id, crt, mod, scm, ver, dty, usn, ls, conf, models, decks, dconf, tags)
-             VALUES (1, ?1, 0, 0, 11, 0, 0, 0, ?2, ?3, ?4, ?5, ?6)",
+             VALUES (1, ?1, ?2, ?3, 11, 0, 0, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 creation_time,
-                encode_json(&default_conf())?,
-                encode_json(&default_models())?,
-                encode_json(&default_decks())?,
-                encode_json(&default_dconf())?,
-                encode_json(&Value::Object(serde_json::Map::new()))?,
+                number("mod")?,
+                number("scm")?,
+                number("ls")?,
+                encode_json(field("conf")?)?,
+                encode_json(field("models")?)?,
+                encode_json(field("decks")?)?,
+                encode_json(field("dconf")?)?,
+                encode_json(field("tags")?)?,
             ],
         )
         .map_err(db_error("cannot create collection metadata"))?;
@@ -156,81 +180,18 @@ fn current_time() -> Result<i64, FormatError> {
         .map_err(|_| FormatError::new("system clock out of range"))
 }
 
+fn current_millis() -> Result<i64, FormatError> {
+    let elapsed =
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| {
+                FormatError::with_source("cannot read system clock", error)
+            })?;
+    i64::try_from(elapsed.as_millis())
+        .map_err(|_| FormatError::new("system clock out of range"))
+}
+
 pub fn encode_json(value: &Value) -> Result<String, FormatError> {
     serde_json::to_string(value)
         .map_err(json_error("cannot encode collection JSON"))
-}
-
-fn default_conf() -> Value {
-    json!({
-        "activeDecks": [1],
-        "curDeck": 1,
-        "curModel": 1,
-        "nextPos": 1,
-        "sortBackwards": false,
-        "sortType": "noteFld",
-    })
-}
-
-fn default_models() -> Value {
-    let model = json!({
-        "id": 1,
-        "name": "Basic",
-        "type": 0,
-        "mod": 0,
-        "usn": 0,
-        "sortf": 0,
-        "did": 1,
-        "tmpls": [{
-            "name": "Card 1",
-            "qfmt": "{{Front}}",
-            "afmt": "{{FrontSide}}\n<hr id=answer>\n{{Back}}",
-            "bqfmt": "",
-            "bafmt": "",
-            "did": null,
-            "ord": 0,
-        }],
-        "flds": [
-            {"name": "Front", "ord": 0, "sticky": false, "rtl": false},
-            {"name": "Back", "ord": 1, "sticky": false, "rtl": false},
-        ],
-        "css": ".card { font-family: arial; font-size: 20px; text-align: center; }",
-        "latexPre": "",
-        "latexPost": "",
-        "latexSvg": false,
-        "req": [[0, "any", [0]]],
-    });
-    let mut models = serde_json::Map::new();
-    models.insert("1".to_owned(), model);
-    Value::Object(models)
-}
-
-fn default_decks() -> Value {
-    let deck = json!({
-        "id": 1,
-        "name": "Default",
-        "type": 0,
-        "mod": 0,
-        "usn": 0,
-        "conf": 1,
-        "desc": "",
-        "dyn": 0,
-        "collapsed": false,
-        "browserCollapsed": false,
-    });
-    let mut decks = serde_json::Map::new();
-    decks.insert("1".to_owned(), deck);
-    Value::Object(decks)
-}
-
-fn default_dconf() -> Value {
-    let config = json!({
-        "id": 1,
-        "name": "Default",
-        "mod": 0,
-        "usn": 0,
-    });
-    let mut configs = serde_json::Map::new();
-    configs.insert("1".to_owned(), config);
-    Value::Object(configs)
 }

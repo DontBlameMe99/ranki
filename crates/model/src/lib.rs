@@ -526,12 +526,15 @@ pub trait Store {
 
     /// Persists a scheduled review and its log entry atomically.
     ///
+    /// Returns the review log id that was stored, which can differ from the
+    /// requested id when it collides with an existing row.
+    ///
     /// # Errors
     /// Returns [`StoreError`] if the card does not exist or the write fails.
     fn apply_review(
         &mut self,
         decision: &ReviewDecision,
-    ) -> Result<(), StoreError>;
+    ) -> Result<Id, StoreError>;
 
     /// Reverses one persisted review: deletes the review log and restores the
     /// card row to the snapshot taken before that review.

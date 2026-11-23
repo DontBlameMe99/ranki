@@ -7,9 +7,9 @@ use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
 use rusqlite::params;
+use rusqlite::types::Value as SqlValue;
 use serde_json::Map;
 use serde_json::Value;
-use serde_json::json;
 
 use crate::FormatError;
 use crate::ImportReport;
@@ -215,6 +215,12 @@ fn read_col(
     let dconf = decode_json(row.4, "dconf")?;
     let tags = decode_json(row.5, "tags")?;
     let incoming = prefix == "incoming";
+    let table_models = has_table(connection, prefix, "notetypes")?
+        && (!incoming || is_empty_object(&models));
+    let table_decks = has_table(connection, prefix, "decks")?
+        && (!incoming || is_empty_object(&decks));
+    let table_dconf = has_table(connection, prefix, "deck_config")?
+        && (!incoming || is_empty_object(&dconf));
     Ok(ColJson {
         crt: row.0,
         conf: if incoming && is_empty_object(&conf) {
@@ -222,18 +228,26 @@ fn read_col(
         } else {
             conf
         },
-        models: if is_empty_object(&models) {
+        models: if table_models {
             modern_models(connection, prefix)?
         } else {
             models
         },
-        decks: if is_empty_object(&decks) {
-            modern_id_map(connection, prefix, "decks")
+        decks: if table_decks {
+            ranki_storage::decks_json_from_tables(connection, prefix).map_err(
+                |error| FormatError::with_source("cannot decode decks", error),
+            )?
         } else {
             decks
         },
-        dconf: if incoming && is_empty_object(&dconf) {
-            modern_id_map(connection, prefix, "deck_config")
+        dconf: if table_dconf {
+            ranki_storage::deck_configs_json_from_tables(connection, prefix)
+                .map_err(|error| {
+                    FormatError::with_source(
+                        "cannot decode deck configs",
+                        error,
+                    )
+                })?
         } else {
             dconf
         },
@@ -284,37 +298,6 @@ fn modern_conf(connection: &Connection, prefix: &str) -> Value {
         conf.insert(key, value);
     }
     Value::Object(conf)
-}
-
-fn modern_id_map(connection: &Connection, prefix: &str, table: &str) -> Value {
-    let sql = format!("SELECT id, name FROM {prefix}.{table}");
-    let mut map = Map::new();
-    let Ok(mut statement) = connection.prepare(&sql) else {
-        return Value::Object(map);
-    };
-    let Ok(rows) = statement.query_map([], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-    }) else {
-        return Value::Object(map);
-    };
-    for row in rows {
-        let Ok((id, name)) = row else {
-            continue;
-        };
-        let entry = match table {
-            "notetypes" => {
-                json!({"id": id, "name": name, "did": 1, "flds": [], "tmpls": []})
-            }
-            "decks" => json!({
-                "id": id,
-                "name": ranki_storage::decode_deck_name(&name),
-                "conf": 1
-            }),
-            _ => json!({"id": id, "name": name}),
-        };
-        map.insert(id.to_string(), entry);
-    }
-    Value::Object(map)
 }
 
 fn modern_models(
@@ -374,13 +357,158 @@ fn write_deck_rows(
     for (old_id, new_id) in &state.imported_decks {
         if copy {
             let _ = copy_deck_row(transaction, *old_id, *new_id)?;
+            rewrite_copied_deck_config(transaction, *new_id, &state.dconf_map)?;
         } else {
             insert_deck_row(transaction, &merged.decks, *new_id)?;
         }
     }
-    if has_table(transaction, "main", "deck_config")?
-        && has_table(transaction, "incoming", "deck_config")?
-    {
+    write_deck_configs(transaction, merged, state)?;
+    Ok(())
+}
+
+/// Points a copied schema-18 deck at the preset ID the merge actually wrote.
+fn rewrite_copied_deck_config(
+    transaction: &Transaction<'_>,
+    deck_id: i64,
+    dconf_map: &BTreeMap<i64, i64>,
+) -> Result<(), FormatError> {
+    if dconf_map.is_empty() {
+        return Ok(());
+    }
+    let kind: Vec<u8> = transaction
+        .query_row(
+            "SELECT kind FROM main.decks WHERE id = ?1",
+            [deck_id],
+            |row| row.get(0),
+        )
+        .map_err(db_error("cannot read imported deck kind"))?;
+    let outer = ranki_storage::protobuf_fields(&kind).unwrap_or_default();
+    let Some(normal) = ranki_storage::proto_bytes(&outer, 1) else {
+        return Ok(());
+    };
+    let fields = ranki_storage::protobuf_fields(normal).unwrap_or_default();
+    let Some(raw_conf) = ranki_storage::proto_varint(&fields, 1) else {
+        return Ok(());
+    };
+    let old_conf = i64::try_from(raw_conf).unwrap_or(1);
+    let Some(mapped_conf) = dconf_map.get(&old_conf).copied() else {
+        return Ok(());
+    };
+    if mapped_conf == old_conf {
+        return Ok(());
+    }
+    let Some(inner) = rewrite_varint_field(
+        normal,
+        1,
+        u64::try_from(mapped_conf).unwrap_or(1),
+    ) else {
+        return Ok(());
+    };
+    let Some(rewritten) = rewrite_message_field(&kind, 1, &inner) else {
+        return Ok(());
+    };
+    transaction
+        .execute(
+            "UPDATE main.decks SET kind = ?1 WHERE id = ?2",
+            params![rewritten, deck_id],
+        )
+        .map(|_| ())
+        .map_err(db_error("cannot update imported deck preset"))
+}
+
+fn read_pb_varint(bytes: &[u8], mut pos: usize) -> Option<(u64, usize)> {
+    let mut value = 0_u64;
+    let mut shift = 0_u32;
+    loop {
+        let byte = *bytes.get(pos)?;
+        pos = pos.checked_add(1)?;
+        value |= u64::from(byte & 0x7f).checked_shl(shift)?;
+        if byte & 0x80 == 0 {
+            return Some((value, pos));
+        }
+        shift = shift.checked_add(7)?;
+    }
+}
+
+fn pb_field_end(bytes: &[u8], wire: u64, after_tag: usize) -> Option<usize> {
+    match wire {
+        0 => read_pb_varint(bytes, after_tag).map(|(_, end)| end),
+        1 => after_tag.checked_add(8),
+        2 => {
+            let (raw_length, start) = read_pb_varint(bytes, after_tag)?;
+            let size = usize::try_from(raw_length).ok()?;
+            start.checked_add(size)
+        }
+        5 => after_tag.checked_add(4),
+        _ => None,
+    }
+}
+
+fn rewrite_varint_field(
+    bytes: &[u8],
+    wanted: u32,
+    value: u64,
+) -> Option<Vec<u8>> {
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut pos = 0;
+    let mut found = false;
+    while pos < bytes.len() {
+        let start = pos;
+        let (tag, after_tag) = read_pb_varint(bytes, pos)?;
+        let field = u32::try_from(tag >> 3).ok()?;
+        let wire = tag & 0x07;
+        let end = pb_field_end(bytes, wire, after_tag)?;
+        output.extend_from_slice(bytes.get(start..after_tag)?);
+        if field == wanted && wire == 0 && !found {
+            pb_value(&mut output, value);
+            found = true;
+        } else {
+            output.extend_from_slice(bytes.get(after_tag..end)?);
+        }
+        pos = end;
+    }
+    found.then_some(output)
+}
+
+fn rewrite_message_field(
+    bytes: &[u8],
+    wanted: u32,
+    body: &[u8],
+) -> Option<Vec<u8>> {
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut pos = 0;
+    let mut found = false;
+    while pos < bytes.len() {
+        let start = pos;
+        let (tag, after_tag) = read_pb_varint(bytes, pos)?;
+        let field = u32::try_from(tag >> 3).ok()?;
+        let wire = tag & 0x07;
+        let end = pb_field_end(bytes, wire, after_tag)?;
+        if field == wanted && wire == 2 && !found {
+            output.extend_from_slice(bytes.get(start..after_tag)?);
+            pb_value(
+                &mut output,
+                u64::try_from(body.len()).unwrap_or_default(),
+            );
+            output.extend_from_slice(body);
+            found = true;
+        } else {
+            output.extend_from_slice(bytes.get(start..end)?);
+        }
+        pos = end;
+    }
+    found.then_some(output)
+}
+
+fn write_deck_configs(
+    transaction: &Transaction<'_>,
+    merged: &ColJson,
+    state: &MergeState,
+) -> Result<(), FormatError> {
+    if !has_table(transaction, "main", "deck_config")? {
+        return Ok(());
+    }
+    if has_table(transaction, "incoming", "deck_config")? {
         for (old_id, new_id) in &state.imported_deck_configs {
             let _ = copy_config_row(
                 transaction,
@@ -388,8 +516,38 @@ fn write_deck_rows(
                 (*old_id, *new_id),
             )?;
         }
+    } else {
+        for (_, new_id) in &state.imported_deck_configs {
+            insert_deck_config_row(transaction, &merged.dconf, *new_id)?;
+        }
     }
     Ok(())
+}
+
+fn insert_deck_config_row(
+    transaction: &Transaction<'_>,
+    dconf: &Value,
+    id: i64,
+) -> Result<(), FormatError> {
+    let entries = as_object(dconf, "deck config")?;
+    let entry = entries.get(&id.to_string()).ok_or_else(|| {
+        FormatError::new("merged deck config is missing from metadata")
+    })?;
+    let name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("Default");
+    let modified = entry.get("mod").and_then(Value::as_i64).unwrap_or(0);
+    let usn = entry.get("usn").and_then(Value::as_i64).unwrap_or(0);
+    let config = ranki_storage::deck_config_blob(entry);
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO main.deck_config (id, name, mtime_secs, usn, config)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, name, modified, usn, config],
+        )
+        .map(|_| ())
+        .map_err(db_error("cannot write imported deck config"))
 }
 
 fn write_note_type_rows(
@@ -503,6 +661,7 @@ fn insert_deck_row(
         .and_then(|usn| i32::try_from(usn).ok())
         .unwrap_or_default();
     let modified = entry.get("mod").and_then(Value::as_i64).unwrap_or_default();
+    let kind = deck_kind_blob(entry);
     transaction
         .execute(
             "INSERT OR IGNORE INTO main.decks (id, name, mtime_secs, usn, common, kind)
@@ -512,12 +671,162 @@ fn insert_deck_row(
                 ranki_storage::encode_deck_name(name),
                 modified,
                 usn,
-                ranki_storage::deck_common(usn, modified),
-                Vec::<u8>::new(),
+                ranki_storage::deck_common(),
+                kind,
             ],
         )
         .map(|_| ())
         .map_err(db_error("cannot write imported deck"))
+}
+
+fn deck_kind_blob(entry: &Value) -> Vec<u8> {
+    let filtered = match entry.get("dyn") {
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::Number(number)) => number.as_u64().unwrap_or(0) != 0,
+        Some(Value::String(text)) => !text.is_empty(),
+        Some(Value::Null | Value::Array(_) | Value::Object(_)) | None => false,
+    };
+    if filtered {
+        return filtered_deck_kind(entry);
+    }
+    normal_deck_kind(entry)
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Anki stores deck retention as f32"
+)]
+fn normal_deck_kind(entry: &Value) -> Vec<u8> {
+    let mut normal = Vec::new();
+    let config_id = preset_id(entry.get("conf")).unwrap_or(1);
+    pb_varint(&mut normal, 1, u64::try_from(config_id).unwrap_or(1));
+    pb_varint(&mut normal, 2, unsigned(entry.get("extendNew")));
+    pb_varint(&mut normal, 3, unsigned(entry.get("extendRev")));
+    if let Some(description) = entry.get("desc").and_then(Value::as_str)
+        && !description.is_empty()
+    {
+        pb_string(&mut normal, 4, description);
+    }
+    if entry.get("md").and_then(Value::as_bool).unwrap_or(false) {
+        pb_varint(&mut normal, 5, 1);
+    }
+    if let Some(limit) = entry.get("reviewLimit").and_then(Value::as_u64) {
+        pb_varint(&mut normal, 6, limit);
+    }
+    if let Some(limit) = entry.get("newLimit").and_then(Value::as_u64) {
+        pb_varint(&mut normal, 7, limit);
+    }
+    if let Some(today) = entry
+        .get("reviewLimitToday")
+        .filter(|value| value.is_object())
+    {
+        pb_message(&mut normal, 8, &day_limit(today));
+    }
+    if let Some(today) =
+        entry.get("newLimitToday").filter(|value| value.is_object())
+    {
+        pb_message(&mut normal, 9, &day_limit(today));
+    }
+    if let Some(retention) =
+        entry.get("desiredRetention").and_then(Value::as_f64)
+        && retention > 0.0
+    {
+        pb_float(&mut normal, 10, (retention / 100.0) as f32);
+    }
+    let mut container = Vec::new();
+    pb_message(&mut container, 1, &normal);
+    container
+}
+
+fn day_limit(value: &Value) -> Vec<u8> {
+    let mut limit = Vec::new();
+    pb_varint(&mut limit, 1, unsigned(value.get("limit")));
+    pb_varint(&mut limit, 2, unsigned(value.get("today")));
+    limit
+}
+
+/// Builds a schema-18 `decks.kind` blob for a filtered deck.
+fn filtered_deck_kind(entry: &Value) -> Vec<u8> {
+    let mut filtered = Vec::new();
+    let resched = entry
+        .get("resched")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    pb_varint(&mut filtered, 1, u64::from(resched));
+    if let Some(terms) = entry.get("terms").and_then(Value::as_array) {
+        for term in terms {
+            let mut body = Vec::new();
+            pb_string(
+                &mut body,
+                1,
+                term.get("search")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            );
+            pb_varint(&mut body, 2, unsigned(term.get("limit")));
+            pb_varint(&mut body, 3, unsigned(term.get("order")));
+            pb_message(&mut filtered, 2, &body);
+        }
+    }
+    push_filtered_delays(&mut filtered, entry);
+    pb_varint(&mut filtered, 4, unsigned(entry.get("previewDelay")));
+    pb_varint(&mut filtered, 7, unsigned(entry.get("previewAgainSecs")));
+    pb_varint(&mut filtered, 5, unsigned(entry.get("previewHardSecs")));
+    pb_varint(&mut filtered, 6, unsigned(entry.get("previewGoodSecs")));
+    let mut container = Vec::new();
+    pb_message(&mut container, 2, &filtered);
+    container
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Anki stores step delays as f32 seconds"
+)]
+fn push_filtered_delays(filtered: &mut Vec<u8>, entry: &Value) {
+    let Some(delays) = entry.get("delays").and_then(Value::as_array) else {
+        return;
+    };
+    for value in delays.iter().filter_map(Value::as_f64) {
+        pb_float(filtered, 3, value as f32);
+    }
+}
+
+fn unsigned(value: Option<&Value>) -> u64 {
+    value.and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn pb_varint(bytes: &mut Vec<u8>, field: u32, value: u64) {
+    pb_tag(bytes, field, 0);
+    pb_value(bytes, value);
+}
+
+fn pb_string(bytes: &mut Vec<u8>, field: u32, value: &str) {
+    pb_tag(bytes, field, 2);
+    pb_value(bytes, u64::try_from(value.len()).unwrap_or(0));
+    bytes.extend_from_slice(value.as_bytes());
+}
+
+fn pb_message(bytes: &mut Vec<u8>, field: u32, body: &[u8]) {
+    pb_tag(bytes, field, 2);
+    pb_value(bytes, u64::try_from(body.len()).unwrap_or(0));
+    bytes.extend_from_slice(body);
+}
+
+fn pb_float(bytes: &mut Vec<u8>, field: u32, value: f32) {
+    pb_tag(bytes, field, 5);
+    bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+}
+
+fn pb_tag(bytes: &mut Vec<u8>, field: u32, wire: u8) {
+    pb_value(bytes, u64::from(field << 3) | u64::from(wire));
+}
+
+fn pb_value(bytes: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        bytes.push(u8::try_from(value & 0x7f).unwrap_or(0) | 0x80);
+        value >>= 7;
+    }
+    bytes.push(u8::try_from(value & 0x7f).unwrap_or(0));
 }
 
 fn global_next_id(
@@ -576,6 +885,16 @@ fn max_json_id(value: &Value) -> Result<Option<i64>, FormatError> {
     Ok(maximum)
 }
 
+fn sql_text(value: SqlValue) -> String {
+    match value {
+        SqlValue::Text(text) => text,
+        SqlValue::Integer(number) => number.to_string(),
+        SqlValue::Real(number) => number.to_string(),
+        SqlValue::Blob(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        SqlValue::Null => String::new(),
+    }
+}
+
 fn as_object(
     value: &Value,
     label: &str,
@@ -596,7 +915,6 @@ fn merge_col_json(
     let deck_map = merge_decks(&mut merged.decks, &incoming.decks, state)?;
     state.deck_map = deck_map;
     let model_map = merge_models(&mut merged.models, &incoming.models, state)?;
-    remap_conf(&mut merged.conf, &model_map, &state.deck_map);
     state.model_map = model_map;
     Ok(())
 }
@@ -627,6 +945,11 @@ fn merge_dconf(
 
     for (key, mut value) in incoming_configs {
         let old_id = entry_id(&key, &value, "deck config")?;
+        let existing = configs.get(&old_id.to_string()).cloned();
+        if existing.as_ref() == Some(&value) {
+            let _ = mapping.insert(old_id, old_id);
+            continue;
+        }
         let new_id = if used.contains(&old_id) {
             allocate(&mut used, state)?
         } else {
@@ -634,9 +957,9 @@ fn merge_dconf(
             old_id
         };
         set_id(&mut value, new_id, "deck config")?;
-        mapping.insert(old_id, new_id);
+        let _ = mapping.insert(old_id, new_id);
         state.imported_deck_configs.push((old_id, new_id));
-        configs.insert(new_id.to_string(), value);
+        let _ = configs.insert(new_id.to_string(), value);
     }
 
     *destination = Value::Object(configs);
@@ -840,44 +1163,23 @@ fn remap_model_decks(model: &mut Value, deck_map: &BTreeMap<i64, i64>) {
     }
 }
 
-#[expect(
-    clippy::excessive_nesting,
-    reason = "config references are updated in one pass"
-)]
-fn remap_conf(
-    conf: &mut Value,
-    model_map: &BTreeMap<i64, i64>,
-    deck_map: &BTreeMap<i64, i64>,
-) {
-    let Some(object) = conf.as_object_mut() else {
-        return;
-    };
-    remap_number(object, "curModel", model_map);
-    remap_number(object, "activeModel", model_map);
-    remap_number(object, "curDeck", deck_map);
-    if let Some(decks) =
-        object.get_mut("activeDecks").and_then(Value::as_array_mut)
-    {
-        for deck in decks.iter_mut() {
-            if let Some(old_id) = deck.as_i64()
-                && let Some(new_id) = deck_map.get(&old_id)
-            {
-                *deck = Value::from(*new_id);
-            }
-        }
-    }
-}
-
 fn remap_number(
     object: &mut Map<String, Value>,
     field: &str,
     mapping: &BTreeMap<i64, i64>,
 ) {
-    if let Some(old_id) = object.get(field).and_then(Value::as_i64)
+    if let Some(old_id) = preset_id(object.get(field))
         && let Some(new_id) = mapping.get(&old_id)
     {
         object.insert(field.to_owned(), Value::from(*new_id));
     }
+}
+
+fn preset_id(value: Option<&Value>) -> Option<i64> {
+    let candidate = value?;
+    candidate
+        .as_i64()
+        .or_else(|| candidate.as_str().and_then(|text| text.parse().ok()))
 }
 
 fn collect_ids(map: &Map<String, Value>) -> BTreeSet<i64> {
@@ -944,7 +1246,7 @@ fn rewrite_incoming_notes(
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
+                sql_text(row.get::<_, SqlValue>(2)?),
             ))
         })
         .map_err(db_error("cannot read package notes"))?
@@ -1041,7 +1343,7 @@ fn merge_notes(
                 usn: row.get(4)?,
                 tags: row.get(5)?,
                 fields: row.get(6)?,
-                sort_field: row.get(7)?,
+                sort_field: sql_text(row.get(7)?),
                 checksum: row.get(8)?,
                 flags: row.get(9)?,
                 data: row.get(10)?,
@@ -1331,5 +1633,136 @@ mod tests {
         assert_eq!(mapping.get(&51), Some(&1));
         let models = destination.as_object().expect("models");
         assert_eq!(models.len(), 2);
+    }
+
+    #[test]
+    fn filtered_deck_kind_accepts_boolean_dyn() {
+        let deck = json!({
+            "dyn": true,
+            "resched": false,
+            "terms": [["is:due", 5, 0]],
+            "previewDelay": 0,
+        });
+        let kind = super::deck_kind_blob(&deck);
+        let outer =
+            ranki_storage::protobuf_fields(&kind).expect("kind container");
+        assert!(ranki_storage::proto_bytes(&outer, 2).is_some());
+    }
+
+    #[test]
+    fn normal_deck_kind_accepts_string_conf_and_null_day_limits() {
+        let deck = json!({
+            "conf": "2",
+            "newLimitToday": null,
+            "reviewLimitToday": null,
+        });
+        let kind = super::deck_kind_blob(&deck);
+        let outer =
+            ranki_storage::protobuf_fields(&kind).expect("kind container");
+        let normal = ranki_storage::proto_bytes(&outer, 1).expect("normal");
+        let fields =
+            ranki_storage::protobuf_fields(normal).expect("normal body");
+        assert_eq!(ranki_storage::proto_varint(&fields, 1), Some(2));
+        assert!(ranki_storage::proto_bytes(&fields, 8).is_none());
+        assert!(ranki_storage::proto_bytes(&fields, 9).is_none());
+    }
+
+    #[test]
+    fn copied_deck_kind_preset_reference_can_be_rewritten() {
+        let mut normal = Vec::new();
+        super::pb_varint(&mut normal, 1, 2);
+        super::pb_string(&mut normal, 4, "Instructions");
+        let mut container = Vec::new();
+        super::pb_message(&mut container, 1, &normal);
+
+        let inner = super::rewrite_varint_field(&normal, 1, 7)
+            .expect("rewrite config id");
+        let rewritten = super::rewrite_message_field(&container, 1, &inner)
+            .expect("rewrite normal field");
+        let outer =
+            ranki_storage::protobuf_fields(&rewritten).expect("container");
+        let normal = ranki_storage::proto_bytes(&outer, 1).expect("normal");
+        let fields =
+            ranki_storage::protobuf_fields(normal).expect("normal body");
+        assert_eq!(ranki_storage::proto_varint(&fields, 1), Some(7));
+        assert_eq!(
+            ranki_storage::proto_string(&fields, 4).as_deref(),
+            Some("Instructions")
+        );
+    }
+
+    #[test]
+    fn normal_deck_kind_keeps_metadata_and_explicit_zero_limits() {
+        let deck = json!({
+            "conf": 2,
+            "desc": "Instructions",
+            "md": true,
+            "extendNew": 3,
+            "extendRev": 4,
+            "reviewLimit": 5,
+            "newLimit": 0,
+            "reviewLimitToday": {"limit": 7, "today": 9},
+            "desiredRetention": 85,
+        });
+        let kind = super::deck_kind_blob(&deck);
+        let outer =
+            ranki_storage::protobuf_fields(&kind).expect("kind container");
+        let normal = ranki_storage::proto_bytes(&outer, 1).expect("normal");
+        let fields =
+            ranki_storage::protobuf_fields(normal).expect("normal body");
+        assert_eq!(ranki_storage::proto_varint(&fields, 1), Some(2));
+        assert_eq!(ranki_storage::proto_varint(&fields, 2), Some(3));
+        assert_eq!(ranki_storage::proto_varint(&fields, 3), Some(4));
+        assert_eq!(
+            ranki_storage::proto_string(&fields, 4).as_deref(),
+            Some("Instructions")
+        );
+        assert_eq!(ranki_storage::proto_varint(&fields, 5), Some(1));
+        assert_eq!(ranki_storage::proto_varint(&fields, 6), Some(5));
+        assert_eq!(ranki_storage::proto_varint(&fields, 7), Some(0));
+        let today = ranki_storage::proto_bytes(&fields, 8).expect("today");
+        let today_fields =
+            ranki_storage::protobuf_fields(today).expect("today body");
+        assert_eq!(ranki_storage::proto_varint(&today_fields, 1), Some(7));
+        assert_eq!(ranki_storage::proto_varint(&today_fields, 2), Some(9));
+        let retention =
+            ranki_storage::proto_float(&fields, 10).unwrap_or_default();
+        assert!((retention - 0.85).abs() < 1e-6, "{retention}");
+    }
+
+    #[test]
+    fn filtered_deck_kind_keeps_terms_and_preview_delays() {
+        let deck = json!({
+            "dyn": 1,
+            "resched": true,
+            "terms": [{"search": "is:due", "limit": 25, "order": 4}],
+            "delays": [1.0, 10.0],
+            "previewDelay": 120,
+            "previewAgainSecs": 60,
+            "previewHardSecs": 120,
+            "previewGoodSecs": 240,
+        });
+        let kind = super::deck_kind_blob(&deck);
+        let outer =
+            ranki_storage::protobuf_fields(&kind).expect("kind container");
+        assert!(ranki_storage::proto_bytes(&outer, 2).is_some());
+        let filtered = ranki_storage::proto_bytes(&outer, 2).expect("filtered");
+        let fields =
+            ranki_storage::protobuf_fields(filtered).expect("filtered body");
+        assert_eq!(ranki_storage::proto_varint(&fields, 1), Some(1));
+        let term_bytes = ranki_storage::proto_bytes(&fields, 2).expect("term");
+        let term =
+            ranki_storage::protobuf_fields(term_bytes).expect("term body");
+        assert_eq!(
+            ranki_storage::proto_string(&term, 1).as_deref(),
+            Some("is:due")
+        );
+        assert_eq!(ranki_storage::proto_varint(&term, 2), Some(25));
+        assert_eq!(ranki_storage::proto_varint(&term, 3), Some(4));
+        assert_eq!(ranki_storage::proto_floats(&fields, 3), vec![1.0, 10.0]);
+        assert_eq!(ranki_storage::proto_varint(&fields, 4), Some(120));
+        assert_eq!(ranki_storage::proto_varint(&fields, 7), Some(60));
+        assert_eq!(ranki_storage::proto_varint(&fields, 5), Some(120));
+        assert_eq!(ranki_storage::proto_varint(&fields, 6), Some(240));
     }
 }

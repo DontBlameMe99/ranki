@@ -120,15 +120,18 @@ fn fsrs_learning_steps_and_graduation() {
     assert_eq!(first.card.left, 1_001);
     assert_eq!(
         first.card.due,
-        NOW.saturating_mul(1_000).saturating_add(60_000)
+        NOW.saturating_mul(1_000).saturating_add(600_000)
     );
     assert_eq!(first.revlog.kind, RevLogKind::Learn);
+    assert_eq!(first.revlog.interval, -600);
+    assert_eq!(first.revlog.last_interval, 0);
     let second = scheduler.schedule(
         &first.card,
         Rating::Good,
         NOW.saturating_add(60),
         COLLECTION_START,
     );
+    assert_eq!(second.revlog.last_interval, -600);
     assert_eq!(second.card.card_type, CardType::Review);
     assert_eq!(second.card.queue, CardQueue::Review);
     assert_eq!(second.card.left, 0);
@@ -143,7 +146,40 @@ fn fsrs_lapse_enters_relearning() {
     assert_eq!(decision.card.card_type, CardType::Relearning);
     assert_eq!(decision.card.queue, CardQueue::Learning);
     assert_eq!(decision.card.lapses, 1);
-    assert_eq!(decision.revlog.kind, RevLogKind::Relearn);
+    assert_eq!(decision.revlog.kind, RevLogKind::Review);
+    assert_eq!(decision.revlog.interval, -600);
+    assert_eq!(decision.revlog.last_interval, 10);
+}
+
+#[test]
+fn fsrs_first_step_hard_caps_and_rounds_like_anki() {
+    let scheduler = FsrsScheduler::new(FsrsPreset {
+        learning_steps_minutes: vec![4_320],
+        ..fsrs_preset(false, 0.9)
+    });
+    let decision =
+        scheduler.schedule(&new_card(), Rating::Hard, NOW, COLLECTION_START);
+    assert_eq!(decision.revlog.interval, -(4 * 86_400));
+
+    let mid_day = FsrsScheduler::new(FsrsPreset {
+        learning_steps_minutes: vec![1_440, 2_880],
+        ..fsrs_preset(false, 0.9)
+    });
+    let rounded =
+        mid_day.schedule(&new_card(), Rating::Hard, NOW, COLLECTION_START);
+    assert_eq!(rounded.revlog.interval, -(2 * 86_400));
+}
+
+#[test]
+fn fsrs_lapse_without_relearning_steps_logs_review() {
+    let scheduler = FsrsScheduler::new(FsrsPreset {
+        relearning_steps_minutes: Vec::new(),
+        ..fsrs_preset(false, 0.9)
+    });
+    let decision =
+        scheduler.schedule(&fsrs_card(), Rating::Again, NOW, COLLECTION_START);
+    assert_eq!(decision.card.card_type, CardType::Review);
+    assert_eq!(decision.revlog.kind, RevLogKind::Review);
 }
 
 #[test]
@@ -298,7 +334,9 @@ fn sm2_again_resets_to_relearning_and_reduces_factor() {
     assert_eq!(decision.card.queue, CardQueue::Learning);
     assert_eq!(decision.card.lapses, 1);
     assert_eq!(decision.card.factor, 2_300);
-    assert_eq!(decision.revlog.kind, RevLogKind::Relearn);
+    assert_eq!(decision.revlog.kind, RevLogKind::Review);
+    assert_eq!(decision.revlog.interval, -600);
+    assert_eq!(decision.revlog.last_interval, 30);
 }
 
 #[test]
@@ -622,4 +660,80 @@ fn scheduler_exposes_params_without_changing_its_preset() {
     scheduler.set_params(legacy.clone());
     assert_eq!(scheduler.params(), &legacy);
     assert_eq!(scheduler.preset(), &FsrsPreset::default());
+}
+
+#[test]
+fn fsrs6_same_day_stability_matches_fsrs_rs_reference() {
+    let scheduler = FsrsScheduler::new(fsrs_preset(false, 0.9));
+    let card = Card {
+        data: String::from(r#"{"s":5.0,"d":5.0}"#),
+        ..fsrs_card()
+    };
+    let expected = [
+        (Rating::Again, 1.596_818_f64),
+        (Rating::Hard, 5.0),
+        (Rating::Good, 5.0),
+        (Rating::Easy, 8.129_61),
+    ];
+    for (rating, stability) in expected {
+        let decision = scheduler.schedule(&card, rating, NOW, COLLECTION_START);
+        let written = stored_stability(&decision.card.data);
+        assert!(
+            (written - stability).abs() < 0.001,
+            "{rating:?} wrote {written}, expected {stability}"
+        );
+    }
+}
+
+#[test]
+fn fsrs_review_records_decay_and_last_review_time() {
+    let scheduler = FsrsScheduler::new(fsrs_preset(false, 0.9));
+    let decision =
+        scheduler.schedule(&fsrs_card(), Rating::Good, NOW, COLLECTION_START);
+    let data: serde_json::Value =
+        serde_json::from_str(&decision.card.data).expect("card data");
+    assert_eq!(data["lrt"], NOW);
+    let retention = data["dr"].as_f64().unwrap_or_default();
+    assert!((retention - 0.9).abs() < 1e-6, "dr was {retention}");
+    let decay = data["decay"].as_f64().unwrap_or_default();
+    assert!((decay - 0.154).abs() < 1e-6, "decay was {decay}");
+}
+
+#[test]
+fn learning_steps_match_anki_observed_sequence() {
+    let scheduler = FsrsScheduler::new(fsrs_preset(false, 0.9));
+    let hard =
+        scheduler.schedule(&new_card(), Rating::Hard, NOW, COLLECTION_START);
+    assert_eq!(hard.card.left, 1_002);
+    assert_eq!(
+        hard.card.due,
+        NOW.saturating_mul(1_000).saturating_add(330_000)
+    );
+    assert_eq!(hard.revlog.interval, -330);
+    assert_eq!(hard.revlog.last_interval, 0);
+
+    let good = scheduler.schedule(
+        &hard.card,
+        Rating::Good,
+        NOW.saturating_add(330),
+        COLLECTION_START,
+    );
+    assert_eq!(good.card.left, 1_001);
+    assert_eq!(
+        good.card.due,
+        NOW.saturating_add(330)
+            .saturating_mul(1_000)
+            .saturating_add(600_000)
+    );
+    assert_eq!(good.revlog.interval, -600);
+    assert_eq!(good.revlog.last_interval, -60);
+
+    let graduated = scheduler.schedule(
+        &good.card,
+        Rating::Good,
+        NOW.saturating_add(930),
+        COLLECTION_START,
+    );
+    assert_eq!(graduated.card.card_type, CardType::Review);
+    assert_eq!(graduated.revlog.last_interval, -600);
 }

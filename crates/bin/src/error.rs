@@ -52,6 +52,7 @@ impl InterfaceError {
         Self::new(ErrorCode::Message, message)
     }
 
+    #[cfg(test)]
     pub(crate) const fn code(&self) -> ErrorCode {
         self.code
     }

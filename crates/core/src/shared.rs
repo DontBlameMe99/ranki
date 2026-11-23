@@ -29,6 +29,7 @@ pub struct ReviewOutcome {
     pub data: String,
     pub kind: RevLogKind,
     pub step_seconds: Option<u32>,
+    pub last_interval: Option<i32>,
 }
 
 pub struct StepConfig<'steps> {
@@ -105,14 +106,27 @@ fn half_sum(first: u64, second: u64) -> Option<u32> {
     u32::try_from(half).ok()
 }
 
+/// If a delay passes one day, Anki rounds it to whole days so the answer
+/// is the same earlier and later in the day.
+fn maybe_round_in_days(seconds: u32) -> u32 {
+    const DAY: u32 = 86_400;
+    if seconds <= DAY {
+        return seconds;
+    }
+    let half = DAY.checked_div(2).unwrap_or(0);
+    let days = seconds.saturating_add(half).checked_div(DAY).unwrap_or(0);
+    days.saturating_mul(DAY)
+}
+
 fn first_step_hard_delay(steps: &[u32]) -> Option<u32> {
     let first = minutes_to_seconds(steps.first().copied().unwrap_or(1));
-    steps.get(1).copied().map_or_else(
-        || half_sum(u64::from(first).saturating_mul(3), 0),
-        |second| {
-            half_sum(u64::from(first), u64::from(minutes_to_seconds(second)))
-        },
-    )
+    let seconds = if let Some(second) = steps.get(1) {
+        half_sum(u64::from(first), u64::from(minutes_to_seconds(*second)))?
+    } else {
+        let cap = first.saturating_add(86_400);
+        half_sum(u64::from(first).saturating_mul(3), 0)?.min(cap)
+    };
+    Some(maybe_round_in_days(seconds))
 }
 
 /// `None` graduates the card; `Some` keeps it in a learning step.
@@ -132,7 +146,10 @@ pub fn step_delay_seconds(
             if remaining <= 1 {
                 None
             } else {
-                steps.get(index).copied().map(minutes_to_seconds)
+                steps
+                    .get(index.saturating_add(1))
+                    .copied()
+                    .map(minutes_to_seconds)
             }
         }
         Rating::Hard => {
@@ -141,6 +158,30 @@ pub fn step_delay_seconds(
             } else {
                 steps.get(index).copied().map(minutes_to_seconds)
             }
+        }
+    }
+}
+
+/// The step delay the card was sitting on before this answer.
+///
+/// Anki writes it to `revlog.lastIvl` as negative seconds instead of the
+/// card's zero `ivl`, which only exists once a card graduates.
+fn learning_last_interval(
+    ctx: &ReviewContext<'_>,
+    steps: &[u32],
+    total: usize,
+) -> Option<i32> {
+    match ctx.card.card_type {
+        CardType::New => Some(0),
+        CardType::Review => None,
+        CardType::Learning | CardType::Relearning => {
+            let remaining = remaining_steps(ctx.card.left, total).max(1);
+            let index = total.saturating_sub(remaining);
+            Some(steps.get(index).map_or(0, |minutes| {
+                i32::try_from(minutes_to_seconds(*minutes))
+                    .unwrap_or(i32::MAX)
+                    .saturating_neg()
+            }))
         }
     }
 }
@@ -155,6 +196,7 @@ pub fn step_outcome(
     } else {
         remaining_steps(ctx.card.left, total).max(1)
     };
+    let last_interval = learning_last_interval(ctx, config.steps, total);
     let kind = if config.relearning {
         RevLogKind::Relearn
     } else {
@@ -185,6 +227,7 @@ pub fn step_outcome(
                 data: config.data,
                 kind,
                 step_seconds: Some(seconds),
+                last_interval,
             }
         }
         None => ReviewOutcome {
@@ -202,6 +245,7 @@ pub fn step_outcome(
             data: config.data,
             kind,
             step_seconds: None,
+            last_interval,
         },
     }
 }
@@ -228,6 +272,7 @@ pub fn unchanged_outcome(ctx: &ReviewContext<'_>) -> ReviewOutcome {
         data: ctx.card.data.clone(),
         kind: RevLogKind::Manual,
         step_seconds: None,
+        last_interval: None,
     }
 }
 pub fn finish(
@@ -254,7 +299,9 @@ pub fn finish(
         usn: -1,
         ease: ctx.rating,
         interval,
-        last_interval: ctx.card.interval.max(0),
+        last_interval: outcome
+            .last_interval
+            .unwrap_or_else(|| ctx.card.interval.max(0)),
         factor: outcome.factor,
         time_ms: 0,
         kind: outcome.kind,

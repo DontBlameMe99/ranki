@@ -146,27 +146,83 @@ pub fn extract_colpkg(
     write_new_file(&destination, &collection_bytes)?;
 
     let media_dir = destination_dir.join("media");
-    fs::create_dir_all(&media_dir).map_err(io_error(format!(
-        "cannot create media directory {}",
-        media_dir.display()
-    )))?;
-    let mapping = read_media_mapping(&mut archive, &names)?;
-    for (entry, name) in &mapping {
-        extract_media_file(&mut archive, &media_dir, (entry, name))?;
-    }
-    for entry in names.iter().filter(|name| is_media_entry(name)) {
-        let relative = entry.trim_start_matches("media/");
-        extract_media_file(&mut archive, &media_dir, (entry, relative))?;
-    }
-
-    if names.contains("meta") {
-        let meta_path = destination_dir.join("meta");
-        if !meta_path.exists() {
+    let media_dir_existed = media_dir.exists();
+    let existing_media: BTreeSet<PathBuf> = if media_dir_existed {
+        fs::read_dir(&media_dir)
+            .map_err(io_error(format!(
+                "cannot read media directory {}",
+                media_dir.display()
+            )))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+    let meta_path = destination_dir.join("meta");
+    let meta_existed = meta_path.exists();
+    let extracted = (|| -> Result<(), FormatError> {
+        fs::create_dir_all(&media_dir).map_err(io_error(format!(
+            "cannot create media directory {}",
+            media_dir.display()
+        )))?;
+        let mapping = read_media_mapping(&mut archive, &names)?;
+        for (entry, name) in &mapping {
+            extract_media_file(&mut archive, &media_dir, (entry, name))?;
+        }
+        for entry in names.iter().filter(|name| is_media_entry(name)) {
+            let relative = entry.trim_start_matches("media/");
+            extract_media_file(&mut archive, &media_dir, (entry, relative))?;
+        }
+        if names.contains("meta") && !meta_existed {
             let bytes = read_bytes(&mut archive, "meta")?;
             write_new_file(&meta_path, &bytes)?;
         }
+        Ok(())
+    })();
+    if let Err(error) = extracted {
+        cleanup_failed_extraction(
+            &destination,
+            &media_dir,
+            media_dir_existed.then_some(&existing_media),
+            (!meta_existed).then_some(meta_path.as_path()),
+        );
+        return Err(error);
     }
     Ok(destination)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "cleanup needs the paths and the pre-extraction state"
+)]
+fn cleanup_failed_extraction(
+    destination: &Path,
+    media_dir: &Path,
+    existing_media: Option<&BTreeSet<PathBuf>>,
+    meta_to_remove: Option<&Path>,
+) {
+    let _ = fs::remove_file(destination);
+    if let Some(existing) = existing_media {
+        remove_new_media(media_dir, existing);
+    } else {
+        let _ = fs::remove_dir_all(media_dir);
+    }
+    if let Some(meta) = meta_to_remove {
+        let _ = fs::remove_file(meta);
+    }
+}
+
+fn remove_new_media(media_dir: &Path, existing: &BTreeSet<PathBuf>) {
+    let Ok(entries) = fs::read_dir(media_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !existing.contains(&path) {
+            let _ = fs::remove_file(&path);
+        }
+    }
 }
 
 fn entry_names(
@@ -209,10 +265,19 @@ fn extract_media_file(
         )));
     }
     let target = media_dir.join(filename);
-    if target.exists() {
-        return Ok(());
-    }
     let bytes = maybe_decompress(read_bytes(archive, entry)?)?;
+    if target.exists() {
+        let existing = fs::read(&target).map_err(io_error(format!(
+            "cannot read existing media file {}",
+            target.display()
+        )))?;
+        if existing == bytes {
+            return Ok(());
+        }
+        return Err(FormatError::new(format!(
+            "media filename collision in package: '{name}'"
+        )));
+    }
     write_new_file(&target, &bytes)
 }
 

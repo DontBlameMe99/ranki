@@ -1183,15 +1183,18 @@ impl Root {
             self.collection_start,
         );
         let before_progress = self.progress_fraction();
-        if let Err(error) = self.store.apply_review(&decision) {
-            self.show_toast(
-                ToastKind::Error,
-                format!("Could not save review: {error}"),
-                cx,
-            );
-            cx.notify();
-            return;
-        }
+        let revlog_id = match self.store.apply_review(&decision) {
+            Ok(id) => id,
+            Err(error) => {
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not save review: {error}"),
+                    cx,
+                );
+                cx.notify();
+                return;
+            }
+        };
         self.review.answered = self.review.answered.saturating_add(1);
         if rating == Rating::Again {
             self.review.again_count = self.review.again_count.saturating_add(1);
@@ -1208,7 +1211,7 @@ impl Root {
             .saturating_add(self.review.focused_elapsed);
         self.review.last_grade = Some(UndoEntry {
             card,
-            revlog_id: decision.revlog.id,
+            revlog_id,
             rating,
             spent: self.review.focused_elapsed,
         });

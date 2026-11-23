@@ -40,6 +40,16 @@ CREATE TABLE templates (
     mtime_secs INTEGER NOT NULL, usn INTEGER NOT NULL, config BLOB NOT NULL,
     PRIMARY KEY (ntid, ord)
 ) WITHOUT ROWID;
+CREATE TABLE decks (
+    id INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL COLLATE unicase,
+    mtime_secs INTEGER NOT NULL, usn INTEGER NOT NULL,
+    common BLOB NOT NULL, kind BLOB NOT NULL
+);
+CREATE UNIQUE INDEX idx_decks_name ON decks (name);
+CREATE TABLE deck_config (
+    id INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL COLLATE unicase,
+    mtime_secs INTEGER NOT NULL, usn INTEGER NOT NULL, config BLOB NOT NULL
+);
 CREATE TABLE notes (
     id INTEGER PRIMARY KEY, guid TEXT NOT NULL, mid INTEGER NOT NULL,
     mod INTEGER NOT NULL, usn INTEGER NOT NULL, tags TEXT NOT NULL,
@@ -76,13 +86,22 @@ fn schema18(path: &Path) -> Connection {
     conn.execute_batch(SCHEMA18).expect("schema");
     conn.execute(
         "INSERT INTO col (id, crt, mod, scm, ver, dty, usn, ls, conf, models, decks, dconf, tags)
-         VALUES (1, 0, 0, 0, 18, 0, 0, 0, ?1, '', ?2, '{}', '{}')",
-        params![
-            json!({"nextPos": 1}).to_string(),
-            json!({"1": {"id": 1, "name": "Default", "conf": 1}}).to_string(),
-        ],
+         VALUES (1, 0, 0, 0, 18, 0, 0, 0, ?1, '', '', '', '{}')",
+        params![json!({"nextPos": 1}).to_string()],
     )
     .expect("col");
+    conn.execute(
+        "INSERT INTO decks (id, name, mtime_secs, usn, common, kind)
+         VALUES (1, 'Default', 0, 0, x'', x'')",
+        [],
+    )
+    .expect("deck");
+    conn.execute(
+        "INSERT INTO deck_config (id, name, mtime_secs, usn, config)
+         VALUES (1, 'Default', 0, 0, x'')",
+        [],
+    )
+    .expect("deck config");
     conn
 }
 
@@ -545,4 +564,47 @@ fn schema18_notes_use_the_config_table_for_new_positions() {
         .query_row("SELECT conf FROM col WHERE id = 1", [], |row| row.get(0))
         .expect("conf");
     assert!(collection_json.is_empty(), "col.conf must stay untouched");
+}
+
+#[test]
+fn schema18_deck_rows_keep_common_blob_on_create_and_rename() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("modern-decks.anki2");
+    drop(schema18(&path));
+    let mut store = Collection::open(&path).expect("open");
+    let deck = store.create_deck("Fresh").expect("deck");
+
+    let conn = Connection::open(&path).expect("open");
+    register_collations(&conn).expect("collations");
+    let (common, kind): (Vec<u8>, Vec<u8>) = conn
+        .query_row(
+            "SELECT common, kind FROM decks WHERE id = ?1",
+            [deck.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("deck row");
+    assert!(common.is_empty(), "new deck has no day counters");
+    assert_eq!(
+        kind,
+        vec![0x0a, 0x02, 0x08, 0x01],
+        "normal deck kind points at config 1"
+    );
+
+    let counters = vec![0x08, 0x01, 0x10, 0x01, 0x18, 0x05];
+    conn.execute(
+        "UPDATE decks SET common = ?1 WHERE id = ?2",
+        params![counters, deck.id],
+    )
+    .expect("counters");
+    drop(conn);
+
+    store.rename_deck(deck.id, "Renamed").expect("rename");
+    let conn = Connection::open(&path).expect("open");
+    register_collations(&conn).expect("collations");
+    let preserved: Vec<u8> = conn
+        .query_row("SELECT common FROM decks WHERE id = ?1", [deck.id], |row| {
+            row.get(0)
+        })
+        .expect("common");
+    assert_eq!(preserved, counters);
 }

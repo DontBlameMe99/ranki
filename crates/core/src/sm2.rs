@@ -114,6 +114,7 @@ impl Sm2Scheduler {
                 },
             );
             outcome.lapses = 1;
+            outcome.kind = RevLogKind::Review;
             return outcome;
         }
         let interval = self.review_interval(ctx.card, ctx.rating);
@@ -130,12 +131,9 @@ impl Sm2Scheduler {
             left: 0,
             factor: prepared.factor,
             data: prepared.data,
-            kind: if ctx.rating == Rating::Again {
-                RevLogKind::Relearn
-            } else {
-                RevLogKind::Review
-            },
+            kind: RevLogKind::Review,
             step_seconds: None,
+            last_interval: None,
         }
     }
 

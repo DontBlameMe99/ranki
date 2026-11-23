@@ -2,8 +2,13 @@
 
 use ranki_model::DEFAULT_DECK_ID;
 use ranki_model::DEFAULT_MODEL_ID;
+use ranki_model::StoreError;
+use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use serde_json::Value;
 use serde_json::json;
+
+use crate::records::deck_config_json;
 
 pub const CREATE_STATEMENTS: &[&str] = &[
     "CREATE TABLE col (
@@ -66,23 +71,20 @@ pub const CREATE_STATEMENTS: &[&str] = &[
         type integer not null
     )",
     "CREATE TABLE graves (
-        oid integer not null,
-        type integer not null,
         usn integer not null,
-        PRIMARY KEY (oid, type)
-    ) WITHOUT ROWID",
+        oid integer not null,
+        type integer not null
+    )",
     "CREATE INDEX ix_notes_csum ON notes (csum)",
     "CREATE INDEX ix_notes_usn ON notes (usn)",
-    "CREATE INDEX idx_notes_mid ON notes (mid)",
     "CREATE INDEX ix_cards_nid ON cards (nid)",
     "CREATE INDEX ix_cards_sched ON cards (did, queue, due)",
     "CREATE INDEX ix_cards_usn ON cards (usn)",
-    "CREATE INDEX idx_cards_odid ON cards (odid) WHERE odid != 0",
     "CREATE INDEX ix_revlog_cid ON revlog (cid)",
     "CREATE INDEX ix_revlog_usn ON revlog (usn)",
-    "CREATE INDEX idx_graves_pending ON graves (usn)",
 ];
 
+#[must_use]
 pub fn default_col(now_secs: i64, now_ms: i64) -> Value {
     let model = json!({
         "id": DEFAULT_MODEL_ID,
@@ -113,41 +115,8 @@ pub fn default_col(now_secs: i64, now_ms: i64) -> Value {
         "req": [[0, "any", [0]]]
     });
 
-    let deck = json!({
-        "id": DEFAULT_DECK_ID,
-        "name": "Default",
-        "usn": 0,
-        "mod": now_secs,
-        "conf": 1,
-        "desc": "",
-        "dyn": 0
-    });
-
-    let config = json!({
-        "id": 1,
-        "name": "Default",
-        "usn": 0,
-        "mod": now_secs,
-        "maxTaken": 60,
-        "autoplay": true,
-        "timer": 0,
-        "replayq": true,
-        "new": {"perDay": 20, "delays": [1, 10], "separate": true, "order": 0},
-        "rev": {"perDay": 200, "fuzz": 0.05, "maxInterval": 36500},
-        "lap": {"ease4": 1.3, "ivlFct": 1.0, "maxIvl": 36500},
-        "ease4": 2.5,
-        "minSpace": 1,
-        "maxIvl": 36500,
-        "bury": true,
-        "dyn": false,
-        "newMix": 0,
-        "newPerDayMinimum": 0,
-        "interdayLearningMix": 0,
-        "buryNew": true,
-        "buryRev": true,
-        "suspendNew": false,
-        "newOrder": 0
-    });
+    let deck = default_deck(DEFAULT_DECK_ID, "Default", now_secs, 0);
+    let config = default_deck_config(1, "Default", now_secs, 0);
 
     json!({
         "id": 1_i64,
@@ -158,10 +127,135 @@ pub fn default_col(now_secs: i64, now_ms: i64) -> Value {
         "dty": 0_i64,
         "usn": 0_i64,
         "ls": now_ms,
-        "conf": json!({"nextPos": 1_i64, "estimateReps": 0_i64, "autoUpdateEnabled": true}),
+        "conf": json!({
+            "activeDecks": [DEFAULT_DECK_ID],
+            "curDeck": DEFAULT_DECK_ID,
+            "newSpread": 0,
+            "collapseTime": 1200,
+            "timeLim": 0,
+            "estTimes": true,
+            "dueCounts": true,
+            "curModel": Value::Null,
+            "nextPos": 1_i64,
+            "sortType": "noteFld",
+            "sortBackwards": false,
+            "addToCur": true,
+            "dayLearnFirst": false,
+            "schedVer": 2,
+            "creationOffset": Value::Null,
+            "sched2021": true,
+        }),
         "models": json!({DEFAULT_MODEL_ID.to_string(): model}),
         "decks": json!({DEFAULT_DECK_ID.to_string(): deck}),
         "dconf": json!({"1": config}),
         "tags": json!({})
     })
+}
+
+/// A schema-11 deck entry with every field Anki's serde model requires.
+#[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "id, name, clock and sync stamp mirror the stored columns"
+)]
+pub fn default_deck(id: i64, name: &str, now_secs: i64, usn: i32) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "usn": usn,
+        "mod": now_secs,
+        "conf": 1,
+        "desc": "",
+        "dyn": 0,
+        "collapsed": false,
+        "browserCollapsed": false,
+        "lrnToday": [0, 0],
+        "revToday": [0, 0],
+        "newToday": [0, 0],
+        "timeToday": [0, 0],
+        "extendNew": 0,
+        "extendRev": 0,
+    })
+}
+
+/// A schema-11 deck config with Anki's required fields and defaults.
+#[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "id, name, clock and sync stamp mirror the stored columns"
+)]
+pub fn default_deck_config(
+    id: i64,
+    name: &str,
+    now_secs: i64,
+    usn: i32,
+) -> Value {
+    let mut config = deck_config_json(&[]);
+    if let Some(object) = config.as_object_mut() {
+        let _ = object.insert(String::from("id"), Value::from(id));
+        let _ = object.insert(String::from("name"), Value::from(name));
+        let _ = object.insert(String::from("mod"), Value::from(now_secs));
+        let _ = object.insert(String::from("usn"), Value::from(usn));
+        let _ = object.insert(String::from("waitForAudio"), Value::Bool(true));
+        if let Some(new) = object.get_mut("new").and_then(Value::as_object_mut)
+        {
+            let _ = new.insert(String::from("delays"), json!([1.0, 10.0]));
+            let _ = new.insert(String::from("perDay"), json!(20));
+        }
+        if let Some(rev) = object.get_mut("rev").and_then(Value::as_object_mut)
+        {
+            let _ = rev.insert(String::from("perDay"), json!(200));
+        }
+        if let Some(lapse) =
+            object.get_mut("lapse").and_then(Value::as_object_mut)
+        {
+            let _ = lapse.insert(String::from("delays"), json!([10.0]));
+            let _ = lapse.insert(String::from("leechAction"), json!(1));
+        }
+        let _ = object.insert(
+            String::from("easyDaysPercentages"),
+            json!([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+        );
+    }
+    config
+}
+
+/// Drops indexes a previous Ranki release wrote into schema 11.
+///
+/// Those index names belong to Anki's schema 15/18 upgrades, and Anki's
+/// upgrade fails when it tries to create them again.
+///
+/// # Errors
+///
+/// Returns an error when the schema version or index list cannot be read.
+pub fn drop_legacy_schema11_indexes(
+    connection: &Connection,
+) -> Result<(), StoreError> {
+    let (version, legacy): (Option<i64>, i64) = connection
+        .query_row(
+            "SELECT ver, (SELECT COUNT(*) FROM sqlite_master WHERE type = \
+             'index' AND name IN ('idx_notes_mid', 'idx_cards_odid', \
+             'idx_graves_pending')) FROM col WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| {
+            StoreError::Backend(format!("cannot read schema version: {error}"))
+        })?
+        .unwrap_or((None, 0));
+    if version != Some(11) || legacy == 0 {
+        return Ok(());
+    }
+    connection
+        .execute_batch(
+            "DROP INDEX IF EXISTS idx_notes_mid;
+             DROP INDEX IF EXISTS idx_cards_odid;
+             DROP INDEX IF EXISTS idx_graves_pending;",
+        )
+        .map_err(|error| {
+            StoreError::Backend(format!(
+                "cannot remove legacy schema indexes: {error}"
+            ))
+        })
 }

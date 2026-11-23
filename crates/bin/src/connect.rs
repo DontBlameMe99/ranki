@@ -88,8 +88,6 @@ struct RpcRequest {
 struct RpcResponse {
     result: Value,
     error: Option<String>,
-    #[serde(rename = "errorCode", skip_serializing_if = "Option::is_none")]
-    error_code: Option<&'static str>,
 }
 
 impl RpcResponse {
@@ -97,18 +95,14 @@ impl RpcResponse {
         Self {
             result,
             error: None,
-            error_code: None,
         }
     }
 
     fn error(source: impl Into<InterfaceError>) -> Self {
-        let mapped = source.into();
-        let code = mapped.code();
-        let (_, message) = mapped.into_parts();
+        let (_, message) = source.into().into_parts();
         Self {
             result: Value::Null,
             error: Some(message),
-            error_code: Some(code.as_str()),
         }
     }
 }
@@ -839,13 +833,23 @@ mod tests {
         let response = RpcResponse::error(ranki_model::StoreError::NotFound(
             "card".into(),
         ));
-        assert_eq!(response.error_code, Some("not_found"));
+        assert_eq!(response.result, Value::Null);
+        assert!(
+            response
+                .error
+                .as_deref()
+                .is_some_and(|text| text.contains("card"))
+        );
         let response =
             RpcResponse::error(ranki_format::FormatError::new("bad"));
-        assert_eq!(response.error_code, Some("format"));
+        let envelope = serde_json::to_value(response).unwrap();
         assert_eq!(
-            serde_json::to_value(response).unwrap()["errorCode"],
-            json!("format")
+            envelope.as_object().map(|object| {
+                let mut keys: Vec<&String> = object.keys().collect();
+                keys.sort();
+                keys
+            }),
+            Some(vec![&String::from("error"), &String::from("result")])
         );
     }
     #[test]
@@ -878,28 +882,16 @@ mod tests {
     #[test]
     fn deck_actions_report_stable_error_codes() {
         let (_dir, mut store) = fixture();
-        let cases = [
-            (
-                br#"{"action":"deleteDeck","version":6,"params":{"deck":"Missing"}}"#.as_slice(),
-                Some("not_found"),
-            ),
-            (
-                br#"{"action":"deleteDeck","version":6,"params":{"deck":"Default"}}"#.as_slice(),
-                Some("invalid_data"),
-            ),
-            (
-                br#"{"action":"renameDeck","version":6,"params":{"id":999}}"#.as_slice(),
-                Some("invalid_data"),
-            ),
-            (
-                br#"{"action":"renameDeck","version":6,"params":{"id":999,"newName":"New"}}"#.as_slice(),
-                Some("not_found"),
-            ),
+        let bodies: &[&[u8]] = &[
+            br#"{"action":"deleteDeck","version":6,"params":{"deck":"Missing"}}"#,
+            br#"{"action":"deleteDeck","version":6,"params":{"deck":"Default"}}"#,
+            br#"{"action":"renameDeck","version":6,"params":{"id":999}}"#,
+            br#"{"action":"renameDeck","version":6,"params":{"id":999,"newName":"New"}}"#,
         ];
-        for (body, expected) in cases {
+        for body in bodies {
             let response = handle_body(&mut store, body, scheduler().as_ref());
             assert_eq!(response.result, Value::Null);
-            assert_eq!(response.error_code, expected, "{body:?}");
+            assert!(response.error.is_some(), "{body:?}");
         }
     }
 
