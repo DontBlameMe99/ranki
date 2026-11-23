@@ -444,3 +444,46 @@ fn models_to_json_keeps_raw_config_for_export() {
         Some(Some(config))
     );
 }
+
+#[test]
+fn schema18_notes_use_the_config_table_for_new_positions() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("modern-notes.anki2");
+    drop(schema18(&path));
+    let conn = Connection::open(&path).expect("open");
+    conn.execute_batch(
+        "UPDATE col SET conf = '';
+         CREATE TABLE config (KEY text NOT NULL PRIMARY KEY, usn integer NOT NULL,
+             mtime_secs integer NOT NULL, val blob NOT NULL) WITHOUT ROWID;
+         INSERT INTO config (key, usn, mtime_secs, val) VALUES ('nextPos', 0, 0, CAST('7' AS BLOB));",
+    )
+    .expect("config table");
+    drop(conn);
+
+    let mut store = Collection::open(&path).expect("open");
+    let model = store
+        .ensure_model(StockModelKind::Basic)
+        .expect("install basic");
+    let cards = store
+        .add_note(&NewNote {
+            model_id: model.id,
+            deck_id: 1,
+            fields: vec!["front".to_owned(), "back".to_owned()],
+            tags: Vec::new(),
+        })
+        .expect("add note writes to a schema-18 collection");
+    let card = store.card(cards[0]).expect("card").expect("stored");
+    assert_eq!(card.due, 7);
+
+    let conn = Connection::open(&path).expect("open");
+    let stored: Vec<u8> = conn
+        .query_row("SELECT val FROM config WHERE key = 'nextPos'", [], |row| {
+            row.get(0)
+        })
+        .expect("nextPos");
+    assert_eq!(stored, b"8".to_vec());
+    let collection_json: String = conn
+        .query_row("SELECT conf FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("conf");
+    assert!(collection_json.is_empty(), "col.conf must stay untouched");
+}

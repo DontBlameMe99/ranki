@@ -28,6 +28,7 @@ use std::fmt::Display;
 use std::path::Path;
 use std::path::PathBuf;
 use std::slice;
+use std::str;
 
 pub use ranki_model::StoreError;
 pub use ranki_model::stock_models;
@@ -1317,10 +1318,30 @@ fn write_review(
     Ok(())
 }
 
+/// Reads the next new-card position.
+///
+/// Schema-18 collections keep configuration in the `config` table and leave
+/// `col.conf` empty, so both paths are supported.
 fn next_position(conn: &Connection) -> Result<i64, StoreError> {
+    if records::table_exists(conn, "config")? {
+        let stored: Option<SqlValue> = conn
+            .query_row(
+                "SELECT val FROM config WHERE key = 'nextPos'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(backend)?;
+        let position = match stored {
+            Some(SqlValue::Blob(bytes)) => parse_position(&bytes),
+            Some(SqlValue::Text(text)) => text.parse().ok(),
+            Some(SqlValue::Integer(value)) => Some(value),
+            _ => None,
+        };
+        return Ok(position.unwrap_or(1));
+    }
     let col = records::read_col(conn)?;
-    let config: Json = serde_json::from_str(&col.conf)
-        .map_err(|error| invalid(error.to_string()))?;
+    let config = parse_conf(&col.conf)?;
     Ok(config.get("nextPos").and_then(Json::as_i64).unwrap_or(1))
 }
 
@@ -1328,9 +1349,20 @@ fn set_next_position(
     transaction: &Transaction<'_>,
     position: i64,
 ) -> Result<(), StoreError> {
+    if records::table_exists(transaction, "config")? {
+        return transaction
+            .execute(
+                "INSERT INTO config (key, usn, mtime_secs, val) \
+                 VALUES ('nextPos', -1, ?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET val = excluded.val, \
+                 mtime_secs = excluded.mtime_secs, usn = excluded.usn",
+                params![anki::now_secs()?, position.to_string().into_bytes()],
+            )
+            .map(|_| ())
+            .map_err(backend);
+    }
     let col = records::read_col(transaction)?;
-    let mut config: Json = serde_json::from_str(&col.conf)
-        .map_err(|error| invalid(error.to_string()))?;
+    let mut config = parse_conf(&col.conf)?;
     let object = config
         .as_object_mut()
         .ok_or_else(|| invalid("conf is not an object"))?;
@@ -1341,6 +1373,19 @@ fn set_next_position(
         .execute("UPDATE col SET conf = ?1 WHERE id = 1", [config_json])
         .map(|_| ())
         .map_err(backend)
+}
+
+/// Parses `col.conf`, treating an empty blob as an empty object.
+fn parse_conf(conf: &str) -> Result<Json, StoreError> {
+    if conf.trim().is_empty() {
+        return Ok(Json::Object(serde_json::Map::new()));
+    }
+    serde_json::from_str(conf).map_err(|error| invalid(error.to_string()))
+}
+
+/// Reads a decimal position stored as UTF-8 bytes in the config table.
+fn parse_position(bytes: &[u8]) -> Option<i64> {
+    str::from_utf8(bytes).ok()?.parse().ok()
 }
 
 #[cfg(test)]
