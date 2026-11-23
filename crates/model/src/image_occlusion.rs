@@ -82,7 +82,8 @@ fn parse_shape(body: &str, ordinals: &[u32]) -> Option<ShapeMask> {
     for part in parts {
         let mut pair = split_unescaped(part, '=').into_iter();
         let key = unescape(pair.next()?);
-        let value = unescape(pair.next().unwrap_or(""));
+        // Anki keeps everything after the first `=` in the value.
+        let value = unescape(&pair.collect::<Vec<_>>().join("="));
         let _ = properties.insert(key, value);
     }
     Some(ShapeMask {
@@ -182,6 +183,20 @@ mod tests {
         assert_eq!(
             field.shapes[0].raw,
             r"image-occlusion:text:text=my\:label:oi=1"
+        );
+    }
+
+    #[test]
+    fn keeps_equals_signs_inside_property_values() {
+        let text = "{{c1::image-occlusion:text:text=x=2:fs=14}}";
+        let field = parse_image_occlusion_field(text);
+        assert_eq!(
+            field.shapes[0].properties.get("text").map(String::as_str),
+            Some("x=2")
+        );
+        assert_eq!(
+            field.shapes[0].properties.get("fs").map(String::as_str),
+            Some("14")
         );
     }
 }

@@ -10,6 +10,7 @@ pub mod image_occlusion;
 pub mod raw;
 pub mod stock;
 pub use cloze::cloze_markers;
+pub use cloze::cloze_ordinal;
 pub use cloze::cloze_ordinals;
 pub use config::{
     Config, GeneralConfig, SchedulerConfig, SchedulerKind, Settings,

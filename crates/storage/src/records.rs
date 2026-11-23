@@ -603,13 +603,21 @@ fn infer_cloze_tags(model: &mut NoteModel) {
     else {
         return;
     };
-    if let Some(index) = model.fields.iter().position(|field| field == name)
-        && let Some(tag) = model.field_tags.get_mut(index)
-    {
+    let Some(index) = model.fields.iter().position(|field| field == name)
+    else {
+        return;
+    };
+    if let Some(tag) = model.field_tags.get_mut(index) {
         *tag = Some(0);
     }
-    if model.fields.len() > 1
-        && let Some(tag) = model.field_tags.get_mut(1)
+    if let Some(tag) =
+        model
+            .field_tags
+            .iter_mut()
+            .enumerate()
+            .find_map(|(position, tag)| {
+                (position != index && tag.is_none()).then_some(tag)
+            })
     {
         *tag = Some(1);
     }

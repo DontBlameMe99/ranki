@@ -66,14 +66,20 @@ pub fn cloze_ordinals(fields: &[String]) -> BTreeSet<u16> {
 
 fn add_ordinals(ordinals: &mut BTreeSet<u16>, numbers: &[u32]) {
     for number in numbers {
-        if *number == 0 {
-            continue;
-        }
-        let capped = number.saturating_sub(1).min(u32::from(MAX_CLOZE_ORDINAL));
-        if let Ok(ordinal) = u16::try_from(capped) {
+        if let Some(ordinal) = cloze_ordinal(*number) {
             let _ = ordinals.insert(ordinal);
         }
     }
+}
+
+/// Card ordinal for a one-based cloze number. `c0` yields no card.
+#[must_use]
+pub fn cloze_ordinal(number: u32) -> Option<u16> {
+    if number == 0 {
+        return None;
+    }
+    let capped = number.saturating_sub(1).min(u32::from(MAX_CLOZE_ORDINAL));
+    u16::try_from(capped).ok()
 }
 
 fn is_marker_start(bytes: &[u8], position: usize) -> bool {

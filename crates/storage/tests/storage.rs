@@ -932,6 +932,33 @@ fn deck_stats_matches_per_deck_stats_for_a_hierarchy() {
 }
 
 #[test]
+fn deck_stats_counts_children_of_names_ending_in_a_colon() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let parent = store.create_deck("A:").expect("parent");
+    let child = store.create_deck("A:::B").expect("child");
+    store
+        .add_note(&NewNote {
+            model_id: 1,
+            deck_id: child.id,
+            fields: vec!["front".to_owned(), "back".to_owned()],
+            tags: Vec::new(),
+        })
+        .expect("add");
+    let batch = store.deck_stats().expect("deck stats");
+    let totals = batch
+        .iter()
+        .find(|(id, _)| *id == parent.id)
+        .map(|(_, stats)| *stats)
+        .expect("parent entry");
+    assert_eq!(
+        totals,
+        store.stats(Some(parent.id), now_secs()).expect("stats")
+    );
+    assert_eq!(totals.new_cards, 1);
+}
+
+#[test]
 fn apply_reviews_writes_a_batch_atomically() {
     let (_directory, path) = fixture();
     let mut store = Collection::open(&path).expect("open");

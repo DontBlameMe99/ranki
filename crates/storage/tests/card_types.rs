@@ -232,6 +232,30 @@ fn cloze_generates_one_card_per_distinct_positive_ordinal() {
 }
 
 #[test]
+fn cloze_positions_follow_the_generated_cards_not_the_ordinals() {
+    let (_dir, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let model = store.ensure_model(StockModelKind::Cloze).expect("model");
+    let high = NewNote {
+        model_id: model.id,
+        deck_id: 1,
+        fields: vec!["{{c3::only}}".into(), "extra".into()],
+        tags: Vec::new(),
+    };
+    let low = NewNote {
+        fields: vec!["{{c1::first}}".into(), "extra".into()],
+        ..high.clone()
+    };
+    let first = store.add_note(&high).expect("add");
+    assert_eq!(ordinals(&store, &first), [2]);
+    let second = store.add_note(&low).expect("add");
+    assert_eq!(ordinals(&store, &second), [0]);
+    let first_card = store.card(first[0]).expect("card").expect("stored");
+    let second_card = store.card(second[0]).expect("card").expect("stored");
+    assert_eq!(second_card.due, first_card.due.saturating_add(1));
+}
+
+#[test]
 fn image_occlusion_markers_survive_field_encoding() {
     let (_dir, path) = fixture();
     let mut store = Collection::open(&path).expect("open");
@@ -378,6 +402,41 @@ fn schema18_models_keep_kind_stock_kind_tags_ords_and_raw_config() {
     assert_eq!(model.templates[0].ord, 0);
     assert_eq!(model.css, ".cloze { color: blue; }");
     assert_eq!(model.raw_config.as_deref(), Some(config.as_slice()));
+}
+
+#[test]
+fn cloze_tags_keep_the_extra_field_when_the_text_field_is_not_first() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cloze-order.anki2");
+    let conn = schema18(&path);
+    insert_model(
+        &conn,
+        7,
+        "Cloze",
+        {
+            let mut config = pb_varint(1, 1);
+            config.extend(pb_string(3, ".cloze {}"));
+            config
+        },
+        &[("Back Extra", Vec::new()), ("Text", Vec::new())],
+        &[(
+            "Cloze",
+            "{{cloze:Text}}",
+            "{{cloze:Text}}<br>{{Back Extra}}",
+            {
+                let mut blob = pb_string(1, "{{cloze:Text}}");
+                blob.extend(pb_string(2, "{{cloze:Text}}<br>{{Back Extra}}"));
+                blob
+            },
+        )],
+    );
+    drop(conn);
+
+    let store = Collection::open(&path).expect("open");
+    let models = store.models().expect("models");
+    let model = models.iter().find(|model| model.id == 7).expect("model");
+    assert_eq!(model.fields, ["Back Extra", "Text"]);
+    assert_eq!(model.field_tags, [Some(1), Some(0)]);
 }
 
 #[test]

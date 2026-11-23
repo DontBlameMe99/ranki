@@ -597,9 +597,10 @@ impl Store for Collection {
             .map_err(backend)?;
         let ordinals = model.card_ordinals(&note.fields);
         let mut cards: Vec<Id> = Vec::with_capacity(ordinals.len());
-        for ordinal in ordinals {
+        for (offset, ordinal) in ordinals.into_iter().enumerate() {
             let card_id = anki::next_id()?;
-            let due = next_position.saturating_add(i64::from(ordinal));
+            let due = next_position
+                .saturating_add(i64::try_from(offset).unwrap_or_default());
             transaction
                 .execute(
                     "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, \
@@ -926,7 +927,14 @@ fn deck_and_ancestor_ids(
     ids_by_name: &HashMap<&str, Id>,
 ) -> Vec<Id> {
     let mut ids = vec![deck.id];
-    for (index, _) in deck.name.match_indices("::") {
+    for (index, _) in deck.name.char_indices() {
+        if !deck
+            .name
+            .get(index..)
+            .is_some_and(|tail| tail.starts_with("::"))
+        {
+            continue;
+        }
         let Some(&ancestor) = ids_by_name.get(&deck.name[..index]) else {
             continue;
         };

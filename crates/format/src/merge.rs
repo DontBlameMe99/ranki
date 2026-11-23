@@ -761,9 +761,7 @@ fn merge_models(
     for (key, value) in &models {
         let id = entry_id(key, value, "model")?;
         if let Some(name) = model_name(value) {
-            let _ = named
-                .entry(name)
-                .or_insert_with(|| (id, field_names(value)));
+            let _ = named.entry((name, field_names(value))).or_insert(id);
         }
     }
     let mut used = collect_ids(&models);
@@ -771,9 +769,8 @@ fn merge_models(
 
     for (key, mut value) in incoming_models {
         let old_id = entry_id(&key, &value, "model")?;
-        if let Some((id, fields)) =
-            model_name(&value).and_then(|name| named.get(&name))
-            && *fields == field_names(&value)
+        if let Some(id) = model_name(&value)
+            .and_then(|name| named.get(&(name, field_names(&value))))
         {
             mapping.insert(old_id, *id);
             state.imported_notetypes.push((old_id, *id));
@@ -1287,4 +1284,43 @@ fn merge_revlog(
         inserted = increment(inserted)?;
     }
     Ok(inserted)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{MergeState, merge_models};
+
+    fn basic(id: i64, fields: &[&str]) -> Value {
+        json!({
+            "id": id,
+            "name": "Basic",
+            "flds": fields
+                .iter()
+                .map(|name| json!({ "name": name }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    fn reimport_matches_models_by_name_and_fields() {
+        let mut destination = json!({
+            "1": basic(1, &["Front", "Back"]),
+            "2": basic(2, &["Front", "Back", "Extra"]),
+        });
+        let incoming = json!({
+            "50": basic(50, &["Front", "Back", "Extra"]),
+            "51": basic(51, &["Front", "Back"]),
+        });
+        let mut state = MergeState::new(1_000, 0);
+
+        let mapping = merge_models(&mut destination, &incoming, &mut state)
+            .expect("merge models");
+
+        assert_eq!(mapping.get(&50), Some(&2));
+        assert_eq!(mapping.get(&51), Some(&1));
+        let models = destination.as_object().expect("models");
+        assert_eq!(models.len(), 2);
+    }
 }

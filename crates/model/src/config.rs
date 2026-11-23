@@ -495,7 +495,7 @@ where
     D: Deserializer<'de>,
 {
     match f32::deserialize(deserializer) {
-        Ok(value) if value.is_finite() && (0.5..=0.999).contains(&value) => {
+        Ok(value) if value.is_finite() && (0.7..=0.99).contains(&value) => {
             Ok(value)
         }
         _ => {
@@ -684,6 +684,14 @@ mod tests {
              [scheduler]\nalgorithm = 'magic'\ndesired_retention = 2.0\n",
         );
         assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn retention_outside_the_anki_range_falls_back() {
+        let config = parse("[scheduler]\ndesired_retention = 0.6\n");
+        assert_eq!(config.scheduler.desired_retention, 0.9);
+        let config = parse("[scheduler]\ndesired_retention = 0.8\n");
+        assert_eq!(config.scheduler.desired_retention, 0.8);
     }
 
     #[test]
