@@ -17,11 +17,11 @@
     clippy::needless_pass_by_value,
     clippy::option_if_let_else,
     clippy::shadow_reuse,
-    clippy::similar_names,
     clippy::too_many_lines,
     clippy::type_complexity,
     clippy::unreadable_literal,
     clippy::struct_excessive_bools,
+    clippy::too_many_arguments,
     clippy::excessive_nesting,
     reason = "GPUI view builders and pure helper models favor direct element trees and index math over extra abstraction"
 )]

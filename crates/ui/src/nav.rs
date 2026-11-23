@@ -2,7 +2,8 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement, IntoElement,
-    ParentElement, StatefulInteractiveElement, Styled, Window, div, px,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window,
+    div, px,
 };
 
 use crate::{
@@ -39,6 +40,13 @@ impl Root {
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .cursor_pointer()
             .on_click(self.action_click(UiAction::OpenAdd))
+            .hover(move |row| {
+                row.bg(if add_selected {
+                    colors.mauve
+                } else {
+                    crate::theme::alpha(colors.mauve, 0.12)
+                })
+            })
             .child(icon("icon-plus", 18., add_ink))
             .child("Add card")
             .child(div().flex_1())
@@ -56,11 +64,13 @@ impl Root {
             let selected = enabled && active == item;
             let ink = if selected {
                 colors.mauve
-            } else {
+            } else if enabled {
                 colors.subtext
+            } else {
+                crate::theme::alpha(colors.subtext, 0.45)
             };
             let mut row = div()
-                .id("auto-nav-1")
+                .id(SharedString::from(format!("nav-{label}")))
                 .flex()
                 .items_center()
                 .gap(px(12.))
@@ -74,16 +84,30 @@ impl Root {
                 row = row.bg(alpha(colors.mauve, 0.16));
             }
             if enabled {
-                row = row.on_click(cx.listener(
-                    |this, _: &ClickEvent, window, cx| {
-                        this.dispatch(UiAction::OpenDecks, window, cx);
-                    },
-                ));
+                row = row
+                    .cursor_pointer()
+                    .hover(move |style| {
+                        style.bg(crate::theme::alpha(colors.mauve, 0.12))
+                    })
+                    .on_click(cx.listener(
+                        |this, _: &ClickEvent, window, cx| {
+                            this.dispatch(UiAction::OpenDecks, window, cx);
+                        },
+                    ));
             }
             row.child(icon(icon_name, 18., ink))
                 .child(label.to_owned())
                 .child(div().flex_1())
-                .children(enabled.then(|| keycap(key, colors, false)))
+                .child(if enabled {
+                    keycap(key, colors, false).into_any_element()
+                } else {
+                    div()
+                        .text_size(px(10.))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(crate::theme::alpha(colors.subtext, 0.6))
+                        .child("SOON")
+                        .into_any_element()
+                })
         };
         let status_color = if self.external_change {
             colors.red
@@ -162,21 +186,65 @@ impl Root {
     pub(crate) fn render_overlay(&self, cx: &Context<Self>) -> Vec<AnyElement> {
         let colors = self.colors();
         let mut layers: Vec<AnyElement> = Vec::new();
-        if let Some(text) = self.toast_text() {
+        if let Some(toast) = self.live_toast() {
+            let (hue, icon_name, prefix) = match toast.kind {
+                crate::app::ToastKind::Success => {
+                    (colors.green, "icon-check", "Done")
+                }
+                crate::app::ToastKind::Error => {
+                    (colors.red, "icon-bell", "Error")
+                }
+            };
+            let dismiss = cx.listener(|root, _: &ClickEvent, _, cx| {
+                root.clear_toast();
+                cx.notify();
+            });
+            let body = div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(14.))
+                .py(px(10.))
+                .rounded(px(12.))
+                .bg(crate::theme::alpha(hue, 0.16))
+                .border_1()
+                .border_color(crate::theme::alpha(hue, 0.4))
+                .text_size(px(13.))
+                .text_color(colors.text)
+                .child(icon(icon_name, 16., hue))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(hue)
+                        .child(prefix),
+                )
+                .child(toast.text.clone())
+                .child(
+                    div()
+                        .id("toast-dismiss")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(24.))
+                        .h(px(24.))
+                        .flex_none()
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(colors.surface1))
+                        .on_click(dismiss)
+                        .child(icon("icon-x", 14., colors.subtext)),
+                );
             layers.push(
                 div()
                     .absolute()
-                    .top(px(16.))
-                    .left(px(272.))
-                    .px(px(16.))
-                    .py(px(10.))
-                    .rounded(px(12.))
-                    .bg(crate::theme::alpha(colors.red, 0.16))
-                    .border_1()
-                    .border_color(crate::theme::alpha(colors.red, 0.4))
-                    .text_size(px(12.))
-                    .text_color(colors.text)
-                    .child(text.to_owned())
+                    .bottom(px(72.))
+                    .left(px(crate::theme::NAV_WIDTH + 32.))
+                    .child(crate::components::fade_in(
+                        body,
+                        ("toast", usize::try_from(toast.seq).unwrap_or(0)),
+                        self.motion_ms(crate::theme::MOTION_QUICK_MS),
+                    ))
                     .into_any_element(),
             );
         }
@@ -279,10 +347,13 @@ impl Root {
                     )
                     .child(help_row("Space", "Reveal answer", colors))
                     .child(help_row("1 - 4", "Grade card", colors))
+                    .child(help_row("Ctrl Z", "Undo last grade", colors))
                     .child(help_row("R", "Show question", colors))
+                    .child(help_row("S", "Study again", colors))
                     .child(help_row("Esc", "End session", colors))
                     .child(help_row("A / D", "Add card / Decks", colors))
                     .child(help_row("T", "Scheduler", colors))
+                    .child(help_row("?", "This sheet", colors))
                     .child(
                         div()
                             .id("auto-nav-2")

@@ -11,10 +11,10 @@ requests against the best merged measurement. The check is named
 - CLI: cold process start plus `decks` and `search`.
 - AnkiConnect: server startup, `version`, and `findCards` round trips over HTTP.
 - MCP: server startup, `tools/list`, and a `list_decks` tool call over stdio.
-- GUI: one egui review frame and one answer-reveal frame, driven through the
-  same `ReviewApp` code as the Wayland window with no display or GPU in the
-  loop. Native compositing is outside the measurement; egui layout, templates,
-  and card markup are inside it.
+- GUI: one review frame, and one answer-reveal sample that runs two frame
+  calls (reveal, then the redraw), driven through the same render-model
+  helpers as the Wayland window with no display or GPU in the loop. Native compositing is outside the measurement; templates, card markup,
+  and the deck-row model are inside it. The `gui` cargo feature gates the pair.
 - Storage: collection open, common and missing searches over 2,000 notes, due
   cards, statistics, and a persisted review.
 - Scheduling: FSRS and SM-2 decisions. Sinks keep the optimizer from removing

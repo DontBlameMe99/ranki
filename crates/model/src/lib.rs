@@ -533,6 +533,26 @@ pub trait Store {
         decision: &ReviewDecision,
     ) -> Result<(), StoreError>;
 
+    /// Reverses one persisted review: deletes the review log and restores the
+    /// card row to the snapshot taken before that review.
+    ///
+    /// Returns `Ok(false)` when the log is already gone, so a retried undo is
+    /// not an error. Implementations that cannot reverse writes return
+    /// [`StoreError::Unsupported`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the card is missing or the write fails.
+    fn undo_review(
+        &mut self,
+        before: &Card,
+        _revlog_id: Id,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported(format!(
+            "undo_review is not supported for card {}",
+            before.id
+        )))
+    }
+
     /// Returns every review log, ordered by card and then by log id.
     ///
     /// Implementations without a review history return
