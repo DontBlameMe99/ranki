@@ -4,8 +4,6 @@
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::thread::sleep;
-use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -419,7 +417,6 @@ fn apply_review_updates_card_log_and_collection_metadata() {
         .expect("add");
     let card = store.card(ids[0]).expect("card").expect("exists");
     let before = store.collection_modified().expect("modified");
-    sleep(Duration::from_millis(5));
     let mut changed = card.clone();
     changed.queue = CardQueue::Review;
     changed.card_type = CardType::Review;
@@ -459,7 +456,6 @@ fn stats_and_collection_modified_track_writes() {
     let (_directory, path) = fixture();
     let mut store = Collection::open(&path).expect("open");
     let before = store.collection_modified().expect("modified");
-    sleep(Duration::from_millis(5));
     store.add_note(&note(&["one", "answer"], &[])).expect("add");
     let stats = store.stats(None, now_secs()).expect("stats");
     assert_eq!(stats.new_cards, 1);
@@ -473,6 +469,37 @@ fn stats_and_collection_modified_track_writes() {
             .total_cards,
         0
     );
+}
+
+#[test]
+fn collection_modified_increases_with_consecutive_writes() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let mut previous = store.collection_modified().expect("modified");
+    for _ in 0..3 {
+        store.add_note(&note(&["one", "answer"], &[])).expect("add");
+        let current = store.collection_modified().expect("modified");
+        assert!(current > previous, "{current} <= {previous}");
+        previous = current;
+    }
+}
+
+#[test]
+fn collection_modified_saturates_at_the_end_of_the_range() {
+    let (_directory, path) = fixture();
+    let conn = Connection::open(&path).expect("open");
+    conn.execute("UPDATE col SET mod = ?1 WHERE id = 1", [i64::MAX - 1])
+        .expect("seed mod");
+    drop(conn);
+    let mut store = Collection::open(&path).expect("open");
+    for _ in 0..2 {
+        store.add_note(&note(&["one", "answer"], &[])).expect("add");
+        assert_eq!(
+            store.collection_modified().expect("modified"),
+            i64::MAX,
+            "saturating bump past i64::MAX - 1 stays at the limit"
+        );
+    }
 }
 
 #[test]

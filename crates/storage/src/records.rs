@@ -31,6 +31,7 @@ use serde_json::json;
 pub struct ColData {
     pub modified: i64,
     pub scm: i64,
+    pub last_sync: i64,
     pub usn: i32,
     pub conf: String,
     pub models: String,
@@ -39,13 +40,14 @@ pub struct ColData {
 
 pub fn read_col(conn: &Connection) -> Result<ColData, StoreError> {
     conn.query_row(
-        "SELECT mod, scm, usn, conf, models, decks, dconf, tags FROM col WHERE id = 1",
+        "SELECT mod, scm, usn, conf, models, decks, dconf, tags, ls FROM col WHERE id = 1",
         [],
         |row| {
             let usn = row.get::<_, i64>(2)?;
             Ok(ColData {
                 modified: row.get(0)?,
                 scm: row.get(1)?,
+                last_sync: row.get(8)?,
                 usn: i32::try_from(usn).unwrap_or(i32::MAX),
                 conf: text(row.get(3)?),
                 models: text(row.get(4)?),

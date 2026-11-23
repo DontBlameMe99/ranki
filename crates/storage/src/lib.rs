@@ -187,10 +187,10 @@ impl Collection {
             .execute(
                 "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4, models = ?5 WHERE id = 1",
                 params![
-                    stamp.now_ms,
-                    stamp.now_ms,
+                    stamp.modified,
+                    stamp.scm,
                     stamp.usn,
-                    stamp.now_ms,
+                    stamp.ls,
                     models
                 ],
             )
@@ -317,13 +317,8 @@ impl Store for Collection {
             return Err(invalid(format!("deck already exists: {deck_name}")));
         }
         let col = records::read_col(&self.conn)?;
+        let stamp = col_stamp(&col)?;
         let id = anki::next_id()?;
-        let now_secs = anki::now_secs()?;
-        let now_ms = anki::now_ms()?;
-        let usn = col
-            .usn
-            .checked_add(1)
-            .ok_or_else(|| invalid("usn overflow"))?;
         let modern = uses_deck_table(&self.conn, &col)?;
         if modern {
             self.conn
@@ -333,9 +328,9 @@ impl Store for Collection {
                     params![
                         id,
                         anki::encode_deck_name(deck_name),
-                        now_secs,
-                        usn,
-                        anki::deck_common(usn, now_secs),
+                        stamp.now_secs,
+                        stamp.usn,
+                        anki::deck_common(stamp.usn, stamp.now_secs),
                         Vec::<u8>::new(),
                     ],
                 )
@@ -343,7 +338,7 @@ impl Store for Collection {
             self.conn
                 .execute(
                     "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
-                    params![now_ms, now_ms, usn, now_ms],
+                    params![stamp.modified, stamp.scm, stamp.usn, stamp.ls],
                 )
                 .map_err(backend)?;
         } else {
@@ -354,14 +349,14 @@ impl Store for Collection {
                 .ok_or_else(|| invalid("decks is not an object"))?;
             object.insert(
                 id.to_string(),
-                json!({"id": id, "name": deck_name, "usn": usn, "mod": now_secs, "conf": 1, "desc": "", "dyn": 0}),
+                json!({"id": id, "name": deck_name, "usn": stamp.usn, "mod": stamp.now_secs, "conf": 1, "desc": "", "dyn": 0}),
             );
             let decks_json = serde_json::to_string(&value)
                 .map_err(|error| invalid(error.to_string()))?;
             self.conn
                 .execute(
                     "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4, decks = ?5 WHERE id = 1",
-                    params![now_ms, now_ms, usn, now_ms, decks_json],
+                    params![stamp.modified, stamp.scm, stamp.usn, stamp.ls, decks_json],
                 )
                 .map_err(backend)?;
         }
@@ -745,7 +740,9 @@ type CardsAndNotes = (Vec<Id>, Vec<Id>);
 
 struct ColStamp {
     usn: i32,
-    now_ms: i64,
+    modified: i64,
+    scm: i64,
+    ls: i64,
     now_secs: i64,
 }
 
@@ -817,14 +814,24 @@ fn uses_deck_table(
     Ok(records::decks_from_json(&col.decks)?.is_empty())
 }
 
+/// Keeps a stamp at least one past `previous` so writes in the same
+/// millisecond stay ordered. Saturation at [`i64::MAX`] keeps a collection
+/// writable at the end of the range instead of panicking.
+fn next_stamp(previous: i64, now: i64) -> i64 {
+    now.max(previous.saturating_add(1))
+}
+
 fn col_stamp(col: &records::ColData) -> Result<ColStamp, StoreError> {
     let usn = col
         .usn
         .checked_add(1)
         .ok_or_else(|| invalid("usn overflow"))?;
+    let now = anki::now_ms()?;
     Ok(ColStamp {
         usn,
-        now_ms: anki::now_ms()?,
+        modified: next_stamp(col.modified, now),
+        scm: next_stamp(col.scm, now),
+        ls: next_stamp(col.last_sync, now),
         now_secs: anki::now_secs()?,
     })
 }
@@ -837,13 +844,13 @@ fn write_col_metadata(
     if let Some(decks) = decks_json {
         conn.execute(
             "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4, decks = ?5 WHERE id = 1",
-            params![stamp.now_ms, stamp.now_ms, stamp.usn, stamp.now_ms, decks],
+            params![stamp.modified, stamp.scm, stamp.usn, stamp.ls, decks],
         )
         .map_err(backend)?;
     } else {
         conn.execute(
             "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
-            params![stamp.now_ms, stamp.now_ms, stamp.usn, stamp.now_ms],
+            params![stamp.modified, stamp.scm, stamp.usn, stamp.ls],
         )
         .map_err(backend)?;
     }
@@ -1071,18 +1078,14 @@ fn write_graves(
 }
 fn update_col(conn: &Connection, bump_scm: bool) -> Result<i32, StoreError> {
     let col = records::read_col(conn)?;
-    let now = anki::now_ms()?;
-    let usn = col
-        .usn
-        .checked_add(1)
-        .ok_or_else(|| invalid("usn overflow"))?;
-    let scm = if bump_scm { now } else { col.scm };
+    let stamp = col_stamp(&col)?;
+    let scm = if bump_scm { stamp.scm } else { col.scm };
     conn.execute(
         "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
-        params![now, scm, usn, now],
+        params![stamp.modified, scm, stamp.usn, stamp.ls],
     )
     .map_err(backend)?;
-    Ok(usn)
+    Ok(stamp.usn)
 }
 
 fn next_position(conn: &Connection) -> Result<i64, StoreError> {
