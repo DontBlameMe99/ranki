@@ -89,6 +89,18 @@ pub fn wrap_selection(
     (text, cursor)
 }
 
+/// Byte offset of a UTF-16 offset inside `text`.
+fn utf16_offset_in(text: &str, offset: usize) -> usize {
+    let mut utf16 = 0usize;
+    for (index, character) in text.char_indices() {
+        if utf16 >= offset {
+            return index;
+        }
+        utf16 = utf16.saturating_add(character.len_utf16());
+    }
+    text.len()
+}
+
 impl TextField {
     #[must_use]
     pub fn new(
@@ -122,6 +134,7 @@ impl TextField {
     ) {
         self.content = text.into();
         self.selected_range = self.content.len()..self.content.len();
+        self.marked_range = None;
         self.notify_edit(cx);
         cx.notify();
     }
@@ -138,6 +151,7 @@ impl TextField {
     ) {
         self.content = text.into();
         self.selected_range = self.content.len()..self.content.len();
+        self.marked_range = None;
         cx.notify();
     }
     pub fn set_edit_hook(&mut self, hook: EditHook) {
@@ -238,6 +252,9 @@ impl TextField {
     }
 
     fn index_for_point(&self, point: Point<Pixels>) -> usize {
+        if self.content.is_empty() {
+            return 0;
+        }
         let (Some(bounds), Some(line)) =
             (self.last_bounds.as_ref(), self.last_layout.as_ref())
         else {
@@ -250,6 +267,7 @@ impl TextField {
             return self.content.len();
         }
         line.closest_index_for_x(point.x - bounds.left())
+            .min(self.content.len())
     }
 
     fn backspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -397,17 +415,28 @@ impl EntityInputHandler for TextField {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.replace_text_in_range(range_utf16.clone(), new_text, window, cx);
+        let replacement = range_utf16
+            .or_else(|| {
+                self.marked_range.as_ref().map(|range| {
+                    self.offset_to_utf16(range.start)
+                        ..self.offset_to_utf16(range.end)
+                })
+            })
+            .unwrap_or_else(|| {
+                self.offset_to_utf16(self.selected_range.start)
+                    ..self.offset_to_utf16(self.selected_range.end)
+            });
+        let start = self.offset_from_utf16(replacement.start);
+        self.replace_text_in_range(Some(replacement), new_text, window, cx);
         if !new_text.is_empty() {
-            let start = range_utf16
-                .as_ref()
-                .map_or(0, |range| self.offset_from_utf16(range.start));
             self.marked_range =
                 Some(start..start.saturating_add(new_text.len()));
         }
         if let Some(range) = new_selected_range_utf16 {
-            self.selected_range = self.offset_from_utf16(range.start)
-                ..self.offset_from_utf16(range.end);
+            let offset = |position: usize| {
+                start.saturating_add(utf16_offset_in(new_text, position))
+            };
+            self.selected_range = offset(range.start)..offset(range.end);
         }
         cx.notify();
     }
@@ -436,7 +465,7 @@ impl EntityInputHandler for TextField {
     ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let line = self.last_layout.as_ref()?;
-        let index = line.index_for_x(point.x - line_point.x)?;
+        let index = line.index_for_x(line_point.x)?.min(self.content.len());
         Some(self.offset_to_utf16(index))
     }
 }
@@ -490,6 +519,12 @@ impl Render for TextField {
                 }),
             )
             .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, _| {
+                    this.selecting = false;
+                }),
+            )
+            .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, _| {
                     this.selecting = false;

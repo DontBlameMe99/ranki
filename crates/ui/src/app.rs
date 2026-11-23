@@ -57,7 +57,6 @@ actions!(
         CancelDialog,
         NextDeck,
         ClearSearch,
-        IgnoreShortcut,
     ]
 );
 
@@ -207,6 +206,7 @@ pub struct Root {
     pub(crate) store: Box<dyn Store>,
     pub(crate) options: Options,
     pub(crate) focus: FocusHandle,
+    pub(crate) dialog_focus: FocusHandle,
     pub(crate) system_dark: bool,
     pub(crate) view: View,
     pub(crate) previous_view: View,
@@ -303,6 +303,7 @@ impl Root {
     ) -> Self {
         let Launch { store, options } = launch;
         let focus = cx.focus_handle();
+        let dialog_focus = cx.focus_handle();
         window.focus(&focus);
         let system_dark = !matches!(
             window.appearance(),
@@ -327,6 +328,7 @@ impl Root {
             store,
             options,
             focus,
+            dialog_focus,
             system_dark,
             view: View::Decks,
             previous_view: View::Decks,
@@ -463,9 +465,12 @@ impl Root {
     fn tag_hook(cx: &mut Context<Self>) -> EditHook {
         let weak = cx.entity().downgrade();
         Arc::new(move |app| {
-            let _ = weak.update(app, |root, cx| {
-                root.sync_tags(cx);
-                cx.notify();
+            let weak = weak.clone();
+            app.defer(move |app| {
+                let _ = weak.update(app, |root, cx| {
+                    root.sync_tags(cx);
+                    cx.notify();
+                });
             });
         })
     }
@@ -483,7 +488,10 @@ impl Root {
     fn edit_hook(cx: &mut Context<Self>) -> EditHook {
         let weak = cx.entity().downgrade();
         Arc::new(move |app| {
-            let _ = weak.update(app, |_, cx| cx.notify());
+            let weak = weak.clone();
+            app.defer(move |app| {
+                let _ = weak.update(app, |_, cx| cx.notify());
+            });
         })
     }
 
@@ -524,7 +532,6 @@ impl Root {
     }
 
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
-        let now = Self::now();
         match self.store.decks() {
             Ok(decks) => self.decks = decks,
             Err(error) => {
@@ -549,6 +556,20 @@ impl Root {
         if self.add.model_index >= self.models.len() {
             self.add.model_index = 0;
         }
+        self.refresh_stats();
+        self.collection_modified =
+            self.store.collection_modified().unwrap_or(0);
+        self.external_change = false;
+        if self.selected.is_none_or(|index| index >= self.decks.len()) {
+            self.selected = (!self.decks.is_empty()).then_some(0);
+        }
+        self.reset_fields(cx);
+        cx.notify();
+    }
+
+    /// Recomputes per-deck counts without rebuilding the add-card fields.
+    fn refresh_stats(&mut self) {
+        let now = Self::now();
         self.stats = match self.store.deck_stats() {
             Ok(stats) => {
                 let lookup = stats.into_iter().collect::<HashMap<_, _>>();
@@ -567,15 +588,7 @@ impl Root {
                 })
                 .collect(),
         };
-        self.collection_modified =
-            self.store.collection_modified().unwrap_or(0);
-        self.external_change = false;
-        if self.selected.is_none_or(|index| index >= self.decks.len()) {
-            self.selected = (!self.decks.is_empty()).then_some(0);
-        }
         self.rebuild_deck_rows();
-        self.reset_fields(cx);
-        cx.notify();
     }
 
     pub(crate) fn set_error(&mut self, text: impl Into<String>) {
@@ -613,6 +626,7 @@ impl Root {
                 })
             })
             .collect();
+        self.refresh_field_colors(cx);
     }
 
     pub(crate) fn select_model(
@@ -668,6 +682,10 @@ impl Root {
         name: String,
         cx: &mut Context<Self>,
     ) {
+        if self.add.occlusion.image.as_deref() != Some(name.as_str()) {
+            self.add.occlusion.masks.clear();
+            self.add.occlusion.selected = None;
+        }
         self.add.occlusion.image = Some(name);
         let _ = self.add.errors.remove("occlusion");
         cx.notify();
@@ -854,6 +872,7 @@ impl Root {
         self.review.current = None;
         self.review.phase = Phase::Question;
         self.view = View::Decks;
+        self.refresh_stats();
         cx.notify();
     }
 
@@ -883,7 +902,13 @@ impl Root {
                 continue;
             }
             let _ = self.review.seen.insert(card.id);
-            let note = self.store.note(card.note_id).ok().flatten();
+            let note = match self.store.note(card.note_id) {
+                Ok(note) => note,
+                Err(error) => {
+                    self.set_error(format!("Could not load card: {error}"));
+                    continue;
+                }
+            };
             let model = note.as_ref().and_then(|note| {
                 self.models.iter().find(|model| model.id == note.model_id)
             });
@@ -933,6 +958,9 @@ impl Root {
     }
 
     pub(crate) fn grade(&mut self, rating: Rating, cx: &mut Context<Self>) {
+        if self.view != View::Review {
+            return;
+        }
         let Some(card) = self.review.current.clone() else {
             return;
         };
@@ -957,6 +985,7 @@ impl Root {
         );
         if let Err(error) = self.store.apply_review(&decision) {
             self.set_error(format!("Could not save review: {error}"));
+            cx.notify();
             return;
         }
         self.review.answered = self.review.answered.saturating_add(1);
@@ -1186,6 +1215,7 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let had_dialog = self.confirmation.is_some();
         match action {
             UiAction::Reveal => self.reveal(cx),
             UiAction::Grade(Rating::Again) => self.grade(Rating::Again, cx),
@@ -1204,10 +1234,13 @@ impl Root {
             }
             UiAction::OpenDecks => {
                 self.view = next_view(self.view, View::Decks);
+                self.refresh_stats();
                 cx.notify();
             }
             UiAction::OpenAdd => {
-                self.previous_view = self.view;
+                if self.view != View::AddCard {
+                    self.previous_view = self.view;
+                }
                 self.view = next_view(self.view, View::AddCard);
                 self.add.errors.clear();
                 cx.notify();
@@ -1217,7 +1250,12 @@ impl Root {
                 window.focus(self.create_field.read(cx).focus_handle());
                 cx.notify();
             }
-            UiAction::SubmitDeck => self.create_deck(cx),
+            UiAction::SubmitDeck => {
+                if self.create_field.read(cx).focus_handle().is_focused(window)
+                {
+                    self.create_deck(cx);
+                }
+            }
             UiAction::SaveNote => self.save_note(cx),
             UiAction::CancelAdd => {
                 self.view = next_view(self.view, self.previous_view);
@@ -1241,12 +1279,18 @@ impl Root {
                     self.study_deck(index, cx);
                 }
             }
-            UiAction::Ignore => {}
             UiAction::ClearSearch => {
                 self.deck_search
                     .update(cx, super::text_field::TextField::clear);
                 self.view = View::Decks;
                 cx.notify();
+            }
+        }
+        if self.confirmation.is_some() != had_dialog {
+            if self.confirmation.is_some() {
+                window.focus(&self.dialog_focus);
+            } else {
+                window.focus(&self.focus);
             }
         }
     }
@@ -1271,7 +1315,6 @@ pub enum UiAction {
     CancelDialog,
     NextDeck,
     ClearSearch,
-    Ignore,
 }
 
 impl From<&Reveal> for UiAction {
@@ -1364,39 +1407,61 @@ impl From<&NextDeck> for UiAction {
         Self::NextDeck
     }
 }
-impl From<&IgnoreShortcut> for UiAction {
-    fn from(_: &IgnoreShortcut) -> Self {
-        Self::Ignore
-    }
-}
 impl From<&ClearSearch> for UiAction {
     fn from(_: &ClearSearch) -> Self {
         Self::ClearSearch
     }
 }
 /// Dispatches one of the app's GPUI actions from a pointer handler.
-pub fn dispatch_app_action(cx: &mut App, action: UiAction) {
+pub fn dispatch_app_action(
+    window: &mut Window,
+    cx: &mut App,
+    action: UiAction,
+) {
     match action {
-        UiAction::Reveal => cx.dispatch_action(&Reveal),
-        UiAction::Grade(Rating::Again) => cx.dispatch_action(&GradeAgain),
-        UiAction::Grade(Rating::Hard) => cx.dispatch_action(&GradeHard),
-        UiAction::Grade(Rating::Good) => cx.dispatch_action(&GradeGood),
-        UiAction::Grade(Rating::Easy) => cx.dispatch_action(&GradeEasy),
-        UiAction::Retry => cx.dispatch_action(&Retry),
-        UiAction::EndSession => cx.dispatch_action(&EndSession),
-        UiAction::OpenDecks => cx.dispatch_action(&OpenDecks),
-        UiAction::OpenAdd => cx.dispatch_action(&OpenAdd),
-        UiAction::CreateDeck => cx.dispatch_action(&CreateDeck),
-        UiAction::SubmitDeck => cx.dispatch_action(&SubmitDeck),
-        UiAction::SaveNote => cx.dispatch_action(&SaveNote),
-        UiAction::CancelAdd => cx.dispatch_action(&CancelAdd),
-        UiAction::ToggleHelp => cx.dispatch_action(&ToggleHelp),
-        UiAction::ToggleScheduler => cx.dispatch_action(&ToggleScheduler),
-        UiAction::Confirm => cx.dispatch_action(&ConfirmDialog),
-        UiAction::CancelDialog => cx.dispatch_action(&CancelDialog),
-        UiAction::NextDeck => cx.dispatch_action(&NextDeck),
-        UiAction::ClearSearch => cx.dispatch_action(&ClearSearch),
-        UiAction::Ignore => {}
+        UiAction::Reveal => window.dispatch_action(Box::new(Reveal), cx),
+        UiAction::Grade(Rating::Again) => {
+            window.dispatch_action(Box::new(GradeAgain), cx);
+        }
+        UiAction::Grade(Rating::Hard) => {
+            window.dispatch_action(Box::new(GradeHard), cx);
+        }
+        UiAction::Grade(Rating::Good) => {
+            window.dispatch_action(Box::new(GradeGood), cx);
+        }
+        UiAction::Grade(Rating::Easy) => {
+            window.dispatch_action(Box::new(GradeEasy), cx);
+        }
+        UiAction::Retry => window.dispatch_action(Box::new(Retry), cx),
+        UiAction::EndSession => {
+            window.dispatch_action(Box::new(EndSession), cx);
+        }
+        UiAction::OpenDecks => window.dispatch_action(Box::new(OpenDecks), cx),
+        UiAction::OpenAdd => window.dispatch_action(Box::new(OpenAdd), cx),
+        UiAction::CreateDeck => {
+            window.dispatch_action(Box::new(CreateDeck), cx);
+        }
+        UiAction::SubmitDeck => {
+            window.dispatch_action(Box::new(SubmitDeck), cx);
+        }
+        UiAction::SaveNote => window.dispatch_action(Box::new(SaveNote), cx),
+        UiAction::CancelAdd => window.dispatch_action(Box::new(CancelAdd), cx),
+        UiAction::ToggleHelp => {
+            window.dispatch_action(Box::new(ToggleHelp), cx);
+        }
+        UiAction::ToggleScheduler => {
+            window.dispatch_action(Box::new(ToggleScheduler), cx);
+        }
+        UiAction::Confirm => {
+            window.dispatch_action(Box::new(ConfirmDialog), cx);
+        }
+        UiAction::CancelDialog => {
+            window.dispatch_action(Box::new(CancelDialog), cx);
+        }
+        UiAction::NextDeck => window.dispatch_action(Box::new(NextDeck), cx),
+        UiAction::ClearSearch => {
+            window.dispatch_action(Box::new(ClearSearch), cx);
+        }
     }
 }
 
@@ -1488,11 +1553,6 @@ impl Render for Root {
             .on_action(cx.listener(|this, action: &NextDeck, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
-            .on_action(cx.listener(
-                |this, action: &IgnoreShortcut, window, cx| {
-                    this.dispatch(UiAction::from(action), window, cx);
-                },
-            ))
             .when(view != View::Review, |this| this.child(self.render_nav(cx)))
             .child(div().flex_1().overflow_hidden().child(main))
             .children(self.render_overlay(cx))
@@ -1530,7 +1590,10 @@ pub fn build_deck_rows(
 ) -> Vec<DeckRow> {
     let mut nodes: Vec<(String, Option<&Deck>, DeckStats)> = Vec::new();
     for (deck, stat) in decks.iter().zip(stats.iter()) {
-        let path = deck.name.trim_matches(':').to_owned();
+        let path = deck.name.as_str();
+        if path.is_empty() {
+            continue;
+        }
         let segments = path.split("::").collect::<Vec<_>>();
         let mut prefix = String::new();
         for (index, segment) in segments.iter().enumerate() {
@@ -1539,7 +1602,16 @@ pub fn build_deck_rows(
             }
             prefix.push_str(segment);
             if index + 1 == segments.len() {
-                nodes.push((prefix.clone(), Some(deck), *stat));
+                let existing = nodes.iter().position(|(path, node, _)| {
+                    node.is_none() && path == &prefix
+                });
+                if let Some(position) = existing {
+                    if let Some(slot) = nodes.get_mut(position) {
+                        *slot = (prefix.clone(), Some(deck), *stat);
+                    }
+                } else {
+                    nodes.push((prefix.clone(), Some(deck), *stat));
+                }
             } else if !nodes.iter().any(|(path, _, _)| path == &prefix) {
                 nodes.push((prefix.clone(), None, DeckStats::default()));
             }
@@ -1999,14 +2071,14 @@ pub const fn rating_name(rating: Rating) -> &'static str {
 #[must_use]
 pub const fn empty_kind(
     deck_count: usize,
-    total: usize,
-    searching: bool,
+    matching_rows: usize,
+    due: usize,
 ) -> EmptyKind {
-    if searching {
-        EmptyKind::NoMatch
-    } else if deck_count == 0 {
+    if deck_count == 0 {
         EmptyKind::NoDecks
-    } else if total == 0 {
+    } else if matching_rows == 0 {
+        EmptyKind::NoMatch
+    } else if due == 0 {
         EmptyKind::CaughtUp
     } else {
         EmptyKind::None
@@ -2052,33 +2124,28 @@ fn clock_label() -> String {
     format!("{hours:02}:{minutes:02}")
 }
 
+/// Study shortcuts stay out of text input and modal dialogs.
+const STUDY_CONTEXT: &str = "ranki && !ranki_input && !ranki_dialog";
+
 #[must_use]
 pub fn key_bindings() -> Vec<KeyBinding> {
     let mut bindings = vec![
-        KeyBinding::new("space", Reveal, Some("ranki")),
-        KeyBinding::new("1", GradeAgain, Some("ranki")),
-        KeyBinding::new("2", GradeHard, Some("ranki")),
-        KeyBinding::new("3", GradeGood, Some("ranki")),
-        KeyBinding::new("4", GradeEasy, Some("ranki")),
-        KeyBinding::new("r", Retry, Some("ranki")),
+        KeyBinding::new("space", Reveal, Some(STUDY_CONTEXT)),
+        KeyBinding::new("1", GradeAgain, Some(STUDY_CONTEXT)),
+        KeyBinding::new("2", GradeHard, Some(STUDY_CONTEXT)),
+        KeyBinding::new("3", GradeGood, Some(STUDY_CONTEXT)),
+        KeyBinding::new("4", GradeEasy, Some(STUDY_CONTEXT)),
+        KeyBinding::new("r", Retry, Some(STUDY_CONTEXT)),
+        KeyBinding::new("d", OpenDecks, Some(STUDY_CONTEXT)),
+        KeyBinding::new("a", OpenAdd, Some(STUDY_CONTEXT)),
+        KeyBinding::new("?", ToggleHelp, Some(STUDY_CONTEXT)),
+        KeyBinding::new("t", ToggleScheduler, Some(STUDY_CONTEXT)),
+        KeyBinding::new("n", NextDeck, Some(STUDY_CONTEXT)),
         KeyBinding::new("esc", EndSession, Some("ranki")),
-        KeyBinding::new("d", OpenDecks, Some("ranki")),
-        KeyBinding::new("a", OpenAdd, Some("ranki")),
-        KeyBinding::new("?", ToggleHelp, Some("ranki")),
-        KeyBinding::new("t", ToggleScheduler, Some("ranki")),
-        KeyBinding::new("n", NextDeck, Some("ranki")),
         KeyBinding::new("cmd-enter", SaveNote, Some("ranki")),
         KeyBinding::new("ctrl-enter", SaveNote, Some("ranki")),
         KeyBinding::new("enter", ConfirmDialog, Some("ranki_dialog")),
         KeyBinding::new("esc", CancelDialog, Some("ranki_dialog")),
-        KeyBinding::new("space", IgnoreShortcut, Some("ranki_input")),
-        KeyBinding::new("1", IgnoreShortcut, Some("ranki_input")),
-        KeyBinding::new("2", IgnoreShortcut, Some("ranki_input")),
-        KeyBinding::new("3", IgnoreShortcut, Some("ranki_input")),
-        KeyBinding::new("4", IgnoreShortcut, Some("ranki_input")),
-        KeyBinding::new("r", IgnoreShortcut, Some("ranki_input")),
-        KeyBinding::new("a", IgnoreShortcut, Some("ranki_input")),
-        KeyBinding::new("d", IgnoreShortcut, Some("ranki_input")),
         KeyBinding::new("enter", SubmitDeck, Some("ranki_input")),
         KeyBinding::new("ctrl-enter", SaveNote, Some("ranki_input")),
         KeyBinding::new("cmd-enter", SaveNote, Some("ranki_input")),
@@ -2180,6 +2247,55 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].depth, 1);
         assert_eq!(rows[1].name, "B");
+    }
+
+    #[test]
+    fn study_bindings_stay_out_of_text_input() {
+        let mut keymap = gpui::Keymap::default();
+        keymap.add_bindings(super::key_bindings());
+        let typing = [
+            gpui::KeyContext::parse("ranki").expect("ranki context"),
+            gpui::KeyContext::parse("ranki_input").expect("input context"),
+        ];
+        let elsewhere =
+            [gpui::KeyContext::parse("ranki").expect("ranki context")];
+        let keystroke = gpui::Keystroke::parse("a").expect("keystroke");
+        let (in_input, _) = keymap
+            .bindings_for_input(std::slice::from_ref(&keystroke), &typing);
+        assert!(in_input.is_empty());
+        let (outside, _) = keymap
+            .bindings_for_input(std::slice::from_ref(&keystroke), &elsewhere);
+        assert_eq!(outside.len(), 1);
+    }
+
+    #[test]
+    fn colon_only_deck_names_build_one_row() {
+        let decks = [deck(1, ":", 0, 0, 1)];
+        let stats = decks.iter().map(|(_, stats)| *stats).collect::<Vec<_>>();
+        let rows = build_deck_rows(
+            &decks.iter().map(|(d, _)| d.clone()).collect::<Vec<_>>(),
+            &stats,
+            &std::collections::HashSet::default(),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, ":");
+    }
+
+    #[test]
+    fn child_listed_before_parent_replaces_the_virtual_group() {
+        let decks = [deck(1, "A::B", 1, 0, 0), deck(2, "A", 0, 0, 0)];
+        let stats = decks.iter().map(|(_, stats)| *stats).collect::<Vec<_>>();
+        let mut expanded = std::collections::HashSet::new();
+        let _ = expanded.insert(String::from("A"));
+        let rows = build_deck_rows(
+            &decks.iter().map(|(d, _)| d.clone()).collect::<Vec<_>>(),
+            &stats,
+            &expanded,
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].path, "A");
+        assert!(!rows[0].virtual_group);
+        assert_eq!(rows[1].path, "A::B");
     }
 
     #[test]
@@ -2285,10 +2401,10 @@ mod tests {
 
     #[test]
     fn empty_states_are_distinct() {
-        assert_eq!(empty_kind(0, 0, false), EmptyKind::NoDecks);
-        assert_eq!(empty_kind(1, 0, false), EmptyKind::CaughtUp);
-        assert_eq!(empty_kind(1, 0, true), EmptyKind::NoMatch);
-        assert_eq!(empty_kind(1, 3, false), EmptyKind::None);
+        assert_eq!(empty_kind(0, 0, 0), EmptyKind::NoDecks);
+        assert_eq!(empty_kind(1, 1, 0), EmptyKind::CaughtUp);
+        assert_eq!(empty_kind(1, 0, 3), EmptyKind::NoMatch);
+        assert_eq!(empty_kind(1, 3, 3), EmptyKind::None);
         assert_eq!(empty_copy(EmptyKind::NoDecks).0, "No decks yet");
     }
 

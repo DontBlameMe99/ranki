@@ -83,7 +83,7 @@ impl Root {
             row.child(icon(icon_name, 18., ink))
                 .child(label.to_owned())
                 .child(div().flex_1())
-                .child(keycap(key, colors, false))
+                .children(enabled.then(|| keycap(key, colors, false)))
         };
         let status_color = if self.external_change {
             colors.red
@@ -203,6 +203,7 @@ impl Root {
                     .justify_center()
                     .bg(crate::theme::alpha(colors.crust, 0.7))
                     .key_context("ranki_dialog")
+                    .track_focus(&self.dialog_focus)
                     .on_action(cx.listener(
                         |this, _: &crate::app::ConfirmDialog, window, cx| {
                             this.dispatch(UiAction::Confirm, window, cx);
@@ -302,7 +303,7 @@ impl Root {
         let focus = self.focus.clone();
         Box::new(move |_event: &ClickEvent, window: &mut Window, cx| {
             window.focus(&focus);
-            crate::app::dispatch_app_action(cx, action.clone());
+            crate::app::dispatch_app_action(window, cx, action.clone());
         })
     }
 }
@@ -323,8 +324,8 @@ fn primary(
         .flex()
         .items_center()
         .cursor_pointer()
-        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
-            crate::app::dispatch_app_action(cx, UiAction::Confirm);
+        .on_click(cx.listener(|_, _: &ClickEvent, window, cx| {
+            crate::app::dispatch_app_action(window, cx, UiAction::Confirm);
         }))
         .child(label)
 }

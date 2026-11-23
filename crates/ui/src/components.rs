@@ -133,8 +133,11 @@ pub fn removable_chip(
     colors: Palette,
     on_remove: ClickHandler,
 ) -> impl IntoElement {
+    let label = label.into();
+    let chip_id = format!("tag-chip-{label}");
+    let remove_id = format!("{chip_id}-remove");
     div()
-        .id("tag-chip")
+        .id(SharedString::from(chip_id))
         .flex_none()
         .flex()
         .items_center()
@@ -146,10 +149,10 @@ pub fn removable_chip(
         .bg(colors.surface0)
         .text_size(px(13.))
         .font_weight(gpui::FontWeight::MEDIUM)
-        .child(label.into())
+        .child(label)
         .child(
             div()
-                .id("tag-chip-remove")
+                .id(SharedString::from(remove_id))
                 .flex()
                 .items_center()
                 .justify_center()

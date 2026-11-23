@@ -79,6 +79,7 @@ pub fn run(store: Box<dyn Store>, options: Options) {
             );
             if let Err(error) = window {
                 eprintln!("ranki: cannot open review window: {error}");
+                app.quit();
                 return;
             }
             app.activate(true);
