@@ -92,7 +92,9 @@ impl Root {
             .as_ref()
             .map(|note| note.tags.clone())
             .unwrap_or_default();
-        let reading = reading_label(&self.models, note.as_ref());
+        let reading = (phase == Phase::Answer)
+            .then(|| reading_label(&self.models, note.as_ref()))
+            .flatten();
         let reveal = self.action_click(UiAction::Reveal);
         let end = self.action_click(UiAction::EndSession);
         let queue_count = |name: &str,
@@ -319,7 +321,20 @@ impl Root {
                                 } else {
                                     div().into_any_element()
                                 })
-                        })),
+                        }))
+                        .children(
+                            (phase == Phase::Answer)
+                                .then(|| {
+                                    answer.as_ref().and_then(|card| {
+                                        card_view::media_column(
+                                            &card.media,
+                                            &self.options.media_dir,
+                                            colors,
+                                        )
+                                    })
+                                })
+                                .flatten(),
+                        ),
                 );
             if let Some(card) = question.as_ref() {
                 let masks = (!card.masks.is_empty()).then(|| {

@@ -1,5 +1,7 @@
 //! Decks screen: header, summary cards, five-column table, and empty states.
 
+use std::collections::HashSet;
+
 use gpui::{
     ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, Rgba,
     StatefulInteractiveElement, Styled, Window, div, px,
@@ -20,7 +22,16 @@ impl Root {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let query = self.deck_search.read(cx).text();
-        let all_rows = self.deck_rows.clone();
+        let all_rows = if query.trim().is_empty() {
+            self.deck_rows.clone()
+        } else {
+            let expanded = self
+                .decks
+                .iter()
+                .map(|deck| deck.name.clone())
+                .collect::<HashSet<_>>();
+            app::build_deck_rows(&self.decks, &self.stats, &expanded)
+        };
         let rows = app::filter_decks(&all_rows, &query);
         let totals = leaf_deck_totals(&self.decks, &self.stats);
         let due = due_total(totals);
@@ -141,9 +152,8 @@ impl Root {
 
         content = content.child(self.render_summary(totals, cx));
 
-        let kind =
-            app::empty_kind(self.decks.len(), due, !query.trim().is_empty());
-        if kind == app::EmptyKind::None {
+        let kind = app::empty_kind(self.decks.len(), rows.len(), due);
+        if !rows.is_empty() {
             let mut table = div()
                 .flex()
                 .flex_col()
@@ -174,11 +184,12 @@ impl Root {
                     ))
                     .child(header_cell("", colors.subtext, 4)),
             );
-            for row in rows {
-                table = table.child(self.render_deck_row(&row, cx));
+            for row in &rows {
+                table = table.child(self.render_deck_row(row, cx));
             }
             content = content.child(table);
-        } else {
+        }
+        if kind != app::EmptyKind::None {
             content = content.child(self.render_empty(kind));
         }
         content

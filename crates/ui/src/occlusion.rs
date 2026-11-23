@@ -134,7 +134,8 @@ pub fn occlusion_field(masks: &[OcclusionMask]) -> String {
 /// Anki's `Image` field value.
 #[must_use]
 pub fn image_field(name: &str) -> String {
-    format!("<img src=\"{name}\">")
+    let escaped = name.replace('&', "&amp;").replace('"', "&quot;");
+    format!("<img src=\"{escaped}\">")
 }
 
 /// Field values in the stock Image Occlusion model order.
@@ -341,6 +342,8 @@ mod tests {
         assert_eq!(fields[1], "<img src=\"pic.png\">");
         assert_eq!(&fields[2..], ["H", "B", "C"]);
         assert_eq!(image_field("a.png"), "<img src=\"a.png\">");
+        assert_eq!(image_field("a\"b.png"), "<img src=\"a&quot;b.png\">");
+        assert_eq!(image_field("a&b.png"), "<img src=\"a&amp;b.png\">");
     }
 
     #[test]

@@ -14,7 +14,7 @@ use gpui::{
     relative,
 };
 use ranki_model::{
-    Note, NoteModel,
+    Note, NoteModel, cloze_ordinal,
     image_occlusion::{ImageOcclusionField, ShapeKind},
     parse_image_occlusion_field,
 };
@@ -123,6 +123,7 @@ pub fn parse_template(template: &str) -> Vec<TemplateNode> {
                     template.get(start..).unwrap_or("").to_owned(),
                 ),
             );
+            cursor = template.len();
             break;
         };
         let raw = after.get(..end).unwrap_or("").trim();
@@ -272,7 +273,7 @@ fn find_field<'a>(fields: FieldValues<'a>, key: &str) -> Option<&'a str> {
 }
 
 fn is_empty_html(value: &str) -> bool {
-    strip_tags(value).trim().is_empty()
+    strip_tags(value).trim().is_empty() && media_refs(value).is_empty()
 }
 
 /// Converts the supported markup subset to plain text with line breaks.
@@ -317,7 +318,52 @@ pub fn strip_tags(input: &str) -> String {
         output.push(character);
         cursor = cursor.saturating_add(character.len_utf8());
     }
-    normalize_newlines(&output)
+    normalize_newlines(&decode_entities(&output))
+}
+
+/// Decodes the HTML entities Anki fields use for displayed characters.
+fn decode_entities(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+    while let Some(rest) = input.get(cursor..) {
+        let Some(at) = rest.find('&') else {
+            output.push_str(rest);
+            break;
+        };
+        output.push_str(rest.get(..at).unwrap_or(""));
+        cursor = cursor.saturating_add(at).saturating_add(1);
+        let tail = input.get(cursor..).unwrap_or("");
+        let Some(end) = tail.find(';').filter(|end| *end <= 10) else {
+            output.push('&');
+            continue;
+        };
+        let entity = tail.get(..end).unwrap_or("");
+        if let Some(decoded) = decode_entity(entity) {
+            output.push_str(&decoded);
+            cursor = cursor.saturating_add(end).saturating_add(1);
+        } else {
+            output.push('&');
+        }
+    }
+    output
+}
+
+fn decode_entity(entity: &str) -> Option<String> {
+    match entity {
+        "amp" => return Some(String::from("&")),
+        "lt" => return Some(String::from("<")),
+        "gt" => return Some(String::from(">")),
+        "quot" => return Some(String::from("\"")),
+        "apos" | "#39" => return Some(String::from("'")),
+        "nbsp" => return Some(String::from(" ")),
+        _ => {}
+    }
+    let digits = entity.strip_prefix('#')?;
+    let code = digits.strip_prefix(['x', 'X']).map_or_else(
+        || digits.parse::<u32>().ok(),
+        |hex| u32::from_str_radix(hex, 16).ok(),
+    )?;
+    char::from_u32(code).map(String::from)
 }
 
 fn normalize_newlines(text: &str) -> String {
@@ -360,29 +406,32 @@ pub fn media_refs(input: &str) -> Vec<MediaRef> {
         let rest = input.get(cursor..).unwrap_or("");
         match kind {
             MediaKind::Image => {
-                let Some(after) = rest.find("src=") else {
-                    cursor = cursor.saturating_add(5);
-                    continue;
-                };
-                let tail = rest.get(after.saturating_add(4)..).unwrap_or("");
-                let quote = tail.chars().next();
-                let name = if quote == Some('"') || quote == Some('\'') {
-                    let mark = quote.unwrap_or('"');
-                    tail.get(1..)
-                        .and_then(|value| {
-                            value.find(mark).map(|end| value.get(..end))
-                        })
-                        .flatten()
-                } else {
-                    tail.split(|c: char| c.is_whitespace() || c == '>').next()
-                };
-                if let Some(name) = name {
-                    refs.push(MediaRef {
-                        kind,
-                        name: name.to_owned(),
-                    });
+                let tag_end = rest
+                    .find('>')
+                    .map_or(rest.len(), |end| end.saturating_add(1));
+                let tag = rest.get(..tag_end).unwrap_or(rest);
+                if let Some(after) = tag.find("src=") {
+                    let tail = tag.get(after.saturating_add(4)..).unwrap_or("");
+                    let quote = tail.chars().next();
+                    let name = if quote == Some('"') || quote == Some('\'') {
+                        let mark = quote.unwrap_or('"');
+                        tail.get(1..)
+                            .and_then(|value| {
+                                value.find(mark).map(|end| value.get(..end))
+                            })
+                            .flatten()
+                    } else {
+                        tail.split(|c: char| c.is_whitespace() || c == '>')
+                            .next()
+                    };
+                    if let Some(name) = name {
+                        refs.push(MediaRef {
+                            kind,
+                            name: decode_entities(name),
+                        });
+                    }
                 }
-                cursor = cursor.saturating_add(after.saturating_add(4));
+                cursor = cursor.saturating_add(tag_end);
             }
             MediaKind::Sound => {
                 let tail = rest.get(7..).unwrap_or("");
@@ -498,11 +547,13 @@ pub fn occlusion_overlays(
 ) -> Vec<MaskOverlay> {
     let ImageOcclusionField { shapes, .. } =
         parse_image_occlusion_field(occlusion);
-    let number = u32::from(ordinal.saturating_add(1));
     shapes
         .into_iter()
         .map(|mask| {
-            let active = mask.ordinals.contains(&number);
+            let active = mask
+                .ordinals
+                .iter()
+                .any(|number| cloze_ordinal(*number) == Some(ordinal));
             let left = parse_ratio(mask.properties.get("left"), 0.0);
             let top = parse_ratio(mask.properties.get("top"), 0.0);
             let width = parse_ratio(mask.properties.get("width"), 0.2);
@@ -534,13 +585,25 @@ pub fn occlusion_overlays(
 }
 
 fn parse_ratio(value: Option<&String>, fallback: f32) -> f32 {
-    value
-        .and_then(|text| text.trim_matches('%').parse::<f32>().ok())
-        .map_or(
-            fallback,
-            |value| if value > 1.0 { value / 100.0 } else { value },
-        )
-        .clamp(0.0, 1.0)
+    let Some(text) = value else {
+        return fallback;
+    };
+    let text = text.trim();
+    let (digits, percent) = text
+        .strip_suffix('%')
+        .map_or((text, false), |digits| (digits, true));
+    let Ok(number) = digits.trim().parse::<f32>() else {
+        return fallback;
+    };
+    if !number.is_finite() {
+        return fallback;
+    }
+    let ratio = if percent || number > 1.0 {
+        number / 100.0
+    } else {
+        number
+    };
+    ratio.clamp(0.0, 1.0)
 }
 
 fn parse_points(text: &str, width: f32, height: f32) -> Vec<(f32, f32)> {
@@ -811,30 +874,51 @@ impl ImageCache for LruImageCache {
     }
 }
 
+/// Resolves a media name inside the collection media directory.
+///
+/// Names come from imported card content, so absolute paths and parent
+/// segments are rejected instead of escaping `media_dir`.
+fn media_path(
+    media_dir: &std::path::Path,
+    name: &str,
+) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(name);
+    let mut components = path.components();
+    let single =
+        matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none();
+    single.then(|| media_dir.join(path))
+}
+
 /// Convenience wrapper for a media image with a missing-file caption.
 #[must_use]
 pub fn media_image(
-    path: std::path::PathBuf,
+    path: Option<std::path::PathBuf>,
     colors: Palette,
     height: f32,
 ) -> AnyElement {
+    let Some(path) = path else {
+        return unavailable_media(colors, height);
+    };
     let id = SharedString::from(path.to_string_lossy().into_owned());
     img(path)
         .id(id)
         .h(px(height))
         .max_w(px(520.))
         .object_fit(gpui::ObjectFit::Contain)
-        .with_fallback(move || {
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .h(px(height))
-                .text_size(px(12.))
-                .text_color(colors.subtext)
-                .child("Media unavailable")
-                .into_any_element()
-        })
+        .with_fallback(move || unavailable_media(colors, height))
+        .into_any_element()
+}
+
+fn unavailable_media(colors: Palette, height: f32) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(height))
+        .text_size(px(12.))
+        .text_color(colors.subtext)
+        .child("Media unavailable")
         .into_any_element()
 }
 
@@ -852,7 +936,8 @@ pub fn media_column(
     for media in refs {
         column = column.child(match media.kind {
             MediaKind::Image => {
-                media_image(media_dir.join(&media.name), colors, 180.)
+                let path = media_path(media_dir, &media.name);
+                media_image(path, colors, 180.)
             }
             MediaKind::Sound => div()
                 .flex()
@@ -1129,6 +1214,62 @@ mod tests {
             ),
             "Q A"
         );
+    }
+
+    #[test]
+    fn percent_suffix_sets_occlusion_units() {
+        let mask = occlusion_overlays(
+            "{{c1::image-occlusion:rect:left=1%:top=50%:width=1:height=.5}}",
+            0,
+            Side::Question,
+        );
+        assert_eq!(mask.len(), 1);
+        assert!((mask[0].left - 0.01).abs() < 1e-6);
+        assert!((mask[0].top - 0.5).abs() < 1e-6);
+        assert!((mask[0].width - 1.0).abs() < 1e-6);
+        assert!((mask[0].height - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn image_src_stays_inside_its_own_tag() {
+        let refs = media_refs("<img alt=x>[sound:beep.wav]<img src=\"b.png\">");
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].kind, MediaKind::Sound);
+        assert_eq!(refs[0].name, "beep.wav");
+        assert_eq!(refs[1].kind, MediaKind::Image);
+        assert_eq!(refs[1].name, "b.png");
+    }
+
+    #[test]
+    fn entity_encoded_text_and_media_names_are_decoded() {
+        assert_eq!(strip_tags("A &amp; B &#65;"), "A & B A");
+        let refs = media_refs("<img src=\"a&quot;b.png\">");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "a\"b.png");
+    }
+
+    #[test]
+    fn unmatched_template_suffix_is_kept_once() {
+        let empty = super::FieldValues {
+            names: &[],
+            values: &[],
+        };
+        assert_eq!(
+            super::render_template("before {{partial", empty, ""),
+            "before {{partial"
+        );
+    }
+
+    #[test]
+    fn media_paths_stay_inside_the_media_directory() {
+        let dir = std::path::Path::new("/media");
+        assert_eq!(
+            super::media_path(dir, "a.png"),
+            Some(std::path::PathBuf::from("/media/a.png"))
+        );
+        assert_eq!(super::media_path(dir, "../secret.png"), None);
+        assert_eq!(super::media_path(dir, "/etc/passwd"), None);
+        assert_eq!(super::media_path(dir, "sub/a.png"), None);
     }
 
     #[test]
