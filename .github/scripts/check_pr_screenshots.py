@@ -17,7 +17,8 @@ CODE_NAMES = {"Dockerfile", "Justfile", "Makefile"}
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 CODE_SPAN = re.compile(r"(`+)(?!`).*?(?<!`)\1(?!`)", re.DOTALL)
 FENCE = re.compile(r"(`{3,}|~{3,})(.*)")
-LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+BLOCKQUOTE = re.compile(r"^\s*(?:>\s?)+")
+LIST_ITEM = re.compile(r"^( *)(?:[-*+]|\d+[.)])\s+")
 MARKDOWN_IMAGE = re.compile(
     r"""!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)"""
 )
@@ -38,28 +39,32 @@ def visible_lines(body):
     body = HTML_COMMENT.sub("", body)
     fence = None
     paragraph = False
-    in_list = False
+    list_indent = None
     kept = []
     for line in body.splitlines():
-        stripped = line.lstrip()
-        marker = FENCE.match(stripped)
+        content = BLOCKQUOTE.sub("", line)
+        marker = FENCE.match(content.lstrip())
         if fence is None:
             if marker:
                 fence = marker.group(1)
                 paragraph = False
-                in_list = False
+                list_indent = None
                 continue
-            if LIST_ITEM.match(line):
-                in_list = True
+            item = LIST_ITEM.match(content)
+            if item:
+                list_indent = len(item.group(0))
                 paragraph = True
                 kept.append(line)
                 continue
-            if not line.strip():
+            if not content.strip():
                 paragraph = False
-                in_list = False
+                list_indent = None
                 kept.append(line)
                 continue
-            if re.match(r"^(?: {4}|\t)", line) and not paragraph and not in_list:
+            indent = 4 if content.startswith("\t") else len(content) - len(content.lstrip(" "))
+            if list_indent is not None and indent >= list_indent + 4:
+                continue
+            if indent >= 4 and not paragraph and list_indent is None:
                 continue
             kept.append(line)
             paragraph = True
