@@ -29,6 +29,7 @@ mod add_card_view;
 mod app;
 mod assets;
 mod bench;
+mod browser_view;
 mod card_view;
 mod components;
 mod decks_view;

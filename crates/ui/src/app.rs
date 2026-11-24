@@ -22,6 +22,7 @@ use ranki_model::{
 
 use crate::{
     Options, SchedulerKind, ThemeChoice,
+    browser_view::BrowseState,
     card_view::{self, RenderedCard, Side},
     occlusion::{
         self, MaskShape, NormalizedRect, OcclusionMask, default_mask,
@@ -32,7 +33,7 @@ use crate::{
     theme::{self, Palette, Theme, interval_label},
 };
 
-const DEBOUNCE: Duration = Duration::from_millis(120);
+pub const DEBOUNCE: Duration = Duration::from_millis(120);
 const TOAST_LIFETIME: Duration = Duration::from_secs(5);
 const MAX_REVIEW_TIME: Duration = Duration::from_secs(60);
 
@@ -50,6 +51,7 @@ actions!(
         EndSession,
         OpenDecks,
         OpenStatistics,
+        OpenBrowse,
         OpenAdd,
         CreateDeck,
         OpenSettings,
@@ -65,6 +67,7 @@ actions!(
         CancelDialog,
         NextDeck,
         ClearSearch,
+        ClearBrowseSearch,
     ]
 );
 
@@ -73,6 +76,7 @@ actions!(
 pub enum View {
     #[default]
     Decks,
+    Browse,
     Review,
     AddCard,
     Settings,
@@ -83,9 +87,11 @@ impl View {
     const fn key_context(self) -> &'static str {
         match self {
             Self::Review => "ranki ranki_review",
-            Self::Decks | Self::AddCard | Self::Settings | Self::Statistics => {
-                "ranki"
-            }
+            Self::Decks
+            | Self::Browse
+            | Self::AddCard
+            | Self::Settings
+            | Self::Statistics => "ranki",
         }
     }
 }
@@ -282,6 +288,7 @@ pub struct Root {
     pub(crate) selected: Option<usize>,
     pub(crate) expanded: HashSet<String>,
     pub(crate) deck_search: Entity<TextField>,
+    pub(crate) browse: BrowseState,
     pub(crate) create_field: Entity<TextField>,
     pub(crate) rename_field: Entity<TextField>,
     pub(crate) deck_edit: Option<DeckEdit>,
@@ -384,6 +391,9 @@ impl Root {
             field
         };
         let deck_search = cx.new(|cx| make_field(cx, "Search decks"));
+        let browse_search = cx.new(|cx| TextField::new(cx, "Search cards"));
+        let browse_hook = Self::browse_edit_hook(cx);
+        browse_search.update(cx, |field, _| field.set_edit_hook(browse_hook));
         let create_field = cx.new(|cx| make_field(cx, "Deck name"));
         let rename_field = cx.new(|cx| make_field(cx, "New name"));
         let tags = cx.new(|cx| make_field(cx, "Add a tag"));
@@ -408,6 +418,15 @@ impl Root {
             selected: None,
             expanded: HashSet::new(),
             deck_search,
+            browse: BrowseState {
+                search: browse_search,
+                rows: Vec::new(),
+                total: 0,
+                selected: None,
+                error: None,
+                generation: 0,
+                loading: false,
+            },
             create_field,
             rename_field,
             deck_edit: None,
@@ -450,6 +469,10 @@ impl Root {
             Ok("statistics") => root.view = View::Statistics,
             Ok("add") => root.view = View::AddCard,
             Ok("settings") => root.view = View::Settings,
+            Ok("browse") => {
+                root.view = View::Browse;
+                root.refresh_browse(cx);
+            }
             Ok("question") => {
                 root.study_all(cx);
                 root.review.phase = Phase::Question;
@@ -1128,6 +1151,7 @@ impl Root {
         let color = gpui::Hsla::from(theme::placeholder_color(self.theme()));
         let fields = [
             &self.deck_search,
+            &self.browse.search,
             &self.create_field,
             &self.rename_field,
             &self.add.tags,
@@ -1649,6 +1673,15 @@ impl Root {
                 self.refresh_statistics(cx);
                 cx.notify();
             }
+            UiAction::OpenBrowse => {
+                self.view = View::Browse;
+                let field = self.browse.search.clone();
+                self.refresh_browse(cx);
+                cx.notify();
+                window.defer(cx, move |window, cx| {
+                    window.focus(field.read(cx).focus_handle());
+                });
+            }
             UiAction::OpenAdd => {
                 if self.view != View::AddCard {
                     self.previous_view = self.view;
@@ -1709,6 +1742,14 @@ impl Root {
                 self.view = View::Decks;
                 cx.notify();
             }
+            UiAction::ClearBrowseSearch => {
+                self.browse
+                    .search
+                    .update(cx, super::text_field::TextField::clear);
+                self.refresh_browse(cx);
+                window.focus(self.browse.search.read(cx).focus_handle());
+                cx.notify();
+            }
         }
         if self.confirmation.is_some() != had_dialog {
             if self.confirmation.is_some() {
@@ -1731,6 +1772,7 @@ pub enum UiAction {
     EndSession,
     OpenDecks,
     OpenStatistics,
+    OpenBrowse,
     OpenAdd,
     OpenSettings,
     SetTheme(ThemeChoice),
@@ -1744,6 +1786,7 @@ pub enum UiAction {
     CancelDialog,
     NextDeck,
     ClearSearch,
+    ClearBrowseSearch,
 }
 
 impl From<&Reveal> for UiAction {
@@ -1876,6 +1919,17 @@ impl From<&ClearSearch> for UiAction {
         Self::ClearSearch
     }
 }
+impl From<&OpenBrowse> for UiAction {
+    fn from(_: &OpenBrowse) -> Self {
+        Self::OpenBrowse
+    }
+}
+
+impl From<&ClearBrowseSearch> for UiAction {
+    fn from(_: &ClearBrowseSearch) -> Self {
+        Self::ClearBrowseSearch
+    }
+}
 /// Dispatches one of the app's GPUI actions from a pointer handler.
 pub fn dispatch_app_action(
     window: &mut Window,
@@ -1907,6 +1961,9 @@ pub fn dispatch_app_action(
         UiAction::OpenDecks => window.dispatch_action(Box::new(OpenDecks), cx),
         UiAction::OpenStatistics => {
             window.dispatch_action(Box::new(OpenStatistics), cx);
+        }
+        UiAction::OpenBrowse => {
+            window.dispatch_action(Box::new(OpenBrowse), cx);
         }
         UiAction::OpenAdd => window.dispatch_action(Box::new(OpenAdd), cx),
         UiAction::OpenSettings => {
@@ -1945,6 +2002,9 @@ pub fn dispatch_app_action(
         UiAction::ClearSearch => {
             window.dispatch_action(Box::new(ClearSearch), cx);
         }
+        UiAction::ClearBrowseSearch => {
+            window.dispatch_action(Box::new(ClearBrowseSearch), cx);
+        }
     }
 }
 
@@ -1959,6 +2019,7 @@ impl Render for Root {
         let view = self.view;
         let main = match view {
             View::Decks => self.render_decks(window, cx).into_any_element(),
+            View::Browse => self.render_browse(window, cx).into_any_element(),
             View::Review => self.render_review(window, cx).into_any_element(),
             View::AddCard => {
                 self.render_add_card(window, cx).into_any_element()
@@ -2010,6 +2071,9 @@ impl Render for Root {
                     this.dispatch(UiAction::from(action), window, cx);
                 },
             ))
+            .on_action(cx.listener(|this, action: &OpenBrowse, window, cx| {
+                this.dispatch(UiAction::from(action), window, cx);
+            }))
             .on_action(cx.listener(|this, action: &OpenAdd, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
@@ -2066,6 +2130,11 @@ impl Render for Root {
             .on_action(cx.listener(|this, action: &ClearSearch, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
+            .on_action(cx.listener(
+                |this, action: &ClearBrowseSearch, window, cx| {
+                    this.dispatch(UiAction::from(action), window, cx);
+                },
+            ))
             .on_action(cx.listener(|this, action: &NextDeck, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
@@ -2755,6 +2824,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-z", Undo, Some(STUDY_CONTEXT)),
         KeyBinding::new("s", StudyAgain, Some(STUDY_CONTEXT)),
         KeyBinding::new("d", OpenDecks, Some(STUDY_CONTEXT)),
+        KeyBinding::new("b", OpenBrowse, Some(STUDY_CONTEXT)),
         KeyBinding::new("a", OpenAdd, Some(STUDY_CONTEXT)),
         KeyBinding::new(",", OpenSettings, Some(STUDY_CONTEXT)),
         KeyBinding::new("?", ToggleHelp, Some(STUDY_CONTEXT)),

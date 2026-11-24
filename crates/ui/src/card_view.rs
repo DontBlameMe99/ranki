@@ -170,9 +170,18 @@ pub fn parse_template(template: &str) -> Vec<TemplateNode> {
             stack.push((key.to_owned(), true, Vec::new()));
             continue;
         }
-        let mut parts = raw.split(':');
-        let key = parts.next().unwrap_or("").trim().to_owned();
-        let filters = parts.map(str::trim).map(str::to_owned).collect();
+        let (key, filters) = match raw.split_once(':') {
+            Some((filter, field))
+                if filter.trim().eq_ignore_ascii_case("cloze") =>
+            {
+                (field.trim().to_owned(), vec![String::from("cloze")])
+            }
+            _ => {
+                let mut parts = raw.split(':');
+                let first = parts.next().unwrap_or("").trim().to_owned();
+                (first, parts.map(str::trim).map(str::to_owned).collect())
+            }
+        };
         push_node(&mut stack, &mut roots, TemplateNode::Field { key, filters });
     }
     if let Some(rest) = template.get(cursor..)
@@ -1041,6 +1050,15 @@ mod tests {
             flags: 0,
             data: String::new(),
         }
+    }
+
+    #[test]
+    fn cloze_without_colon_is_an_ordinary_field() {
+        let nodes = parse_template("{{cloze}}");
+        assert!(matches!(
+            nodes[0],
+            TemplateNode::Field { ref key, .. } if key == "cloze"
+        ));
     }
 
     #[test]

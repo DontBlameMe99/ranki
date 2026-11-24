@@ -161,9 +161,9 @@ impl Root {
                 "Browse",
                 "icon-book",
                 "B",
-                View::Decks,
-                UiAction::OpenDecks,
-                false,
+                View::Browse,
+                UiAction::OpenBrowse,
+                true,
             ))
             .child(nav(
                 "Statistics",
