@@ -704,6 +704,12 @@ impl Root {
         if self.add.model_index >= self.models.len() {
             self.add.model_index = 0;
         }
+        if let Some(preferred) = crate::add_card_view::preferred_model_index(
+            &self.models,
+            self.add.model_index,
+        ) {
+            self.add.model_index = preferred;
+        }
         self.refresh_stats();
         self.collection_start = self.store.collection_created().unwrap_or(0);
         self.refresh_statistics(cx);

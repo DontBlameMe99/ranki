@@ -1130,6 +1130,18 @@ pub fn note_type_tabs(
 }
 
 #[must_use]
+pub fn preferred_model_index(
+    models: &[ranki_model::NoteModel],
+    index: usize,
+) -> Option<usize> {
+    let label = note_type_name(models.get(index)?);
+    note_type_tabs(models)
+        .into_iter()
+        .find(|(tab_label, _)| tab_label == label)
+        .map(|(_, tab_index)| tab_index)
+}
+
+#[must_use]
 fn tab_rank(model: &ranki_model::NoteModel) -> (bool, bool) {
     (
         model.id == 0,
@@ -1197,22 +1209,27 @@ mod tests {
 
     #[test]
     fn note_type_tabs_prefer_genanki_models() {
-        let genanki_basic = ranki_model::NoteModel {
+        let plain_basic = ranki_model::NoteModel {
             id: 9,
+            ..ranki_model::StockModelKind::Basic.definition()
+        };
+        let genanki_basic = ranki_model::NoteModel {
+            id: 10,
             name: "Basic (genanki)".into(),
             ..ranki_model::StockModelKind::Basic.definition()
         };
         let genanki_reversed = ranki_model::NoteModel {
-            id: 10,
+            id: 11,
             name: "Basic (and reversed card) (genanki)".into(),
             ..ranki_model::StockModelKind::BasicAndReversed.definition()
         };
         let genanki_cloze = ranki_model::NoteModel {
-            id: 11,
+            id: 12,
             name: "Cloze (genanki)".into(),
             ..ranki_model::StockModelKind::Cloze.definition()
         };
         let models = models_with_stock(vec![
+            plain_basic,
             genanki_basic,
             genanki_reversed,
             genanki_cloze,
@@ -1230,6 +1247,12 @@ mod tests {
         assert_eq!(tabs[2].0, "Cloze");
         assert_eq!(models[tabs[2].1].name, "Cloze (genanki)");
         assert!(tabs.iter().all(|(label, _)| !label.contains("genanki")));
+        assert_eq!(tabs[0].1, 1);
+        assert_eq!(super::preferred_model_index(&models, 0), Some(tabs[0].1));
+        assert_eq!(
+            super::preferred_model_index(&models, tabs[0].1),
+            Some(tabs[0].1)
+        );
     }
 
     #[test]
