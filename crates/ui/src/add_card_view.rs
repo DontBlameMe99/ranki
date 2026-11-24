@@ -186,7 +186,9 @@ impl Root {
                                         let selected =
                                             index == self.add.model_index;
                                         div()
-                                            .id("add-model-tab")
+                                            .id(SharedString::from(format!(
+                                                "add-model-tab-{index}"
+                                            )))
                                             .h(px(32.))
                                             .px(px(12.))
                                             .flex()
@@ -1099,7 +1101,7 @@ fn field_value(
     (!text.is_empty()).then(|| text.to_owned())
 }
 
-/// Distinct note types in mockup order, keeping the first model per label.
+/// One tab per note kind, preferring installed genanki models.
 #[must_use]
 pub fn note_type_tabs(
     models: &[ranki_model::NoteModel],
@@ -1108,8 +1110,14 @@ pub fn note_type_tabs(
     let mut tabs: Vec<(String, usize)> = Vec::new();
     for (index, model) in models.iter().enumerate() {
         let label = note_type_name(model).to_owned();
-        if !tabs.iter().any(|(name, _)| *name == label) {
-            tabs.push((label, index));
+        match tabs.iter_mut().find(|(name, _)| *name == label) {
+            Some((_, selected))
+                if tab_rank(model) < tab_rank(&models[*selected]) =>
+            {
+                *selected = index;
+            }
+            Some(_) => {}
+            None => tabs.push((label, index)),
         }
     }
     tabs.sort_by_key(|(label, _)| {
@@ -1119,6 +1127,14 @@ pub fn note_type_tabs(
             .unwrap_or(order.len())
     });
     tabs
+}
+
+#[must_use]
+fn tab_rank(model: &ranki_model::NoteModel) -> (bool, bool) {
+    (
+        model.id == 0,
+        !model.name.to_ascii_lowercase().contains("genanki"),
+    )
 }
 
 fn validation(message: &str, colors: crate::theme::Palette) -> gpui::Div {
@@ -1177,6 +1193,43 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Basic", "Reversed", "Cloze", "Image Occlusion"]
         );
+    }
+
+    #[test]
+    fn note_type_tabs_prefer_genanki_models() {
+        let genanki_basic = ranki_model::NoteModel {
+            id: 9,
+            name: "Basic (genanki)".into(),
+            ..ranki_model::StockModelKind::Basic.definition()
+        };
+        let genanki_reversed = ranki_model::NoteModel {
+            id: 10,
+            name: "Basic (and reversed card) (genanki)".into(),
+            ..ranki_model::StockModelKind::BasicAndReversed.definition()
+        };
+        let genanki_cloze = ranki_model::NoteModel {
+            id: 11,
+            name: "Cloze (genanki)".into(),
+            ..ranki_model::StockModelKind::Cloze.definition()
+        };
+        let models = models_with_stock(vec![
+            genanki_basic,
+            genanki_reversed,
+            genanki_cloze,
+        ]);
+        let tabs = super::note_type_tabs(&models);
+
+        assert_eq!(tabs.len(), 4);
+        assert_eq!(tabs[0].0, "Basic");
+        assert_eq!(models[tabs[0].1].name, "Basic (genanki)");
+        assert_eq!(tabs[1].0, "Reversed");
+        assert_eq!(
+            models[tabs[1].1].name,
+            "Basic (and reversed card) (genanki)"
+        );
+        assert_eq!(tabs[2].0, "Cloze");
+        assert_eq!(models[tabs[2].1].name, "Cloze (genanki)");
+        assert!(tabs.iter().all(|(label, _)| !label.contains("genanki")));
     }
 
     #[test]
