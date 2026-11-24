@@ -169,9 +169,9 @@ impl Root {
                 "Statistics",
                 "icon-chart",
                 "T",
-                View::Decks,
-                UiAction::OpenDecks,
-                false,
+                View::Statistics,
+                UiAction::OpenStatistics,
+                true,
             ))
             .child(nav(
                 "Settings",
@@ -366,7 +366,7 @@ impl Root {
                     .child(help_row("S", "Study again", colors))
                     .child(help_row("Esc", "End session", colors))
                     .child(help_row("A / D", "Add card / Decks", colors))
-                    .child(help_row("T", "Scheduler", colors))
+                    .child(help_row("T", "Statistics / Scheduler", colors))
                     .child(help_row("?", "This sheet", colors))
                     .child(
                         div()

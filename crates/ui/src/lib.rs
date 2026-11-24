@@ -36,6 +36,7 @@ mod nav;
 pub mod occlusion;
 mod review_view;
 mod settings_view;
+mod statistics_view;
 mod text_field;
 mod theme;
 

@@ -27,6 +27,7 @@ use crate::{
         self, MaskShape, NormalizedRect, OcclusionMask, default_mask,
         image_occlusion_fields, media_images,
     },
+    statistics_view::{Statistics, build_statistics},
     text_field::{EditHook, TextField},
     theme::{self, Palette, Theme, interval_label},
 };
@@ -48,6 +49,7 @@ actions!(
         StudyAgain,
         EndSession,
         OpenDecks,
+        OpenStatistics,
         OpenAdd,
         CreateDeck,
         OpenSettings,
@@ -74,8 +76,19 @@ pub enum View {
     Review,
     AddCard,
     Settings,
+    Statistics,
 }
 
+impl View {
+    const fn key_context(self) -> &'static str {
+        match self {
+            Self::Review => "ranki ranki_review",
+            Self::Decks | Self::AddCard | Self::Settings | Self::Statistics => {
+                "ranki"
+            }
+        }
+    }
+}
 /// Review content phase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Phase {
@@ -257,6 +270,7 @@ pub struct Root {
     pub(crate) decks: Vec<Deck>,
     pub(crate) models: Vec<NoteModel>,
     pub(crate) stats: Vec<DeckStats>,
+    pub(crate) statistics: Statistics,
     pub(crate) deck_rows: Vec<DeckRow>,
     pub(crate) selected: Option<usize>,
     pub(crate) expanded: HashSet<String>,
@@ -382,6 +396,7 @@ impl Root {
             decks: Vec::new(),
             models: Vec::new(),
             stats: Vec::new(),
+            statistics: Statistics::default(),
             deck_rows: Vec::new(),
             selected: None,
             expanded: HashSet::new(),
@@ -425,6 +440,7 @@ impl Root {
                 tags.split_whitespace().map(str::to_owned).collect();
         }
         match env::var("RANKI_UI_DEV_VIEW").as_deref() {
+            Ok("statistics") => root.view = View::Statistics,
             Ok("add") => root.view = View::AddCard,
             Ok("settings") => root.view = View::Settings,
             Ok("question") => {
@@ -667,6 +683,7 @@ impl Root {
         }
         self.refresh_stats();
         self.collection_start = self.store.collection_created().unwrap_or(0);
+        self.refresh_statistics(cx);
         self.collection_modified =
             self.store.collection_modified().unwrap_or(0);
         self.external_change = false;
@@ -699,6 +716,25 @@ impl Root {
                 .collect(),
         };
         self.rebuild_deck_rows();
+    }
+
+    /// Rebuilds the collection-wide review summary from the store's log.
+    fn refresh_statistics(&mut self, cx: &mut Context<Self>) {
+        let now = Self::now();
+        match self.store.review_history() {
+            Ok(history) => {
+                self.statistics =
+                    build_statistics(&history, now, self.collection_start);
+            }
+            Err(error) => {
+                self.statistics = Statistics::default();
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not load review history: {error}"),
+                    cx,
+                );
+            }
+        }
     }
 
     /// Reports a completed action. The toast retires on its own after
@@ -1572,6 +1608,11 @@ impl Root {
                 window.focus(&self.focus);
                 cx.notify();
             }
+            UiAction::OpenStatistics => {
+                self.view = next_view(self.view, View::Statistics);
+                self.refresh_statistics(cx);
+                cx.notify();
+            }
             UiAction::OpenAdd => {
                 if self.view != View::AddCard {
                     self.previous_view = self.view;
@@ -1653,6 +1694,7 @@ pub enum UiAction {
     StudyAgain,
     EndSession,
     OpenDecks,
+    OpenStatistics,
     OpenAdd,
     OpenSettings,
     SetTheme(ThemeChoice),
@@ -1736,6 +1778,11 @@ impl From<&UseDarkTheme> for UiAction {
 impl From<&UseSystemTheme> for UiAction {
     fn from(_: &UseSystemTheme) -> Self {
         Self::SetTheme(ThemeChoice::System)
+    }
+}
+impl From<&OpenStatistics> for UiAction {
+    fn from(_: &OpenStatistics) -> Self {
+        Self::OpenStatistics
     }
 }
 impl From<&OpenAdd> for UiAction {
@@ -1822,6 +1869,9 @@ pub fn dispatch_app_action(
             window.dispatch_action(Box::new(EndSession), cx);
         }
         UiAction::OpenDecks => window.dispatch_action(Box::new(OpenDecks), cx),
+        UiAction::OpenStatistics => {
+            window.dispatch_action(Box::new(OpenStatistics), cx);
+        }
         UiAction::OpenAdd => window.dispatch_action(Box::new(OpenAdd), cx),
         UiAction::OpenSettings => {
             window.dispatch_action(Box::new(OpenSettings), cx);
@@ -1878,12 +1928,13 @@ impl Render for Root {
                 self.render_add_card(window, cx).into_any_element()
             }
             View::Settings => self.render_settings().into_any_element(),
+            View::Statistics => self.render_statistics(cx).into_any_element(),
         };
         div()
             .id("root")
             .size_full()
             .flex()
-            .key_context("ranki")
+            .key_context(view.key_context())
             .bg(colors.base)
             .text_color(colors.text)
             .font_family(self.font_family)
@@ -1918,6 +1969,11 @@ impl Render for Root {
             .on_action(cx.listener(|this, action: &OpenDecks, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
+            .on_action(cx.listener(
+                |this, action: &OpenStatistics, window, cx| {
+                    this.dispatch(UiAction::from(action), window, cx);
+                },
+            ))
             .on_action(cx.listener(|this, action: &OpenAdd, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
@@ -2646,6 +2702,10 @@ const STUDY_CONTEXT: &str =
 /// Settings shortcuts only apply while the settings screen is mounted.
 const SETTINGS_CONTEXT: &str =
     "ranki > ranki_settings && !ranki_input && !ranki_dialog";
+const REVIEW_CONTEXT: &str =
+    "ranki && ranki_review && !ranki_input && !ranki_dialog";
+const STATISTICS_CONTEXT: &str =
+    "ranki && !ranki_review && !ranki_input && !ranki_dialog";
 
 #[must_use]
 pub fn key_bindings() -> Vec<KeyBinding> {
@@ -2664,7 +2724,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("?", ToggleHelp, Some(STUDY_CONTEXT)),
         KeyBinding::new("shift-?", ToggleHelp, Some(STUDY_CONTEXT)),
         KeyBinding::new("f1", ToggleHelp, Some(STUDY_CONTEXT)),
-        KeyBinding::new("t", ToggleScheduler, Some(STUDY_CONTEXT)),
+        KeyBinding::new("t", ToggleScheduler, Some(REVIEW_CONTEXT)),
+        KeyBinding::new("t", OpenStatistics, Some(STATISTICS_CONTEXT)),
         KeyBinding::new("n", NextDeck, Some(STUDY_CONTEXT)),
         KeyBinding::new("d", OpenDecks, Some(SETTINGS_CONTEXT)),
         KeyBinding::new("a", OpenAdd, Some(SETTINGS_CONTEXT)),
@@ -2874,6 +2935,31 @@ mod tests {
             keymap.bindings_for_input(std::slice::from_ref(&one), &decks);
         assert_eq!(in_settings.len(), 1);
         assert_eq!(in_decks.len(), 1);
+    }
+
+    #[test]
+    fn statistics_key_is_routed_by_view_context() {
+        let mut keymap = gpui::Keymap::default();
+        keymap.add_bindings(super::key_bindings());
+        let keystroke = gpui::Keystroke::parse("t").expect("keystroke");
+        let stats = [gpui::KeyContext::parse(View::Statistics.key_context())
+            .expect("stats context")];
+        let review = [gpui::KeyContext::parse(View::Review.key_context())
+            .expect("review context")];
+        let typing = [
+            gpui::KeyContext::parse(View::Statistics.key_context())
+                .expect("stats context"),
+            gpui::KeyContext::parse("ranki_input").expect("input context"),
+        ];
+        let (on_stats, _) =
+            keymap.bindings_for_input(std::slice::from_ref(&keystroke), &stats);
+        let (in_review, _) = keymap
+            .bindings_for_input(std::slice::from_ref(&keystroke), &review);
+        let (in_input, _) = keymap
+            .bindings_for_input(std::slice::from_ref(&keystroke), &typing);
+        assert_eq!(on_stats.len(), 1);
+        assert_eq!(in_review.len(), 1);
+        assert!(in_input.is_empty());
     }
 
     #[test]
