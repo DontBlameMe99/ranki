@@ -9,8 +9,8 @@ use std::{
 
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
-    KeyBinding, Pixels, Render, Window, WindowAppearance, actions, div,
-    prelude::*,
+    KeyBinding, Pixels, Point, Render, Window, WindowAppearance, actions, div,
+    point, prelude::*, px,
 };
 use ranki_core::{
     FsrsParams, FsrsPreset, FsrsScheduler, Scheduler, from_settings,
@@ -114,6 +114,13 @@ pub struct DeckRow {
 #[derive(Clone, Debug)]
 pub struct DeckEdit {
     pub id: Id,
+}
+
+/// Open deck actions menu and the window point that opened it.
+#[derive(Clone, Copy, Debug)]
+pub struct DeckMenu {
+    pub id: Id,
+    pub anchor: Point<Pixels>,
 }
 
 /// Pending destructive action.
@@ -278,7 +285,7 @@ pub struct Root {
     pub(crate) create_field: Entity<TextField>,
     pub(crate) rename_field: Entity<TextField>,
     pub(crate) deck_edit: Option<DeckEdit>,
-    pub(crate) deck_menu: Option<Id>,
+    pub(crate) deck_menu: Option<DeckMenu>,
     pub(crate) confirmation: Option<Confirmation>,
     pub(crate) review: ReviewState,
     pub(crate) add: AddState,
@@ -468,6 +475,17 @@ impl Root {
             && env::var("RANKI_UI_DEV_CREATE").is_ok_and(|value| value == "1")
         {
             window.focus(root.create_field.read(cx).focus_handle());
+        }
+        if env::var("RANKI_UI_DEV_MENU").is_ok_and(|value| value == "1") {
+            root.view = View::Decks;
+            let viewport = window.viewport_size();
+            root.deck_menu = root.decks.first().map(|deck| DeckMenu {
+                id: deck.id,
+                anchor: point(
+                    viewport.width - px(79.),
+                    viewport.height - px(283.),
+                ),
+            });
         }
         if let Ok(seed) = env::var("RANKI_UI_DEV_OCCLUSION") {
             root.seed_occlusion(&seed, cx);
