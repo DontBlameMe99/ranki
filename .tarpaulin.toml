@@ -13,6 +13,7 @@ exclude-files = [
   "crates/ui/src/card_view.rs",
   "crates/ui/src/components.rs",
   "crates/ui/src/decks_view.rs",
+  "crates/ui/src/nav.rs",
   "crates/ui/src/review_view.rs",
   "crates/ui/src/add_card_view.rs",
   "crates/ui/src/theme.rs",
