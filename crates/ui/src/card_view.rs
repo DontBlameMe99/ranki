@@ -1066,11 +1066,11 @@ fn icon_placeholder(label: &str, colors: Palette) -> Div {
 
 /// Renders note fields through the selected template into a preview block.
 #[must_use]
-pub fn preview_card(
+pub fn preview_rendered(
     model: &NoteModel,
     fields: &[String],
     side: Side,
-) -> String {
+) -> RenderedCard {
     let note = Note {
         id: 0,
         guid: String::new(),
@@ -1090,6 +1090,16 @@ pub fn preview_card(
         Side::Answer => CardRequest::answer_only(ordinal),
     };
     render_card(model, &note, request)
+}
+
+/// Renders note fields through the selected template into a preview block.
+#[must_use]
+pub fn preview_card(
+    model: &NoteModel,
+    fields: &[String],
+    side: Side,
+) -> String {
+    preview_rendered(model, fields, side)
         .text
         .lines()
         .rev()

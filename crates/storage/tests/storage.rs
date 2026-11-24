@@ -622,6 +622,43 @@ fn undo_review_restores_card_and_deletes_log() {
 }
 
 #[test]
+fn grade_undo_grade_uses_the_restored_revision() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(&["again", "answer"], &[]))
+        .expect("add");
+    let now = now_secs();
+    let before = store
+        .due_cards(None, 1, now)
+        .expect("due")
+        .pop()
+        .expect("card");
+    let scheduler = FsrsScheduler::default();
+    let decision = scheduler.schedule(
+        &before,
+        Rating::Good,
+        now,
+        store.collection_created().expect("created"),
+    );
+    store.apply_review(&decision).expect("grade");
+    assert!(
+        store
+            .undo_review(&before, decision.revlog.id)
+            .expect("undo")
+    );
+    let restored = store.card(before.id).expect("card").expect("exists");
+    let retry = scheduler.schedule(
+        &restored,
+        Rating::Good,
+        now,
+        store.collection_created().expect("created"),
+    );
+    store.apply_review(&retry).expect("grade after undo");
+    assert_eq!(store.review_history().expect("history").len(), 1);
+}
+
+#[test]
 fn stale_review_writes_are_rejected() {
     let (_directory, path) = fixture();
     let mut store = Collection::open(&path).expect("open");

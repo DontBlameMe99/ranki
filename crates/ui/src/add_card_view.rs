@@ -58,6 +58,9 @@ impl Root {
         let preview_answer = model.map_or_else(String::new, |model| {
             card_view::preview_card(model, &field_values, Side::Answer)
         });
+        let rendered_preview = model.map(|model| {
+            card_view::preview_rendered(model, &field_values, preview_side)
+        });
         let preview_reading = model.and_then(|model| {
             field_value(model, &field_values, &["Reading", "Kana"])
         });
@@ -489,12 +492,22 @@ impl Root {
                 .into_any_element()
         });
         if let Some(name) = self.add.occlusion.image.clone() {
-            preview = preview.child(
+            let mut image = div().relative().child(
                 img(self.options.media_dir.join(name))
                     .h(px(120.))
                     .w_full()
                     .object_fit(gpui::ObjectFit::Contain),
             );
+            if let Some(rendered) = rendered_preview.as_ref()
+                && !rendered.masks.is_empty()
+            {
+                image = image.child(card_view::occlusion_layer(
+                    &rendered.masks,
+                    colors,
+                    preview_side == Side::Answer,
+                ));
+            }
+            preview = preview.child(image);
         }
 
         let history = added_history(&added, colors);

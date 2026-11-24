@@ -16,17 +16,11 @@ runtime="$host_runtime/ranki-visual.$$"
 mkdir -p "$runtime" "$dir/config/ranki" "$dir/collection.media"
 chmod 700 "$runtime"
 
+repo="$PWD"
 nix develop --command cargo build -p ranki >/dev/null
 
-bin="$PWD/target/debug/ranki"
+bin="$repo/target/debug/ranki"
 collection="$dir/collection.anki2"
-"$bin" --collection "$collection" deck-create 'Visual Deck' >/dev/null
-deck_id="$("$bin" --collection "$collection" decks | awk -F '\t' '$2 == "Visual Deck" {print $1}')"
-"$bin" --collection "$collection" add-note --model Basic --deck "$deck_id" \
-  --field 'Question?' --field 'Answer!' >/dev/null
-"$bin" --collection "$collection" add-note --model Cloze --deck "$deck_id" \
-  --field 'The {{c1::capital}} is Paris.' --field 'Remember it' >/dev/null
-
 cat > "$dir/config/ranki/config.toml" <<EOF
 [general]
 collection = "$collection"
@@ -35,6 +29,13 @@ media_dir = "$dir/collection.media"
 theme = "dark"
 reduce_motion = true
 EOF
+seed_env=(env XDG_CONFIG_HOME="$dir/config")
+"${seed_env[@]}" "$bin" --no-sync --collection "$collection" deck-create 'Visual Deck' >/dev/null
+deck_id="$("${seed_env[@]}" "$bin" --no-sync --collection "$collection" decks | awk -F '\t' '$2 == "Visual Deck" {print $1}')"
+"${seed_env[@]}" "$bin" --no-sync --collection "$collection" add-note --model Basic --deck "$deck_id" \
+  --field 'Question?' --field 'Answer!' >/dev/null
+"${seed_env[@]}" "$bin" --no-sync --collection "$collection" add-note --model Cloze --deck "$deck_id" \
+  --field 'The {{c1::capital}} is Paris.' --field 'Remember it' >/dev/null
 
 cat > "$dir/sway.conf" <<'EOF'
 output * resolution 1280x800
@@ -94,6 +95,7 @@ hidden() {
 if [[ "$mode" == "session" ]]; then
   {
     printf 'export VISUAL_DIR=%q\n' "$dir"
+    printf 'export VISUAL_REPO=%q\n' "$repo"
     printf 'export VISUAL_RUNTIME=%q\n' "$runtime"
     printf 'export VISUAL_DISPLAY=%q\n' "$display"
     printf 'export VISUAL_CONFIG=%q\n' "$dir/config"
@@ -115,12 +117,12 @@ visual_terminate() {
 
 hidden() {
   env XDG_RUNTIME_DIR="$VISUAL_RUNTIME" WAYLAND_DISPLAY="$VISUAL_DISPLAY" SWAYSOCK="$VISUAL_SWAY_SOCK" \
-    nix develop --command nix shell "${VISUAL_PACKAGES[@]}" --command "$@"
+    nix develop "$VISUAL_REPO" --command nix shell "${VISUAL_PACKAGES[@]}" --command "$@"
 }
 
 start_ranki() {
   setsid env XDG_CONFIG_HOME="$VISUAL_CONFIG" RANKI_REDUCE_MOTION=1 \
-    nix develop --command nix shell "${VISUAL_PACKAGES[@]}" --command env \
+    nix develop "$VISUAL_REPO" --command nix shell "${VISUAL_PACKAGES[@]}" --command env \
     XDG_RUNTIME_DIR="$VISUAL_RUNTIME" WAYLAND_DISPLAY="$VISUAL_DISPLAY" \
     "$VISUAL_BIN" "$@" >"$VISUAL_DIR/app.log" 2>&1 &
   echo $! > "$VISUAL_DIR/app.pid"

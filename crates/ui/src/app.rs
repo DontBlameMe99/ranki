@@ -768,6 +768,18 @@ impl Root {
         }
     }
 
+    pub(crate) fn start_external_change_poll(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                if this.update(cx, Self::poll_external_change).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn reload_collection(&mut self, cx: &mut Context<Self>) {
         self.review = ReviewState::default();
         self.view = View::Decks;
@@ -777,9 +789,7 @@ impl Root {
     }
 
     fn request_reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.view == View::Review
-            && (self.review.current.is_some() || self.review.answered > 0)
-        {
+        if self.review.current.is_some() || self.review.answered > 0 {
             self.confirmation = Some(Confirmation::Reload);
             window.focus(&self.dialog_focus);
         } else {
@@ -854,11 +864,16 @@ impl Root {
             self.selected = Some(0);
         }
         if self.add.deck_id.is_some() && self.add_deck_index().is_none() {
-            self.add.deck_id = selected_id;
+            self.add.deck_id = self
+                .selected
+                .and_then(|index| self.decks.get(index))
+                .map(|deck| deck.id);
         }
         if self.add.deck_id.is_none() && !self.decks.is_empty() {
-            self.add.deck_id =
-                selected_id.or_else(|| self.decks.first().map(|deck| deck.id));
+            self.add.deck_id = self
+                .selected
+                .and_then(|index| self.decks.get(index))
+                .map(|deck| deck.id);
         }
         self.reset_fields(cx);
         let model_fields = self
@@ -1568,6 +1583,7 @@ impl Root {
             self.collection_start,
         );
         let before_progress = self.progress_fraction();
+        self.poll_external_change(cx);
         if let Err(error) = self.store.apply_review(&decision) {
             self.show_toast(
                 ToastKind::Error,
@@ -1626,9 +1642,7 @@ impl Root {
         let Some(entry) = self.review.last_grade.clone() else {
             return;
         };
-        let Some(loaded) = self.render_state(&entry.card, cx) else {
-            return;
-        };
+        self.poll_external_change(cx);
         match self.store.undo_review(&entry.card, entry.revlog_id) {
             Ok(false) => {
                 self.review.last_grade = None;
@@ -1657,7 +1671,20 @@ impl Root {
                     self.review.queue.push_front(current);
                 }
                 let _ = self.review.seen.remove(&entry.card.id);
-                self.apply_loaded(&entry.card, loaded, cx);
+                let Some(restored) =
+                    self.store.card(entry.card.id).ok().flatten()
+                else {
+                    self.show_toast(
+                        ToastKind::Error,
+                        "Could not reload the undone card",
+                        cx,
+                    );
+                    return;
+                };
+                let Some(loaded) = self.render_state(&restored, cx) else {
+                    return;
+                };
+                self.apply_loaded(&restored, loaded, cx);
                 self.review.last_grade_at = None;
                 self.record_local_write();
                 self.review.focused_elapsed = entry.spent;
@@ -1843,6 +1870,7 @@ impl Root {
             fields,
             tags,
         };
+        self.poll_external_change(cx);
         match self.store.add_note(&note) {
             Ok(ids) => {
                 self.add.added.push(AddedNote {
