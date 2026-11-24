@@ -464,6 +464,11 @@ impl Root {
                 root.set_theme(choice, cx);
             }
         }
+        if root.view == View::Decks
+            && env::var("RANKI_UI_DEV_CREATE").is_ok_and(|value| value == "1")
+        {
+            window.focus(root.create_field.read(cx).focus_handle());
+        }
         if let Ok(seed) = env::var("RANKI_UI_DEV_OCCLUSION") {
             root.seed_occlusion(&seed, cx);
             if let Ok(prefill) = env::var("RANKI_UI_DEV_FIELDS") {
@@ -1406,6 +1411,16 @@ impl Root {
                 );
             }
         }
+    }
+
+    pub(crate) fn cancel_create(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_field.update(cx, TextField::clear);
+        window.focus(&self.focus);
+        cx.notify();
     }
 
     pub(crate) fn start_rename(&mut self, deck: &Deck, cx: &mut Context<Self>) {
