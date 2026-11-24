@@ -143,10 +143,6 @@ impl Collection {
         if !records::table_exists(&conn, "col")? {
             return Err(invalid("not an Anki collection"));
         }
-        conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_ranki_cards_queue_due ON cards (queue, due, id)",
-        )
-        .map_err(backend)?;
         Ok(Self {
             conn,
             path: path.to_path_buf(),
@@ -337,6 +333,14 @@ impl Collection {
             missing: false,
         })
     }
+
+    fn ensure_due_index(&self) -> Result<(), StoreError> {
+        self.conn
+            .execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_ranki_cards_queue_due ON cards (queue, due, id)",
+            )
+            .map_err(backend)
+    }
 }
 
 impl Store for Collection {
@@ -517,6 +521,7 @@ impl Store for Collection {
         limit: usize,
         now_secs: i64,
     ) -> Result<Vec<Card>, StoreError> {
+        self.ensure_due_index()?;
         let limit_value =
             i64::try_from(limit).map_err(|_| invalid("limit too large"))?;
         if limit_value == 0 {
