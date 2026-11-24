@@ -122,11 +122,33 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(self.create_field.clone())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .w(px(320.))
+                            .h(px(44.))
+                            .px(px(14.))
+                            .rounded(px(12.))
+                            .overflow_hidden()
+                            .bg(colors.surface0)
+                            .border_1()
+                            .border_color(colors.mauve)
+                            .text_size(px(14.))
+                            .text_color(colors.text)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .child(self.create_field.clone()),
+                            ),
+                    )
                     .child(small_button(
                         "Create",
                         style,
-                        self.action_click(UiAction::SubmitDeck),
+                        Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.create_deck(cx);
+                        })),
                     ))
                     .child(
                         div()
@@ -135,14 +157,8 @@ impl Root {
                             .text_color(colors.subtext)
                             .cursor_pointer()
                             .on_click(cx.listener(
-                                |this, _: &ClickEvent, _, cx| {
-                                    this.create_field.update(
-                                        cx,
-                                        |field, cx| {
-                                            field.clear(cx);
-                                        },
-                                    );
-                                    cx.notify();
+                                |this, _: &ClickEvent, window, cx| {
+                                    this.cancel_create(window, cx);
                                 },
                             ))
                             .child("Cancel"),
