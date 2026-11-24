@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Require two embedded images in the description of a code-changing PR."""
+
+import os
+import re
+import sys
+from pathlib import Path
+
+CODE_SUFFIXES = {
+    ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".h", ".hpp", ".html",
+    ".java", ".js", ".jsx", ".kt", ".lua", ".nix", ".php", ".py", ".rb",
+    ".rs", ".scala", ".sh", ".sql", ".svelte", ".swift", ".ts", ".tsx",
+    ".vue", ".yaml", ".yml", ".zig",
+}
+CODE_NAMES = {"Dockerfile", "Justfile", "Makefile"}
+
+HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+INLINE_CODE = re.compile(r"`[^`\n]*`")
+MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))")
+HTML_IMAGE = re.compile(
+    r"<img\b[^>]*\bsrc\s*=\s*(?:\"([^\"]+)\"|'([^']+)|([^\s>]+))",
+    re.IGNORECASE,
+)
+
+
+def visible_lines(body):
+    """Drop comments and fenced code blocks, where images do not render."""
+    body = HTML_COMMENT.sub("", body)
+    fence = None
+    kept = []
+    for line in body.splitlines():
+        marker = line.lstrip()[:3]
+        if marker in ("```", "~~~"):
+            if fence is None:
+                fence = marker
+            elif marker == fence:
+                fence = None
+            continue
+        if fence is None:
+            kept.append(line)
+    body = INLINE_CODE.sub("", "\n".join(kept))
+    return body
+
+
+def embedded_images(body):
+    body = visible_lines(body)
+    sources = []
+    for pattern in (MARKDOWN_IMAGE, HTML_IMAGE):
+        for match in pattern.finditer(body):
+            source = next((group for group in match.groups() if group), "").strip()
+            if source and source not in sources:
+                sources.append(source)
+    return sources
+
+
+def changed_code_files(path):
+    files = [line.strip() for line in Path(path).read_text(encoding="utf-8").splitlines()]
+    files = [name for name in files if name]
+    return [name for name in files if Path(name).suffix.lower() in CODE_SUFFIXES or Path(name).name in CODE_NAMES]
+
+
+def main():
+    if len(sys.argv) != 2:
+        print("usage: check_pr_screenshots.py <changed-files.txt>", file=sys.stderr)
+        return 2
+
+    code_files = changed_code_files(sys.argv[1])
+    if not code_files:
+        print("No source files changed; screenshot check skipped.")
+        return 0
+
+    images = embedded_images(os.environ.get("PR_BODY", ""))
+    if len(images) >= 2:
+        print(f"Found {len(images)} embedded images in the PR description.")
+        return 0
+
+    print("::error::Code-changing PR needs two embedded images in the PR description.")
+    print(f"Found {len(images)}. Embed a Before screenshot and an After screenshot.")
+    print("Source files changed:")
+    for name in code_files:
+        print(f"  {name}")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
