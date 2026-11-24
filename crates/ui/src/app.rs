@@ -9,8 +9,8 @@ use std::{
 
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
-    KeyBinding, Pixels, Point, Render, Window, WindowAppearance, actions, div,
-    point, prelude::*, px,
+    KeyBinding, PathPromptOptions, Pixels, Point, Render, Window,
+    WindowAppearance, actions, div, point, prelude::*, px,
 };
 use ranki_core::{
     FsrsParams, FsrsPreset, FsrsScheduler, Scheduler, from_settings,
@@ -26,7 +26,7 @@ use crate::{
     card_view::{self, RenderedCard, Side},
     occlusion::{
         self, MaskShape, NormalizedRect, OcclusionMask, default_mask,
-        image_occlusion_fields, media_images,
+        image_occlusion_fields,
     },
     statistics_view::{Statistics, build_statistics},
     text_field::{EditHook, TextField},
@@ -173,8 +173,6 @@ pub struct AddedNote {
 pub struct OcclusionState {
     /// Media file name chosen for the `Image` field.
     pub image: Option<String>,
-    /// Image files found in the media directory.
-    pub media: Vec<String>,
     pub masks: Vec<OcclusionMask>,
     pub selected: Option<usize>,
     /// Drag in progress, in image-relative coordinates.
@@ -222,7 +220,6 @@ pub struct AddState {
     pub preview_side: Side,
     pub errors: BTreeMap<String, String>,
     pub added: Vec<AddedNote>,
-    pub media_filter: Entity<TextField>,
     pub occlusion: OcclusionState,
 }
 
@@ -399,7 +396,6 @@ impl Root {
         let tags = cx.new(|cx| make_field(cx, "Add a tag"));
         let tag_hook = Self::tag_hook(cx);
         tags.update(cx, |field, _| field.set_edit_hook(tag_hook));
-        let media_filter = cx.new(|cx| make_field(cx, "Filter images"));
         let mut root = Self {
             scheduler: scheduler_from_options(&options),
             store,
@@ -442,7 +438,6 @@ impl Root {
                 preview_side: Side::Question,
                 errors: BTreeMap::new(),
                 added: Vec::new(),
-                media_filter,
                 occlusion: OcclusionState::default(),
             },
             toast: None,
@@ -865,9 +860,6 @@ impl Root {
     fn reset_fields(&mut self, cx: &mut Context<Self>) {
         let model = self.models.get(self.add.model_index);
         let names = model.map_or_else(Vec::new, |item| item.fields.clone());
-        if model.is_some_and(NoteModel::is_image_occlusion) {
-            self.refresh_media();
-        }
         let hook = Self::edit_hook(cx);
         self.add.fields = names
             .into_iter()
@@ -926,8 +918,38 @@ impl Root {
         cx.notify();
     }
 
-    fn refresh_media(&mut self) {
-        self.add.occlusion.media = media_images(&self.options.media_dir);
+    /// Copies a chosen image into the media directory for the occlusion editor.
+    pub(crate) fn upload_occlusion_image(&mut self, cx: &mut Context<Self>) {
+        let media_dir = self.options.media_dir.clone();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose image".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let result = match receiver.await {
+                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                    Some(path) => occlusion::import_image(&path, &media_dir)
+                        .map(Some)
+                        .map_err(|error| error.to_string()),
+                    None => Ok(None),
+                },
+                Ok(Ok(None)) => Ok(None),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = this.update(cx, |root, cx| match result {
+                Ok(Some(name)) => root.choose_occlusion_image(name, cx),
+                Ok(None) => {}
+                Err(error) => root.show_toast(
+                    ToastKind::Error,
+                    format!("Could not upload image: {error}"),
+                    cx,
+                ),
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn choose_occlusion_image(
@@ -1155,7 +1177,6 @@ impl Root {
             &self.create_field,
             &self.rename_field,
             &self.add.tags,
-            &self.add.media_filter,
         ];
         for field in fields {
             field.update(cx, |field, _| field.set_placeholder_color(color));
@@ -2517,10 +2538,8 @@ pub fn validate_occlusion(
         );
     }
     if image.is_none_or(str::is_empty) {
-        let _ = errors.insert(
-            "occlusion".to_owned(),
-            "Choose an image from the media directory".to_owned(),
-        );
+        let _ = errors
+            .insert("occlusion".to_owned(), "Upload an image first".to_owned());
     }
     if masks.is_empty() {
         let _ = errors.insert(
@@ -3354,7 +3373,7 @@ mod tests {
         let errors = validate_occlusion(&deck, &model, None, &[]);
         assert_eq!(
             errors.get("occlusion").map(String::as_str),
-            Some("Choose an image from the media directory")
+            Some("Upload an image first")
         );
         assert_eq!(
             errors.get("masks").map(String::as_str),
