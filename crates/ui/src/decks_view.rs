@@ -203,6 +203,13 @@ impl Root {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let due = due_total(totals);
+        // Accent ink only reads on the mauve fill. With nothing due the pill
+        // falls back to surface1, so its label and icon take the surface1 ink.
+        let study_all_ink = if due > 0 {
+            style.ink()
+        } else {
+            crate::theme::keycap_ink(colors)
+        };
         let queue_stat = |label: &str, value: usize, color: Rgba| {
             div()
                 .flex_1()
@@ -281,7 +288,7 @@ impl Root {
                                     } else {
                                         colors.surface1
                                     })
-                                    .text_color(style.ink())
+                                    .text_color(study_all_ink)
                                     .text_size(px(16.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .cursor_pointer()
@@ -290,7 +297,11 @@ impl Root {
                                             this.study_all(cx);
                                         },
                                     ))
-                                    .child(icon("icon-play", 18., style.ink()))
+                                    .child(icon(
+                                        "icon-play",
+                                        18.,
+                                        study_all_ink,
+                                    ))
                                     .child("Study all"),
                             ),
                     )
@@ -664,6 +675,8 @@ impl Root {
                 div()
                     .id("decks-empty-action")
                     .mt(px(10.))
+                    .flex()
+                    .items_center()
                     .h(px(44.))
                     .px(px(20.))
                     .rounded(px(12.))
