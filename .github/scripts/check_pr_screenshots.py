@@ -21,6 +21,12 @@ HTML_IMAGE = re.compile(
     r"<img\b[^>]*\bsrc\s*=\s*(?:\"([^\"]+)\"|'([^']+)|([^\s>]+))",
     re.IGNORECASE,
 )
+REFERENCE_IMAGE = re.compile(r"!\[([^\]]*)\]\[([^\]]*)\]")
+SHORTCUT_IMAGE = re.compile(r"!\[([^\]]+)\](?![ \t]*\()(?![ \t]*\[)")
+LINK_DEFINITION = re.compile(
+    r"^\s{0,3}\[([^\]]+)\]:\s*(?:<([^>]+)>|(\S+))",
+    re.MULTILINE,
+)
 
 
 def visible_lines(body):
@@ -42,6 +48,10 @@ def visible_lines(body):
     return body
 
 
+def normalized_label(label):
+    return " ".join(label.strip().lower().split())
+
+
 def embedded_images(body):
     body = visible_lines(body)
     sources = []
@@ -50,6 +60,22 @@ def embedded_images(body):
             source = next((group for group in match.groups() if group), "").strip()
             if source and source not in sources:
                 sources.append(source)
+
+    definitions = {}
+    for match in LINK_DEFINITION.finditer(body):
+        source = next((group for group in match.groups()[1:] if group), "").strip()
+        if source:
+            definitions[normalized_label(match.group(1))] = source
+
+    labels = []
+    for match in REFERENCE_IMAGE.finditer(body):
+        labels.append(match.group(2) or match.group(1))
+    for match in SHORTCUT_IMAGE.finditer(body):
+        labels.append(match.group(1))
+    for label in labels:
+        source = definitions.get(normalized_label(label))
+        if source and source not in sources:
+            sources.append(source)
     return sources
 
 
