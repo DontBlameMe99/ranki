@@ -134,16 +134,21 @@ Unfocused fields use a 1.5 px `#45475a` border, `#1e1e2e` fill, 16 px padding,
 come from `selected_model.fields`. Tags use 8 px gaps. Chips are 13/500 with
 `7px 8px 7px 12px` padding, radius 12, `#313244`, and a 14 px close icon. The
 Add tag control repeats that shape with a 1.5 px dashed accent border and
-accent text.
+accent text. In the wide layout, one trailing row 18 px under the columns holds
+the tags field and the session history side by side at the same 32 px gap: each
+is a 13/600 subtext label with an 8 px gap over a control at least 46 px tall,
+so the two line up instead of the history starting from its own margin. Narrow
+and image-occlusion layouts stack tags, and then the history, in the form
+column at the same 18 px gaps.
 Preview rail: radius 24, `#313244`, padding 20, 14 px gaps. Header has an
 11/600 spaced "LIVE PREVIEW" label and a Front/Back toggle using the note type
 option style. The preview is centered, 52/500 front with 1.15 line height,
 14 px subtext reading, 1 px `#45475a` divider, 28/700 mauve answer, and a
 14 px `#1e1e2e` box with `10px 14px` padding and radius 14. Render it through
-the existing template substitution and `card_view::render`. "Added this
-session" is 13/600 with `18px 2px 8px` margins. The history card is radius 16,
-`#181825`, 1 px border. Each row has `11px 14px` padding, a 16 px green check,
-15/500 name, 13 px subtext, and 12 px muted time. Keep this as UI state only.
+the existing template substitution and `card_view::render`. The history card is
+radius 16, `#181825`, 1 px border. Each row has `11px 14px` padding, a 16 px
+green check, 15/500 name, 13 px subtext, and 12 px muted time. Keep this as UI
+state only.
 Footer: the toggle is 44x26, radius 13, accent fill when on, with a 20x20
 radius 10 dot and a 13 px "Keep open after adding" label. Spacer flexes.
 Cancel is 48 px high, radius 14, 1 px `#45475a` border, padding `0 20px`,
