@@ -15,10 +15,14 @@ CODE_SUFFIXES = {
 CODE_NAMES = {"Dockerfile", "Justfile", "Makefile"}
 
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
-INLINE_CODE = re.compile(r"`[^`\n]*`")
-MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))")
+CODE_SPAN = re.compile(r"(`+)(?!`).*?(?<!`)\1(?!`)", re.DOTALL)
+FENCE = re.compile(r"(`{3,}|~{3,})(.*)")
+LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+MARKDOWN_IMAGE = re.compile(
+    r"""!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)"""
+)
 HTML_IMAGE = re.compile(
-    r"<img\b[^>]*\bsrc\s*=\s*(?:\"([^\"]+)\"|'([^']+)|([^\s>]+))",
+    r"<img\b[^>]*?(?<![\w-])src\s*=\s*(?:\"([^\"]+)\"|'([^']+)|([^\s>]+))",
     re.IGNORECASE,
 )
 REFERENCE_IMAGE = re.compile(r"!\[([^\]]*)\]\[([^\]]*)\]")
@@ -30,22 +34,44 @@ LINK_DEFINITION = re.compile(
 
 
 def visible_lines(body):
-    """Drop comments and fenced code blocks, where images do not render."""
+    """Drop comments and code that GitHub does not render as images."""
     body = HTML_COMMENT.sub("", body)
     fence = None
+    paragraph = False
+    in_list = False
     kept = []
     for line in body.splitlines():
-        marker = line.lstrip()[:3]
-        if marker in ("```", "~~~"):
-            if fence is None:
-                fence = marker
-            elif marker == fence:
-                fence = None
-            continue
+        stripped = line.lstrip()
+        marker = FENCE.match(stripped)
         if fence is None:
+            if marker:
+                fence = marker.group(1)
+                paragraph = False
+                in_list = False
+                continue
+            if LIST_ITEM.match(line):
+                in_list = True
+                paragraph = True
+                kept.append(line)
+                continue
+            if not line.strip():
+                paragraph = False
+                in_list = False
+                kept.append(line)
+                continue
+            if re.match(r"^(?: {4}|\t)", line) and not paragraph and not in_list:
+                continue
             kept.append(line)
-    body = INLINE_CODE.sub("", "\n".join(kept))
-    return body
+            paragraph = True
+            continue
+        if (
+            marker
+            and marker.group(1)[0] == fence[0]
+            and len(marker.group(1)) >= len(fence)
+            and not marker.group(2).strip()
+        ):
+            fence = None
+    return CODE_SPAN.sub("", "\n".join(kept))
 
 
 def normalized_label(label):
@@ -65,7 +91,9 @@ def embedded_images(body):
     for match in LINK_DEFINITION.finditer(body):
         source = next((group for group in match.groups()[1:] if group), "").strip()
         if source:
-            definitions[normalized_label(match.group(1))] = source
+            label = normalized_label(match.group(1))
+            if label not in definitions:
+                definitions[label] = source
 
     labels = []
     for match in REFERENCE_IMAGE.finditer(body):
