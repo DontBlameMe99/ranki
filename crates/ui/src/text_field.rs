@@ -3,7 +3,7 @@
 use std::{ops::Range, sync::Arc};
 
 use gpui::{
-    App, Bounds, Context, Element, ElementInputHandler, Entity,
+    App, Bounds, ContentMask, Context, Element, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
@@ -718,8 +718,9 @@ impl Element for TextElement {
         let line = window
             .text_system()
             .shape_line(display, font_size, &runs, None);
-        let cursor_x = line.x_for_index(self.selected.end.min(line.len()));
+        let cursor_offset = self.input.read(cx).cursor_offset();
         let focus = self.input.read(cx).focus_handle().clone();
+        let cursor_x = line.x_for_index(cursor_offset.min(line.len()));
         let cursor = focus.is_focused(window).then(|| {
             fill(
                 Bounds::new(
@@ -769,19 +770,22 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
-        }
-        if let Err(error) =
-            prepaint
-                .line
-                .paint(bounds.origin, window.line_height(), window, cx)
-        {
-            eprintln!("ranki: cannot paint text field: {error}");
-        }
-        if let Some(cursor) = prepaint.cursor.take() {
-            window.paint_quad(cursor);
-        }
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection);
+            }
+            if let Err(error) = prepaint.line.paint(
+                bounds.origin,
+                window.line_height(),
+                window,
+                cx,
+            ) {
+                eprintln!("ranki: cannot paint text field: {error}");
+            }
+            if let Some(cursor) = prepaint.cursor.take() {
+                window.paint_quad(cursor);
+            }
+        });
         self.input.update(cx, |input, _| {
             input.last_layout = Some(prepaint.line.clone());
             input.last_bounds = Some(bounds);

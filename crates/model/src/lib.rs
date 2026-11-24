@@ -382,6 +382,8 @@ pub struct NewNote {
 pub struct ReviewDecision {
     pub card: Card,
     pub revlog: RevLog,
+    /// Card modification stamp the decision was computed from.
+    pub expected_modified: i64,
 }
 
 /// Card counts for every deck in a collection, in deck order.
@@ -606,7 +608,6 @@ pub trait Store {
             "deck_stats is not supported by this store".to_owned(),
         ))
     }
-
     /// Returns the collection modification timestamp in seconds.
     ///
     /// # Errors

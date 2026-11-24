@@ -9,9 +9,9 @@ use futures::FutureExt;
 use gpui::{
     AnyElement, App, AppContext, Asset, AssetLogger, Div, Entity,
     ImageAssetLoader, ImageCache, ImageCacheError, ImageCacheItem,
-    InteractiveElement, IntoElement, ParentElement, RenderImage, Resource,
-    Rgba, SharedString, Styled, StyledImage, Window, div, hash, img, px,
-    relative,
+    InteractiveElement, IntoElement, ParentElement, PathBuilder, RenderImage,
+    Resource, Rgba, SharedString, Styled, StyledImage, Window, canvas, div,
+    hash, img, point, px, relative,
 };
 use ranki_model::{
     Note, NoteModel, cloze_ordinal,
@@ -81,6 +81,7 @@ pub struct MaskOverlay {
     pub width: f32,
     pub height: f32,
     pub points: Vec<(f32, f32)>,
+    pub text: Option<String>,
     pub occlude_inactive: bool,
     pub active: bool,
 }
@@ -251,6 +252,10 @@ fn render_nodes(
             TemplateNode::Field { key, .. } => {
                 if key.eq_ignore_ascii_case("FrontSide") {
                     output.push_str(front_side);
+                } else if let Some(field) = key.strip_prefix("cloze:") {
+                    if let Some(value) = find_field(fields, field) {
+                        output.push_str(value);
+                    }
                 } else if let Some(value) = find_field(fields, key) {
                     output.push_str(value);
                 }
@@ -301,6 +306,16 @@ pub fn strip_tags(input: &str) -> String {
             if let Some(end) = rest.find(closing) {
                 cursor =
                     cursor.saturating_add(end).saturating_add(closing.len());
+            } else {
+                break;
+            }
+            continue;
+        }
+        if rest.starts_with("<button") {
+            if let Some(end) = rest.find("</button>") {
+                cursor = cursor
+                    .saturating_add(end)
+                    .saturating_add("</button>".len());
             } else {
                 break;
             }
@@ -376,18 +391,14 @@ fn decode_entity(entity: &str) -> Option<String> {
 }
 
 fn normalize_newlines(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut previous_newline = false;
-    for character in text.chars() {
-        if character == '\n' {
-            if !previous_newline {
-                result.push(character);
-            }
-            previous_newline = true;
-        } else {
-            result.push(character);
-            previous_newline = false;
-        }
+    let mut lines = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty());
+    let mut result = lines.next().unwrap_or("").to_owned();
+    for line in lines {
+        result.push('\n');
+        result.push_str(line);
     }
     result.trim().to_owned()
 }
@@ -572,6 +583,7 @@ pub fn occlusion_overlays(
                 .get("points")
                 .map(|value| parse_points(value, width, height))
                 .unwrap_or_default();
+            let text = mask.properties.get("text").cloned();
             let occlude_inactive =
                 mask.properties.get("oi").is_some_and(|v| v == "1");
             MaskOverlay {
@@ -582,6 +594,7 @@ pub fn occlusion_overlays(
                 width,
                 height,
                 points,
+                text,
                 occlude_inactive,
                 active,
             }
@@ -614,16 +627,22 @@ fn parse_ratio(value: Option<&String>, fallback: f32) -> f32 {
     };
     ratio.clamp(0.0, 1.0)
 }
-
 fn parse_points(text: &str, width: f32, height: f32) -> Vec<(f32, f32)> {
+    let scale = |value: f32, size: f32| {
+        if value > 1.0 && size > 0.0 && size <= 1.0 {
+            value / 100.0
+        } else {
+            value
+        }
+    };
     text.split_whitespace()
         .filter_map(|pair| {
             let (x, y) = pair.split_once(',')?;
             let x = x.parse::<f32>().ok()?;
             let y = y.parse::<f32>().ok()?;
             Some((
-                (x / width.max(1.0)).clamp(0.0, 1.0),
-                (y / height.max(1.0)).clamp(0.0, 1.0),
+                scale(x, width).clamp(0.0, 1.0),
+                scale(y, height).clamp(0.0, 1.0),
             ))
         })
         .collect()
@@ -690,13 +709,23 @@ pub fn render_card(
         Side::Question => template.question_format.as_str(),
         Side::Answer => template.answer_format.as_str(),
     };
+    let source = if model.is_image_occlusion() {
+        source.replace("{{cloze:Occlusion}}", "")
+    } else {
+        source.to_owned()
+    };
     let fields = FieldValues::new(&model.fields, &note.fields);
     let front = if include_front {
-        render_template(&template.question_format, fields, "")
+        let question = if model.is_image_occlusion() {
+            template.question_format.replace("{{cloze:Occlusion}}", "")
+        } else {
+            template.question_format.clone()
+        };
+        render_template(&question, fields, "")
     } else {
         String::new()
     };
-    let rendered = render_template(source, fields, &front);
+    let rendered = render_template(&source, fields, &front);
     let text = strip_tags(&rendered);
     let clozes = if model.is_cloze() {
         cloze_segments(&text, ordinal, side)
@@ -766,6 +795,10 @@ pub fn occlusion_layer(
         } else {
             colors.crust
         };
+        if mask.shape == ShapeKind::Polygon && !mask.points.is_empty() {
+            layer = layer.child(polygon_overlay(mask, colors, answer));
+            continue;
+        }
         let mut shape = div()
             .absolute()
             .left(relative(mask.left))
@@ -779,15 +812,76 @@ pub fn occlusion_layer(
             shape = shape.rounded_full();
         } else if mask.shape == ShapeKind::Text {
             shape = shape.rounded(px(4.));
+            if answer && let Some(text) = mask.text.as_ref() {
+                shape = shape
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(14.))
+                    .text_color(colors.text)
+                    .child(text.clone());
+            }
         } else {
             shape = shape.rounded(px(3.));
-        }
-        if mask.shape == ShapeKind::Polygon && !mask.points.is_empty() {
-            shape = shape.border_dashed();
         }
         layer = layer.child(shape);
     }
     layer
+}
+
+fn polygon_overlay(
+    mask: &MaskOverlay,
+    colors: Palette,
+    answer: bool,
+) -> AnyElement {
+    let points = mask.points.clone();
+    let fill = if answer {
+        alpha(colors.red, 0.10)
+    } else {
+        alpha(colors.red, 0.72)
+    };
+    let border = if answer {
+        alpha(colors.red, 0.7)
+    } else {
+        colors.crust
+    };
+    canvas(
+        move |bounds, _, _| {
+            let mut fill_path = PathBuilder::fill();
+            let mut stroke_path = PathBuilder::stroke(px(1.));
+            let Some(first) = points.first() else {
+                return (None, None);
+            };
+            let to_point = |(x, y): (f32, f32)| {
+                point(
+                    px(f32::from(bounds.left())
+                        + x * f32::from(bounds.size.width)),
+                    px(f32::from(bounds.top())
+                        + y * f32::from(bounds.size.height)),
+                )
+            };
+            fill_path.move_to(to_point(*first));
+            stroke_path.move_to(to_point(*first));
+            for point in points.iter().skip(1) {
+                fill_path.line_to(to_point(*point));
+                stroke_path.line_to(to_point(*point));
+            }
+            fill_path.close();
+            stroke_path.close();
+            (fill_path.build().ok(), stroke_path.build().ok())
+        },
+        move |_, (fill_path, stroke_path), window, _| {
+            if let Some(path) = fill_path {
+                window.paint_path(path, fill);
+            }
+            if let Some(path) = stroke_path {
+                window.paint_path(path, border);
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
 }
 
 /// Bounded LRU image cache backed by GPUI's async image decoder.
@@ -937,6 +1031,7 @@ pub fn media_column(
     refs: &[MediaRef],
     media_dir: &std::path::Path,
     colors: Palette,
+    height: f32,
 ) -> Option<Div> {
     if refs.is_empty() {
         return None;
@@ -946,7 +1041,7 @@ pub fn media_column(
         column = column.child(match media.kind {
             MediaKind::Image => {
                 let path = media_path(media_dir, &media.name);
-                media_image(path, colors, 180.)
+                media_image(path, colors, height)
             }
             MediaKind::Sound => div()
                 .flex()
@@ -989,9 +1084,10 @@ pub fn preview_card(
         flags: 0,
         data: String::new(),
     };
+    let ordinal = model.card_ordinals(fields).first().copied().unwrap_or(0);
     let request = match side {
-        Side::Question => CardRequest::question(0),
-        Side::Answer => CardRequest::answer_only(0),
+        Side::Question => CardRequest::question(ordinal),
+        Side::Answer => CardRequest::answer_only(ordinal),
     };
     render_card(model, &note, request)
         .text
@@ -1004,13 +1100,12 @@ pub fn preview_card(
 
 #[cfg(test)]
 mod tests {
-    use ranki_model::{CardTemplate, NoteKind};
-
     use super::{
         CardRequest, ClozeKind, MediaKind, Side, TemplateNode, cloze_text,
         media_refs, occlusion_overlays, parse_template, preview_card,
         render_card, strip_tags,
     };
+    use ranki_model::{CardTemplate, Note, NoteKind};
 
     fn model(
         fields: &[&str],
@@ -1233,6 +1328,64 @@ mod tests {
             "Q A"
         );
     }
+    #[test]
+    fn stock_cloze_renders_through_the_full_template() {
+        let mut form = ranki_model::StockModelKind::Cloze.definition();
+        form.id = 1;
+        let note = note(&["The {{c1::capital}} is large.", "A detail"]);
+        let question = render_card(&form, &note, CardRequest::question(0));
+        let answer = render_card(&form, &note, CardRequest::answer_only(0));
+        assert_eq!(question.text, "The [...] is large.");
+        assert_eq!(answer.text, "The capital is large.\nA detail");
+    }
+    #[test]
+    fn preview_uses_the_first_real_cloze_ordinal() {
+        let mut form = ranki_model::StockModelKind::Cloze.definition();
+        form.id = 1;
+        let fields =
+            vec![String::from("The {{c2::answer}} is hidden."), String::new()];
+        assert_eq!(
+            preview_card(&form, &fields, Side::Question),
+            "The [...] is hidden."
+        );
+        assert_eq!(
+            preview_card(&form, &fields, Side::Answer),
+            "The answer is hidden."
+        );
+    }
+
+    #[test]
+    fn stock_image_occlusion_keeps_markers_out_of_card_text() {
+        let mut form = ranki_model::StockModelKind::ImageOcclusion.definition();
+        form.id = 1;
+        let fields = crate::occlusion::image_occlusion_fields(
+            "Map",
+            "Country",
+            "",
+            "map.png",
+            &[crate::occlusion::default_mask(0)],
+        );
+        let note = Note {
+            id: 1,
+            guid: String::new(),
+            model_id: form.id,
+            modified: 0,
+            usn: 0,
+            tags: Vec::new(),
+            fields,
+            sort_field: String::new(),
+            checksum: 0,
+            flags: 0,
+            data: String::new(),
+        };
+        let question = render_card(&form, &note, CardRequest::question(0));
+        let answer = render_card(&form, &note, CardRequest::answer_only(0));
+        assert_eq!(question.text, "Map");
+        assert_eq!(answer.text, "Map\nCountry");
+        assert_eq!(question.media[0].name, "map.png");
+        assert_eq!(question.masks.len(), 1);
+        assert!(question.masks[0].active);
+    }
 
     #[test]
     fn percent_suffix_sets_occlusion_units() {
@@ -1246,6 +1399,27 @@ mod tests {
         assert!((mask[0].top - 0.5).abs() < 1e-6);
         assert!((mask[0].width - 1.0).abs() < 1e-6);
         assert!((mask[0].height - 0.5).abs() < 1e-6);
+    }
+    #[test]
+    fn polygon_points_stay_in_image_coordinates() {
+        let mask = occlusion_overlays(
+            "{{c1::image-occlusion:polygon:left=.1:top=.2:width=.6:height=.5:points=0.1,0.2 0.7,0.2 0.4,0.8}}",
+            0,
+            Side::Question,
+        );
+        assert_eq!(mask.len(), 1);
+        assert_eq!(mask[0].points, [(0.1, 0.2), (0.7, 0.2), (0.4, 0.8)]);
+    }
+
+    #[test]
+    fn text_occlusion_keeps_its_label_for_the_answer() {
+        let mask = occlusion_overlays(
+            "{{c1::image-occlusion:text:left=.1:top=.2:width=.3:height=.1:text=Paris}}",
+            0,
+            Side::Answer,
+        );
+        assert_eq!(mask.len(), 1);
+        assert_eq!(mask[0].text.as_deref(), Some("Paris"));
     }
 
     #[test]

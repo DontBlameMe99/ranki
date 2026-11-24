@@ -203,6 +203,58 @@ impl Root {
     pub(crate) fn render_overlay(&self, cx: &Context<Self>) -> Vec<AnyElement> {
         let colors = self.colors();
         let mut layers: Vec<AnyElement> = Vec::new();
+        if self.external_change {
+            let refresh = self.action_click(UiAction::Reload);
+            layers.push(
+                div()
+                    .absolute()
+                    .top(px(16.))
+                    .left(px(crate::theme::NAV_WIDTH + 32.))
+                    .right(px(32.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(16.))
+                    .px(px(16.))
+                    .py(px(12.))
+                    .rounded(px(14.))
+                    .bg(crate::theme::alpha(colors.red, 0.16))
+                    .border_1()
+                    .border_color(crate::theme::alpha(colors.red, 0.5))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(icon("icon-bell", 18., colors.red))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(colors.text)
+                                    .child(
+                                        "Collection changed outside Ranki. Refresh before reviewing.",
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("external-refresh")
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .h(px(36.))
+                            .px(px(12.))
+                            .rounded(px(10.))
+                            .bg(colors.red)
+                            .text_color(crate::theme::accent_ink(self.theme()))
+                            .cursor_pointer()
+                            .on_click(refresh)
+                            .child("Refresh")
+                            .child(keycap("F5", colors, true)),
+                    )
+                    .into_any_element(),
+            );
+        }
         if let Some(toast) = self.live_toast() {
             let (hue, icon_name, prefix) = match toast.kind {
                 crate::app::ToastKind::Success => {
@@ -351,6 +403,13 @@ impl Root {
                     "Change scheduler?",
                     format!("Use {} for this session only.", kind.label()),
                     "Change scheduler",
+                ),
+                Confirmation::Reload => (
+                    "Reload collection?",
+                    String::from(
+                        "This ends the current review session and loads the latest collection.",
+                    ),
+                    "Reload",
                 ),
             };
             let cancel = self.action_click(UiAction::CancelDialog);

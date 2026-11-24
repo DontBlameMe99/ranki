@@ -259,7 +259,11 @@ pub fn finish(
         time_ms: 0,
         kind: outcome.kind,
     };
-    ReviewDecision { card, revlog }
+    ReviewDecision {
+        card,
+        revlog,
+        expected_modified: ctx.card.modified,
+    }
 }
 
 /// Keeps an unschedulable card unchanged and records a manual log entry.
@@ -276,7 +280,11 @@ pub fn unchanged(ctx: &ReviewContext<'_>) -> ReviewDecision {
         time_ms: 0,
         kind: RevLogKind::Manual,
     };
-    ReviewDecision { card, revlog }
+    ReviewDecision {
+        card,
+        revlog,
+        expected_modified: ctx.card.modified,
+    }
 }
 
 pub const fn factor_or_default(factor: u32) -> u32 {

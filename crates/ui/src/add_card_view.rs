@@ -40,10 +40,16 @@ impl Root {
         let errors = self.add.errors.clone();
         let preview_side = self.add.preview_side;
         let model = resolve_model(&models, self.add.model_index);
-        let field_values = fields
-            .iter()
-            .map(|field| field.read(cx).text())
-            .collect::<Vec<_>>();
+        let occlusion_mode =
+            model.is_some_and(ranki_model::NoteModel::is_image_occlusion);
+        let field_values = if occlusion_mode {
+            self.occlusion_fields(cx)
+        } else {
+            fields
+                .iter()
+                .map(|field| field.read(cx).text())
+                .collect::<Vec<_>>()
+        };
         let has_content = has_preview_content(&field_values);
         let preview_text = model.map_or_else(
             || String::from("Choose a note type"),
@@ -66,7 +72,7 @@ impl Root {
                         .get(index)
                         .map(|value| value.trim())
                         .filter(|value| !value.is_empty())
-                        .map(str::to_owned)
+                        .map(ToOwned::to_owned)
                 })
         });
         let save = self.action_click(UiAction::SaveNote);
@@ -155,12 +161,19 @@ impl Root {
                             )
                             .child(
                                 div()
+                                    .id("add-deck-picker")
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(
+                                        |this, _: &ClickEvent, window, cx| {
+                                            this.toggle_add_deck_picker(window, cx);
+                                        },
+                                    ))
                                     .flex()
                                     .items_center()
                                     .gap(px(6.))
                                     .text_size(px(14.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(decks.get(self.add.deck_index).map_or_else(
+                                    .child(self.add_deck_index().and_then(|index| decks.get(index)).map_or_else(
                                         || String::from("Choose a deck"),
                                         |deck| deck.name.replace("::", " › "),
                                     ))
@@ -221,6 +234,9 @@ impl Root {
                             ),
                     ),
             );
+        if self.add.deck_picker {
+            column = column.child(self.render_deck_picker(colors, cx));
+        }
 
         if let Some(error) = errors.get("deck") {
             column = column.child(validation(error, colors));
@@ -412,7 +428,7 @@ impl Root {
                     )),
             );
         }
-        let preview = preview.child(preview_header).child(if has_content {
+        let mut preview = preview.child(preview_header).child(if has_content {
             div()
                 .flex_1()
                 .flex()
@@ -472,6 +488,14 @@ impl Root {
                 )
                 .into_any_element()
         });
+        if let Some(name) = self.add.occlusion.image.clone() {
+            preview = preview.child(
+                img(self.options.media_dir.join(name))
+                    .h(px(120.))
+                    .w_full()
+                    .object_fit(gpui::ObjectFit::Contain),
+            );
+        }
 
         let history = added_history(&added, colors);
 
@@ -866,6 +890,112 @@ impl Root {
         editor
     }
 }
+impl Root {
+    fn render_deck_picker(
+        &mut self,
+        colors: crate::theme::Palette,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let query = self.add.deck_filter.read(cx).text();
+        let needle = query.trim().to_lowercase();
+        let filter = self.add.deck_filter.clone();
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .max_h(px(220.))
+            .id("add-deck-list")
+            .overflow_scroll();
+        let mut matches = 0;
+        for (index, deck) in self.decks.iter().enumerate() {
+            if !needle.is_empty() && !deck.name.to_lowercase().contains(&needle)
+            {
+                continue;
+            }
+            matches += 1;
+            let selected = self.add.deck_id == Some(deck.id);
+            let due = self.stats.get(index).map_or(0, |stats| {
+                stats
+                    .new_cards
+                    .saturating_add(stats.learning_cards)
+                    .saturating_add(stats.review_cards)
+            });
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("add-deck-{index}")))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(38.))
+                    .flex_none()
+                    .px(px(12.))
+                    .rounded(px(10.))
+                    .bg(if selected {
+                        alpha(colors.mauve, 0.18)
+                    } else {
+                        colors.base
+                    })
+                    .text_color(if selected {
+                        colors.mauve
+                    } else {
+                        colors.text
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, window, cx| {
+                            this.select_add_deck(index, cx);
+                            window.focus(&this.focus);
+                        },
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(icon("icon-book", 16., colors.subtext))
+                            .child(deck.name.replace("::", " › ")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(colors.subtext)
+                            .child(format!("{due} due")),
+                    ),
+            );
+        }
+        if matches == 0 {
+            list = list.child(
+                div()
+                    .p(px(12.))
+                    .text_size(px(13.))
+                    .text_color(colors.overlay)
+                    .child("No decks match"),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .p(px(12.))
+            .rounded(px(16.))
+            .border_1()
+            .border_color(colors.surface1)
+            .bg(colors.mantle)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .h(px(38.))
+                    .px(px(10.))
+                    .rounded(px(10.))
+                    .bg(colors.base)
+                    .child(icon("icon-search", 15., colors.subtext))
+                    .child(div().flex_1().min_w(px(120.)).child(filter)),
+            )
+            .child(list)
+    }
+}
 
 /// One drawn mask, translucent red with its cloze ordinal.
 #[expect(
@@ -1192,7 +1322,7 @@ pub fn note_type_tabs(
     let order = ["Basic", "Reversed", "Cloze", "Image Occlusion"];
     let mut tabs: Vec<(String, usize)> = Vec::new();
     for (index, model) in models.iter().enumerate() {
-        let label = note_type_name(model).to_owned();
+        let label = note_type_name(model);
         match tabs.iter_mut().find(|(name, _)| *name == label) {
             Some((_, selected))
                 if tab_rank(model) < tab_rank(&models[*selected]) =>
@@ -1220,7 +1350,7 @@ pub fn preferred_model_index(
     let label = note_type_name(models.get(index)?);
     note_type_tabs(models)
         .into_iter()
-        .find(|(tab_label, _)| tab_label == label)
+        .find(|(tab_label, _)| *tab_label == label)
         .map(|(_, tab_index)| tab_index)
 }
 
@@ -1336,6 +1466,28 @@ mod tests {
             super::preferred_model_index(&models, tabs[0].1),
             Some(tabs[0].1)
         );
+    }
+
+    #[test]
+    fn custom_note_types_stay_distinct() {
+        let first = ranki_model::NoteModel {
+            id: 10,
+            name: String::from("Vocabulary"),
+            ..ranki_model::StockModelKind::Basic.definition()
+        };
+        let second = ranki_model::NoteModel {
+            id: 11,
+            name: String::from("Basic"),
+            ..ranki_model::StockModelKind::Basic.definition()
+        };
+        let tabs = super::note_type_tabs(&[first, second]);
+        assert_eq!(tabs.len(), 2);
+        let labels = tabs
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"Vocabulary"));
+        assert!(labels.contains(&"Basic"));
     }
 
     #[test]

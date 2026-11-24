@@ -170,6 +170,7 @@ mod tests {
         let decisions = (0..count)
             .map(|index| ReviewDecision {
                 card: card.clone(),
+                expected_modified: card.modified,
                 revlog: RevLog {
                     id: i64::try_from(index)
                         .unwrap_or(0)

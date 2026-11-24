@@ -526,6 +526,7 @@ impl Root {
                 &row.front_media,
                 &self.options.media_dir,
                 colors,
+                180.0,
             ))
             .child(div().h(px(1.)).bg(colors.surface0))
             .child(
@@ -540,6 +541,7 @@ impl Root {
                 &row.back_media,
                 &self.options.media_dir,
                 colors,
+                180.0,
             ));
         if !row.note.tags.is_empty() {
             detail =
