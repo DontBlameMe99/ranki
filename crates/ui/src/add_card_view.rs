@@ -123,14 +123,12 @@ impl Root {
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
                     .child(
                         div()
                             .text_size(px(28.))
                             .font_weight(gpui::FontWeight::BOLD)
                             .child("New card"),
                     )
-                    .child(stepper(colors)),
             )
             .child(div().h(px(20.)))
             .child(
@@ -1133,91 +1131,6 @@ fn validation(message: &str, colors: crate::theme::Palette) -> gpui::Div {
         .text_size(px(13.))
         .text_color(colors.red)
         .child(message.to_owned())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StepState {
-    Done,
-    Current,
-    Future,
-}
-
-fn stepper(colors: crate::theme::Palette) -> gpui::Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .child(step("Setup", StepState::Done, colors))
-        .child(connector(true, colors))
-        .child(step("Content", StepState::Current, colors))
-        .child(connector(false, colors))
-        .child(step("Finish", StepState::Future, colors))
-}
-
-fn step(
-    label: &str,
-    state: StepState,
-    colors: crate::theme::Palette,
-) -> gpui::Div {
-    let circle: gpui::Div = match state {
-        StepState::Done => div()
-            .w(px(24.))
-            .h(px(24.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .flex_none()
-            .rounded(px(12.))
-            .bg(colors.mauve)
-            .border_2()
-            .border_color(colors.mauve)
-            .child(icon("icon-check", 14., colors.crust)),
-        StepState::Current => div()
-            .w(px(24.))
-            .h(px(24.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .flex_none()
-            .rounded(px(12.))
-            .border_2()
-            .border_color(colors.mauve)
-            .text_size(px(12.))
-            .text_color(colors.mauve)
-            .child(String::from("2")),
-        StepState::Future => div()
-            .w(px(24.))
-            .h(px(24.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .flex_none()
-            .rounded(px(12.))
-            .bg(colors.surface0)
-            .border_2()
-            .border_color(colors.surface0)
-            .text_size(px(12.))
-            .text_color(colors.subtext)
-            .child(String::from("3")),
-    };
-    div().flex().items_center().gap(px(8.)).child(circle).child(
-        div()
-            .text_size(px(13.))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(match state {
-                StepState::Future => colors.subtext,
-                StepState::Done | StepState::Current => colors.text,
-            })
-            .child(label.to_owned()),
-    )
-}
-
-fn connector(done: bool, colors: crate::theme::Palette) -> gpui::Div {
-    div().w(px(24.)).h(px(1.)).bg(if done {
-        colors.mauve
-    } else {
-        colors.surface1
-    })
 }
 
 #[cfg(test)]
