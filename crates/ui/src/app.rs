@@ -50,6 +50,10 @@ actions!(
         OpenDecks,
         OpenAdd,
         CreateDeck,
+        OpenSettings,
+        UseLightTheme,
+        UseDarkTheme,
+        UseSystemTheme,
         SubmitDeck,
         SaveNote,
         CancelAdd,
@@ -69,6 +73,7 @@ pub enum View {
     Decks,
     Review,
     AddCard,
+    Settings,
 }
 
 /// Review content phase.
@@ -245,6 +250,7 @@ pub struct Root {
     pub(crate) options: Options,
     pub(crate) focus: FocusHandle,
     pub(crate) dialog_focus: FocusHandle,
+    pub(crate) settings_focus: FocusHandle,
     pub(crate) system_dark: bool,
     pub(crate) view: View,
     pub(crate) previous_view: View,
@@ -343,6 +349,7 @@ impl Root {
         let Launch { store, options } = launch;
         let focus = cx.focus_handle();
         let dialog_focus = cx.focus_handle();
+        let settings_focus = cx.focus_handle();
         window.focus(&focus);
         let system_dark = !matches!(
             window.appearance(),
@@ -368,6 +375,7 @@ impl Root {
             options,
             focus,
             dialog_focus,
+            settings_focus,
             system_dark,
             view: View::Decks,
             previous_view: View::Decks,
@@ -418,6 +426,7 @@ impl Root {
         }
         match env::var("RANKI_UI_DEV_VIEW").as_deref() {
             Ok("add") => root.view = View::AddCard,
+            Ok("settings") => root.view = View::Settings,
             Ok("question") => {
                 root.study_all(cx);
                 root.review.phase = Phase::Question;
@@ -427,6 +436,17 @@ impl Root {
                 root.review.phase = Phase::Answer;
             }
             _ => {}
+        }
+        if let Ok(theme) = env::var("RANKI_UI_DEV_THEME") {
+            let choice = match theme.as_str() {
+                "light" => Some(ThemeChoice::Light),
+                "dark" => Some(ThemeChoice::Dark),
+                "system" => Some(ThemeChoice::System),
+                _ => None,
+            };
+            if let Some(choice) = choice {
+                root.set_theme(choice, cx);
+            }
         }
         if let Ok(seed) = env::var("RANKI_UI_DEV_OCCLUSION") {
             root.seed_occlusion(&seed, cx);
@@ -568,13 +588,9 @@ impl Root {
     }
 
     pub(crate) fn observe_appearance(
-        &self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.options.theme != ThemeChoice::System {
-            return;
-        }
         cx.observe_window_appearance(window, |this, window, cx| {
             this.system_dark = !matches!(
                 window.appearance(),
@@ -592,6 +608,19 @@ impl Root {
 
     pub(crate) const fn colors(&self) -> Palette {
         theme::palette(self.theme())
+    }
+
+    pub(crate) fn set_theme(
+        &mut self,
+        choice: ThemeChoice,
+        cx: &mut Context<Self>,
+    ) {
+        if self.options.theme == choice {
+            return;
+        }
+        self.options.theme = choice;
+        self.refresh_field_colors(cx);
+        cx.notify();
     }
 
     pub(crate) fn now() -> i64 {
@@ -1540,6 +1569,7 @@ impl Root {
             UiAction::OpenDecks => {
                 self.view = next_view(self.view, View::Decks);
                 self.refresh_stats();
+                window.focus(&self.focus);
                 cx.notify();
             }
             UiAction::OpenAdd => {
@@ -1548,7 +1578,19 @@ impl Root {
                 }
                 self.view = next_view(self.view, View::AddCard);
                 self.add.errors.clear();
+                window.focus(&self.focus);
                 cx.notify();
+            }
+            UiAction::OpenSettings => {
+                self.view = next_view(self.view, View::Settings);
+                window.focus(&self.settings_focus);
+                cx.notify();
+            }
+            UiAction::SetTheme(choice) => {
+                if self.view == View::Settings {
+                    window.focus(&self.settings_focus);
+                }
+                self.set_theme(choice, cx);
             }
             UiAction::CreateDeck => {
                 self.view = View::Decks;
@@ -1612,6 +1654,8 @@ pub enum UiAction {
     EndSession,
     OpenDecks,
     OpenAdd,
+    OpenSettings,
+    SetTheme(ThemeChoice),
     CreateDeck,
     SubmitDeck,
     SaveNote,
@@ -1672,6 +1716,26 @@ impl From<&EndSession> for UiAction {
 impl From<&OpenDecks> for UiAction {
     fn from(_: &OpenDecks) -> Self {
         Self::OpenDecks
+    }
+}
+impl From<&OpenSettings> for UiAction {
+    fn from(_: &OpenSettings) -> Self {
+        Self::OpenSettings
+    }
+}
+impl From<&UseLightTheme> for UiAction {
+    fn from(_: &UseLightTheme) -> Self {
+        Self::SetTheme(ThemeChoice::Light)
+    }
+}
+impl From<&UseDarkTheme> for UiAction {
+    fn from(_: &UseDarkTheme) -> Self {
+        Self::SetTheme(ThemeChoice::Dark)
+    }
+}
+impl From<&UseSystemTheme> for UiAction {
+    fn from(_: &UseSystemTheme) -> Self {
+        Self::SetTheme(ThemeChoice::System)
     }
 }
 impl From<&OpenAdd> for UiAction {
@@ -1759,6 +1823,18 @@ pub fn dispatch_app_action(
         }
         UiAction::OpenDecks => window.dispatch_action(Box::new(OpenDecks), cx),
         UiAction::OpenAdd => window.dispatch_action(Box::new(OpenAdd), cx),
+        UiAction::OpenSettings => {
+            window.dispatch_action(Box::new(OpenSettings), cx);
+        }
+        UiAction::SetTheme(ThemeChoice::Light) => {
+            window.dispatch_action(Box::new(UseLightTheme), cx);
+        }
+        UiAction::SetTheme(ThemeChoice::Dark) => {
+            window.dispatch_action(Box::new(UseDarkTheme), cx);
+        }
+        UiAction::SetTheme(ThemeChoice::System) => {
+            window.dispatch_action(Box::new(UseSystemTheme), cx);
+        }
         UiAction::CreateDeck => {
             window.dispatch_action(Box::new(CreateDeck), cx);
         }
@@ -1801,6 +1877,7 @@ impl Render for Root {
             View::AddCard => {
                 self.render_add_card(window, cx).into_any_element()
             }
+            View::Settings => self.render_settings().into_any_element(),
         };
         div()
             .id("root")
@@ -1844,6 +1921,26 @@ impl Render for Root {
             .on_action(cx.listener(|this, action: &OpenAdd, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
+            .on_action(cx.listener(
+                |this, action: &OpenSettings, window, cx| {
+                    this.dispatch(UiAction::from(action), window, cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |this, action: &UseLightTheme, window, cx| {
+                    this.dispatch(UiAction::from(action), window, cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |this, action: &UseDarkTheme, window, cx| {
+                    this.dispatch(UiAction::from(action), window, cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |this, action: &UseSystemTheme, window, cx| {
+                    this.dispatch(UiAction::from(action), window, cx);
+                },
+            ))
             .on_action(cx.listener(|this, action: &CreateDeck, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
@@ -1880,7 +1977,7 @@ impl Render for Root {
             .on_action(cx.listener(|this, action: &NextDeck, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
-            .when(view != View::Review, |this| this.child(self.render_nav(cx)))
+            .when(view != View::Review, |this| this.child(self.render_nav()))
             .child(div().flex_1().overflow_hidden().child(main))
             .children(self.render_overlay(cx))
     }
@@ -2543,8 +2640,12 @@ fn clock_label() -> String {
     format!("{hours:02}:{minutes:02}")
 }
 
-/// Study shortcuts stay out of text input and modal dialogs.
-const STUDY_CONTEXT: &str = "ranki && !ranki_input && !ranki_dialog";
+/// Study shortcuts stay out of text input, dialogs, and the settings screen.
+const STUDY_CONTEXT: &str =
+    "ranki && !ranki_input && !ranki_dialog && !ranki_settings";
+/// Settings shortcuts only apply while the settings screen is mounted.
+const SETTINGS_CONTEXT: &str =
+    "ranki > ranki_settings && !ranki_input && !ranki_dialog";
 
 #[must_use]
 pub fn key_bindings() -> Vec<KeyBinding> {
@@ -2559,11 +2660,17 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("s", StudyAgain, Some(STUDY_CONTEXT)),
         KeyBinding::new("d", OpenDecks, Some(STUDY_CONTEXT)),
         KeyBinding::new("a", OpenAdd, Some(STUDY_CONTEXT)),
+        KeyBinding::new(",", OpenSettings, Some(STUDY_CONTEXT)),
         KeyBinding::new("?", ToggleHelp, Some(STUDY_CONTEXT)),
         KeyBinding::new("shift-?", ToggleHelp, Some(STUDY_CONTEXT)),
         KeyBinding::new("f1", ToggleHelp, Some(STUDY_CONTEXT)),
         KeyBinding::new("t", ToggleScheduler, Some(STUDY_CONTEXT)),
         KeyBinding::new("n", NextDeck, Some(STUDY_CONTEXT)),
+        KeyBinding::new("d", OpenDecks, Some(SETTINGS_CONTEXT)),
+        KeyBinding::new("a", OpenAdd, Some(SETTINGS_CONTEXT)),
+        KeyBinding::new("1", UseLightTheme, Some(SETTINGS_CONTEXT)),
+        KeyBinding::new("2", UseDarkTheme, Some(SETTINGS_CONTEXT)),
+        KeyBinding::new("3", UseSystemTheme, Some(SETTINGS_CONTEXT)),
         KeyBinding::new("esc", EndSession, Some("ranki")),
         KeyBinding::new("cmd-enter", SaveNote, Some("ranki")),
         KeyBinding::new("ctrl-enter", SaveNote, Some("ranki")),
@@ -2748,6 +2855,25 @@ mod tests {
         let (outside, _) = keymap
             .bindings_for_input(std::slice::from_ref(&keystroke), &elsewhere);
         assert_eq!(outside.len(), 1);
+    }
+
+    #[test]
+    fn theme_bindings_only_live_in_settings() {
+        let mut keymap = gpui::Keymap::default();
+        keymap.add_bindings(super::key_bindings());
+        let settings = [
+            gpui::KeyContext::parse("ranki").expect("ranki context"),
+            gpui::KeyContext::parse("ranki_settings")
+                .expect("settings context"),
+        ];
+        let decks = [gpui::KeyContext::parse("ranki").expect("ranki context")];
+        let one = gpui::Keystroke::parse("1").expect("keystroke");
+        let (in_settings, _) =
+            keymap.bindings_for_input(std::slice::from_ref(&one), &settings);
+        let (in_decks, _) =
+            keymap.bindings_for_input(std::slice::from_ref(&one), &decks);
+        assert_eq!(in_settings.len(), 1);
+        assert_eq!(in_decks.len(), 1);
     }
 
     #[test]
