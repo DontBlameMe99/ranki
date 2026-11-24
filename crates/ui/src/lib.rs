@@ -35,6 +35,7 @@ mod decks_view;
 mod nav;
 pub mod occlusion;
 mod review_view;
+mod settings_view;
 mod text_field;
 mod theme;
 
@@ -71,7 +72,7 @@ pub fn run(store: Box<dyn Store>, options: Options) {
                             window,
                             cx,
                         );
-                        root.observe_appearance(window, cx);
+                        app::Root::observe_appearance(window, cx);
                         root
                     })
                 },

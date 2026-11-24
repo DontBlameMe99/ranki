@@ -13,10 +13,7 @@ use crate::{
 };
 
 impl Root {
-    pub(crate) fn render_nav(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(crate) fn render_nav(&mut self) -> impl IntoElement {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let active = self.view;
@@ -59,8 +56,8 @@ impl Root {
                    icon_name: &'static str,
                    key: &'static str,
                    item: View,
-                   enabled: bool,
-                   cx: &mut Context<Self>| {
+                   action: UiAction,
+                   enabled: bool| {
             let selected = enabled && active == item;
             let ink = if selected {
                 colors.mauve
@@ -89,11 +86,7 @@ impl Root {
                     .hover(move |style| {
                         style.bg(crate::theme::alpha(colors.mauve, 0.12))
                     })
-                    .on_click(cx.listener(
-                        |this, _: &ClickEvent, window, cx| {
-                            this.dispatch(UiAction::OpenDecks, window, cx);
-                        },
-                    ));
+                    .on_click(self.action_click(action));
             }
             row.child(icon(icon_name, 18., ink))
                 .child(label.to_owned())
@@ -156,16 +149,37 @@ impl Root {
             )
             .child(add)
             .child(div().h(px(10.)))
-            .child(nav("Decks", "icon-grid", "D", View::Decks, true, cx))
-            .child(nav("Browse", "icon-book", "B", View::Decks, false, cx))
-            .child(nav("Statistics", "icon-chart", "T", View::Decks, false, cx))
+            .child(nav(
+                "Decks",
+                "icon-grid",
+                "D",
+                View::Decks,
+                UiAction::OpenDecks,
+                true,
+            ))
+            .child(nav(
+                "Browse",
+                "icon-book",
+                "B",
+                View::Decks,
+                UiAction::OpenDecks,
+                false,
+            ))
+            .child(nav(
+                "Statistics",
+                "icon-chart",
+                "T",
+                View::Decks,
+                UiAction::OpenDecks,
+                false,
+            ))
             .child(nav(
                 "Settings",
                 "icon-settings",
                 ",",
-                View::Decks,
-                false,
-                cx,
+                View::Settings,
+                UiAction::OpenSettings,
+                true,
             ))
             .child(div().flex_1())
             .child(
