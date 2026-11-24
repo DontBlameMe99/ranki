@@ -481,10 +481,7 @@ impl Root {
             let viewport = window.viewport_size();
             root.deck_menu = root.decks.first().map(|deck| DeckMenu {
                 id: deck.id,
-                anchor: point(
-                    viewport.width - px(79.),
-                    viewport.height - px(283.),
-                ),
+                anchor: point(viewport.width - px(79.), px(423.)),
             });
         }
         if let Ok(seed) = env::var("RANKI_UI_DEV_OCCLUSION") {
