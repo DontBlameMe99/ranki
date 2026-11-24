@@ -506,7 +506,8 @@ impl Root {
                 .gap(px(18.))
                 .child(left)
                 .child(tags_group)
-                .child(history);
+                .child(history)
+                .child(preview);
             column = column.child(form);
         } else if side_by_side {
             form = form

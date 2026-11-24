@@ -798,6 +798,11 @@ impl Root {
             .iter()
             .map(|field| field.read(cx).text())
             .collect::<Vec<_>>();
+        let previous_fields = self
+            .models
+            .get(self.add.model_index)
+            .map(|model| model.fields.clone())
+            .unwrap_or_default();
         match self.store.decks() {
             Ok(decks) => self.decks = decks,
             Err(error) => {
@@ -851,13 +856,28 @@ impl Root {
         if self.add.deck_id.is_some() && self.add_deck_index().is_none() {
             self.add.deck_id = selected_id;
         }
+        if self.add.deck_id.is_none() && !self.decks.is_empty() {
+            self.add.deck_id =
+                selected_id.or_else(|| self.decks.first().map(|deck| deck.id));
+        }
         self.reset_fields(cx);
-        if let Some(name) = chosen.as_deref()
-            && model_index(&self.models, name).is_some()
-            && draft_fields.len() == self.add.fields.len()
-        {
-            for (field, value) in self.add.fields.iter().zip(draft_fields) {
-                field.update(cx, |field, cx| field.seed(value, cx));
+        let model_fields = self
+            .models
+            .get(self.add.model_index)
+            .map(|model| model.fields.clone())
+            .unwrap_or_default();
+        for (index, field) in self.add.fields.iter().enumerate() {
+            let Some(name) = model_fields.get(index) else {
+                continue;
+            };
+            let Some(old_index) = previous_fields
+                .iter()
+                .position(|old| old.eq_ignore_ascii_case(name))
+            else {
+                continue;
+            };
+            if let Some(value) = draft_fields.get(old_index) {
+                field.update(cx, |field, cx| field.seed(value.clone(), cx));
             }
         }
         cx.notify();
@@ -865,6 +885,8 @@ impl Root {
 
     /// Recomputes due counts, the forecast, and deck rows.
     fn refresh_stats(&mut self) {
+        self.stats = vec![ranki_model::DeckStats::default(); self.decks.len()];
+        self.rebuild_deck_rows();
         let now = Self::now();
         self.stats = match self.store.deck_stats(now) {
             Ok(stats) => {

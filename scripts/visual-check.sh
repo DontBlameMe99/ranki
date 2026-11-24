@@ -44,6 +44,7 @@ EOF
 
 nix_packages=(nixpkgs#sway nixpkgs#wtype nixpkgs#grim nixpkgs#mesa)
 
+nix develop --command nix shell "${nix_packages[@]}" --command true
 terminate_group() {
   local pid="$1"
   kill -TERM -- "-$pid" 2>/dev/null || true
@@ -54,6 +55,7 @@ terminate_group() {
   kill -KILL -- "-$pid" 2>/dev/null || true
 }
 
+active_app_pid=''
 setsid env XDG_RUNTIME_DIR="$runtime" \
   WLR_BACKENDS=headless \
   WLR_RENDERER=gles2 \
@@ -63,6 +65,9 @@ setsid env XDG_RUNTIME_DIR="$runtime" \
 sway_pid=$!
 
 cleanup() {
+  if [[ -n "$active_app_pid" ]]; then
+    terminate_group "$active_app_pid"
+  fi
   terminate_group "$sway_pid"
   rm -rf "$runtime"
 }
@@ -120,12 +125,21 @@ start_ranki() {
     "$VISUAL_BIN" "$@" >"$VISUAL_DIR/app.log" 2>&1 &
   echo $! > "$VISUAL_DIR/app.pid"
   echo "ranki pid $!"
+  ready=0
   for _ in {1..60}; do
     if hidden swaymsg -t get_tree 2>/dev/null | grep -q '"app_id": "ranki"'; then
+      ready=1
+      break
+    fi
+    if [[ -f "$VISUAL_DIR/app.pid" ]] && ! kill -0 "$(cat "$VISUAL_DIR/app.pid")" 2>/dev/null; then
       break
     fi
     sleep 0.25
   done
+  if [[ "$ready" -ne 1 ]]; then
+    cat "$VISUAL_DIR/app.log" >&2
+    return 1
+  fi
   sleep 0.3
 }
 
@@ -154,7 +168,7 @@ key() {
 }
 
 type_text() {
-  hidden wtype "$@"
+  hidden wtype -- "$@"
 }
 
 
@@ -191,16 +205,24 @@ capture() {
     XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$display" \
     "$bin" gui >"$dir/$name.log" 2>&1 &
   app_pid=$!
+  active_app_pid=$app_pid
+  ready=0
   for _ in {1..60}; do
     if hidden swaymsg -t get_tree 2>/dev/null | grep -q '"app_id": "ranki"'; then
+      ready=1
       break
     fi
     sleep 0.25
   done
+  if [[ "$ready" -ne 1 ]]; then
+    cat "$dir/$name.log" >&2
+    return 1
+  fi
   sleep 0.3
   hidden grim "$dir/$name.png"
   terminate_group "$app_pid"
   wait "$app_pid" 2>/dev/null || true
+  active_app_pid=''
 }
 
 capture decks

@@ -263,6 +263,7 @@ pub fn finish(
         card,
         revlog,
         expected_modified: ctx.card.modified,
+        expected_usn: ctx.card.usn,
     }
 }
 
@@ -284,6 +285,7 @@ pub fn unchanged(ctx: &ReviewContext<'_>) -> ReviewDecision {
         card,
         revlog,
         expected_modified: ctx.card.modified,
+        expected_usn: ctx.card.usn,
     }
 }
 

@@ -171,6 +171,7 @@ mod tests {
             .map(|index| ReviewDecision {
                 card: card.clone(),
                 expected_modified: card.modified,
+                expected_usn: card.usn,
                 revlog: RevLog {
                     id: i64::try_from(index)
                         .unwrap_or(0)

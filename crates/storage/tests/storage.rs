@@ -541,6 +541,7 @@ fn apply_review_updates_card_log_and_collection_metadata() {
     let decision = ReviewDecision {
         card: changed,
         expected_modified: card.modified,
+        expected_usn: card.usn,
         revlog: RevLog {
             id: 9_000,
             card_id: card.id,
@@ -648,6 +649,32 @@ fn stale_review_writes_are_rejected() {
         store.review_history().expect("history"),
         [] as [ranki_model::RevLog; 0]
     );
+}
+
+#[test]
+fn second_review_with_the_same_stamp_is_rejected() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(&["race", "answer"], &[]))
+        .expect("add");
+    let now = now_secs();
+    let card = store
+        .due_cards(None, 1, now)
+        .expect("due")
+        .pop()
+        .expect("card");
+    let scheduler = FsrsScheduler::default();
+    let first = scheduler.schedule(
+        &card,
+        Rating::Good,
+        now,
+        store.collection_created().expect("created"),
+    );
+    let second = first.clone();
+    store.apply_review(&first).expect("first write");
+    assert!(store.apply_review(&second).is_err());
+    assert_eq!(store.review_history().expect("history").len(), 1);
 }
 
 #[test]
@@ -1020,6 +1047,7 @@ fn remove_deck_deletes_subtree_cards_notes_revlog_and_writes_graves() {
     let decision = ReviewDecision {
         card: card.clone(),
         expected_modified: card.modified,
+        expected_usn: card.usn,
         revlog: RevLog {
             id: log_id,
             card_id,
@@ -1119,6 +1147,7 @@ fn remove_deck_keeps_notes_that_still_have_cards() {
     let decision = ReviewDecision {
         card: moved.clone(),
         expected_modified: moved.modified,
+        expected_usn: moved.usn,
         revlog: RevLog {
             id: 9_003_i64,
             card_id: cards[1],
@@ -1283,6 +1312,7 @@ fn apply_reviews_writes_a_batch_atomically() {
         decisions.push(ReviewDecision {
             card: changed,
             expected_modified: card.modified,
+            expected_usn: card.usn,
             revlog: RevLog {
                 id: 20_000 + i64::from(index),
                 card_id: card.id,

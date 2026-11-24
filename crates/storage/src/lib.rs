@@ -657,15 +657,16 @@ impl Store for Collection {
         decision: &ReviewDecision,
     ) -> Result<(), StoreError> {
         let transaction = self.conn.transaction().map_err(backend)?;
-        let current_mod: Option<i64> = transaction
+        let current: Option<(i64, i32)> = transaction
             .query_row(
-                "SELECT mod FROM cards WHERE id = ?1",
+                "SELECT mod, usn FROM cards WHERE id = ?1",
                 [decision.card.id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(backend)?;
-        if current_mod != Some(decision.expected_modified) {
+        if current != Some((decision.expected_modified, decision.expected_usn))
+        {
             return Err(invalid("card changed since it was loaded"));
         }
         let usn = update_col(&transaction, true)?;
@@ -1635,6 +1636,7 @@ mod tests {
             .apply_review(&ReviewDecision {
                 card: card.clone(),
                 expected_modified: card.modified,
+                expected_usn: card.usn,
                 revlog: log.clone(),
             })
             .unwrap();
