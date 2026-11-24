@@ -106,7 +106,7 @@ jobs:
             exit 0
           fi
           args=(--head "$RESULT_DIR/aggregated/$head.json" --floor "$RESULT_DIR/floor.json"
-                --ceiling-dir "$RESULT_DIR/aggregated" --base "$RESULT_DIR/aggregated/$base.json"
+                --ceiling-dir "$RESULT_DIR/aggregated/ceilings" --base "$RESULT_DIR/aggregated/$base.json"
                 --comment "$AUDIT_DIR/comment.md" --result "$AUDIT_DIR/result.txt")
           python3 .github/scripts/performance.py compare "${args[@]}"
 

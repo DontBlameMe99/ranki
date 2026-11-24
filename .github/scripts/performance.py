@@ -183,6 +183,79 @@ def aggregate(reports, rounds):
     return validate_aggregate(combined)
 
 
+def stitch(shards_dir, floor, head, out, rounds=3):
+    floor = read_floor(floor)
+    if not SHA.match(head):
+        fail("--head must be a full commit sha")
+    root = Path(shards_dir)
+    if not root.is_dir():
+        fail(f"shard directory not found: {shards_dir}")
+    shards = {}
+    for shard in sorted(root.iterdir()):
+        if not shard.is_dir():
+            continue
+        groups = {}
+        for path in shard.glob("*-*.json"):
+            sha, round_text = path.stem.rsplit("-", 1)
+            if not SHA.match(sha) or not round_text.isdigit():
+                fail(f"unexpected raw report {path}")
+            groups.setdefault(sha, {})[int(round_text)] = read_json(path)
+        aggregates = {}
+        for sha, reports in groups.items():
+            ordered = [reports.get(number) for number in range(1, rounds + 1)]
+            if any(report is None for report in ordered):
+                fail(f"{shard.name}/{sha} is missing a run")
+            aggregates[sha] = aggregate(ordered, rounds)
+        if aggregates:
+            shards[shard.name] = aggregates
+    if not shards:
+        fail(f"no shards found in {root}")
+    head_sources = [values for values in shards.values() if head in values]
+    heads = [values[head] for values in head_sources]
+    if not heads:
+        fail(f"no head measurement for {head}")
+    template = heads[0]
+    names = [result["name"] for result in template["results"]]
+    for value in heads[1:]:
+        if (value["method"] != template["method"]
+                or value["workload_hash"] != template["workload_hash"]):
+            fail("shards disagree about the timing method or workload")
+        if [item["name"] for item in value["results"]] != names:
+            fail("shards disagree about the measured workloads")
+    chosen = []
+    out_dir = Path(out)
+    ceilings = out_dir / "ceilings"
+    ceilings.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        record = floor.get("metrics", {}).get(name)
+        ceiling_sha = record["sha"] if record else None
+        if ceiling_sha in shards and head in shards[ceiling_sha]:
+            source = shards[ceiling_sha]
+        else:
+            source = head_sources[0]
+        values = source
+        head_result = next(
+            (item for item in values[head]["results"] if item["name"] == name),
+            None,
+        )
+        if head_result is None:
+            fail(f"no head measurement for {name}")
+        chosen.append(head_result)
+        if ceiling_sha and ceiling_sha in values:
+            write_json(ceilings / f"{ceiling_sha}.json", values[ceiling_sha])
+    for values in shards.values():
+        for sha, value in values.items():
+            if sha != head:
+                write_json(out_dir / f"{sha}.json", value)
+    combined = {
+        key: template[key]
+        for key in ("method", "runtime", "os", "cpu", "workload_hash")
+    }
+    combined["results"] = chosen
+    write_json(out_dir / f"{head}.json", validate_aggregate(combined))
+
+
+
 def result_map(report):
     return {item["name"]: item for item in report["results"]} if report else {}
 
@@ -413,7 +486,7 @@ def markdown(comparison):
         "A workload fails when its median, p95, or worst operation gap exceeds the ceiling's "
         f"worst run by more than {FAIL_MARGIN * 100:.0f}% or either side's spread between rounds. "
         "Budgets can only be tightened. Ceilings come from the `floors` branch and are "
-        "re-measured in the same session.",
+        "re-measured beside the paired head result.",
         "",
     ])
     return "\n".join(output)
@@ -489,6 +562,12 @@ def parse_args(argv):
     record.add_argument("--head", required=True)
     record.add_argument("--sha", required=True)
     record.add_argument("--out", required=True)
+    stitch_command = commands.add_parser("stitch")
+    stitch_command.add_argument("--dir", required=True)
+    stitch_command.add_argument("--floor", required=True)
+    stitch_command.add_argument("--head", required=True)
+    stitch_command.add_argument("--out", required=True)
+    stitch_command.add_argument("--rounds", type=int, default=3)
     return parser.parse_args(argv)
 
 
@@ -502,7 +581,7 @@ def main(argv=None):
             fail("--head must be a full commit sha")
         floor = read_floor(args.floor)
         metric_shas = [record["sha"] for record in floor.get("metrics", {}).values()]
-        variants = sorted(
+        refs = sorted(
             {value for value in (args.base, *metric_shas) if value and SHA.match(value)}
             - {args.head}
         )
@@ -516,7 +595,7 @@ def main(argv=None):
             },
             "budgets": floor.get("budgets", {}),
         })
-        for sha in variants:
+        for sha in refs:
             print(sha)
         return 0
     if args.command == "aggregate":
@@ -534,6 +613,9 @@ def main(argv=None):
             write_json(Path(args.out) / f"{sha}.json", aggregate(reports, args.rounds))
         if not groups:
             fail(f"no raw reports found in {raw}")
+        return 0
+    if args.command == "stitch":
+        stitch(args.dir, args.floor, args.head, args.out, args.rounds)
         return 0
     if args.command == "compare":
         head = validate_aggregate(read_json(args.head), "head")

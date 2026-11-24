@@ -33,11 +33,11 @@ watchdog, and writes one JSON report. The timing `method` is 1. Change it when
 the way a workload is timed changes, so old ceilings stop gating the new
 method.
 
-CI executes three rounds for the pull request, its base commit, and the commit
-named by the `floors` branch, all on one runner in one session. The gate script
-combines the rounds into the best median, p95, and gap, and keeps the worst
-values as the measured spread. Runner speed cancels out because the ceiling is
-re-measured alongside the pull request.
+CI builds the pull request, its base, and every recorded ceiling commit in
+parallel. Each measurement shard runs one reference commit beside the pull
+request through all three rounds on one runner. The gate stitches each workload's
+head result with the ceiling measured in that shard, so a runner's speed cancels
+out and a ceiling is never compared with a number from another runner.
 A pull request must keep the timing method, sample count, repetitions, warmup,
 and workload definition hash of the recorded ceiling. Otherwise a regression
 could hide behind a cheaper measurement. The oldest variants run the same
@@ -57,15 +57,17 @@ cannot change the rules.
 
 Ceilings live in `.github/performance-floor.json` on the separate `floors`
 branch, so a pull request cannot edit them. Each workload records the commit
-that produced its ceiling. CI re-measures every recorded commit in the same
-session and uses that workload's own measurement as the comparison. Successful
+that produced its ceiling. CI re-measures each recorded commit beside the pull
+request and uses that workload's own measurement as the comparison. Successful
 pushes to `main` lower each ceiling only when that run's worst measurement beats
 the recorded best. Budgets only tighten.
 
 ## Trust model
 
-The `Performance audit` workflow checks out the gate script from the default
-branch and never executes measured code. The measurement itself still runs PR
+The audit and planning jobs check out the gate script from the default branch.
+Aggregation uses that copy when it has the `stitch` command and otherwise uses
+the pull request's copy to assemble reports. The audit still applies the default
+branch rules and never executes measured code. The measurement itself runs PR
 code, so the audit treats pull requests from forks as untrusted: it posts a
 failing check explaining that a maintainer must rerun the Performance workflow
 on a branch in this repository. Same-repository pull requests are gated on the

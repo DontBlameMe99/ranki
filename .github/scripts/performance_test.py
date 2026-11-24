@@ -9,9 +9,11 @@ from contextlib import redirect_stdout
 from performance import main
 from performance import (
     aggregate,
+    read_json,
     compare,
     markdown,
     record_floor,
+    stitch,
     validate_aggregate,
 )
 
@@ -222,6 +224,97 @@ class FloorTest(unittest.TestCase):
         self.assertEqual(lowered["metrics"]["core/sm2"]["median_ms"], 8.0)
         self.assertEqual(lowered["metrics"]["core/sm2"]["budget_ms"], 50.0)
         validate_aggregate(improved)
+
+class StitchTest(unittest.TestCase):
+    def test_each_workload_uses_the_shard_that_measured_its_ceiling(self):
+        first = "1111111111111111111111111111111111111111"
+        second = "2222222222222222222222222222222222222222"
+        head_a = report([("core/fsrs", 100.0, 10.0), ("storage/search", 100.0, 90.0)])
+        head_b = report([("core/fsrs", 100.0, 90.0), ("storage/search", 100.0, 20.0)])
+        ceiling_a = report([("core/fsrs", 100.0, 12.0), ("storage/search", 100.0, 95.0)])
+        ceiling_b = report([("core/fsrs", 100.0, 95.0), ("storage/search", 100.0, 22.0)])
+        floor = floor_for(head_a)
+        floor["metrics"]["core/fsrs"]["sha"] = first
+        floor["metrics"]["storage/search"]["sha"] = second
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shards = root / "shards"
+            out = root / "out"
+            floor_path = root / "floor.json"
+            floor_path.write_text(json.dumps(floor), encoding="utf-8")
+            for shard, values in ((first, (head_a, ceiling_a)), (second, (head_b, ceiling_b))):
+                target = shards / shard
+                target.mkdir(parents=True)
+                for round_number in range(1, 4):
+                    for sha, value in ((SHA, values[0]), (shard, values[1])):
+                        (target / f"{sha}-{round_number}.json").write_text(
+                            json.dumps(value), encoding="utf-8"
+                        )
+            stitch(str(shards), str(floor_path), SHA, str(out))
+            head = validate_aggregate(read_json(out / f"{SHA}.json"))
+            results = {item["name"]: item for item in head["results"]}
+            self.assertEqual(results["core/fsrs"]["median_ms"], 10.0)
+            self.assertEqual(results["storage/search"]["median_ms"], 20.0)
+            first_ceiling = validate_aggregate(read_json(out / "ceilings" / f"{first}.json"))
+            second_ceiling = validate_aggregate(read_json(out / "ceilings" / f"{second}.json"))
+            self.assertEqual(first_ceiling["results"][0]["median_ms"], 12.0)
+            self.assertEqual(second_ceiling["results"][1]["median_ms"], 22.0)
+
+
+    def test_empty_floor_uses_head_from_the_only_shard(self):
+        base = "1111111111111111111111111111111111111111"
+        head_value = report([("core/fsrs", 100.0, 10.0)])
+        base_value = report([("core/fsrs", 100.0, 12.0)])
+        floor = floor_for(head_value)
+        floor["metrics"] = {}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "shards" / base
+            target.mkdir(parents=True)
+            floor_path = root / "floor.json"
+            floor_path.write_text(json.dumps(floor), encoding="utf-8")
+            for round_number in range(1, 4):
+                (target / f"{SHA}-{round_number}.json").write_text(
+                    json.dumps(head_value), encoding="utf-8"
+                )
+                (target / f"{base}-{round_number}.json").write_text(
+                    json.dumps(base_value), encoding="utf-8"
+                )
+            stitch(str(root / "shards"), str(floor_path), SHA, str(root / "out"))
+            head = validate_aggregate(read_json(root / "out" / f"{SHA}.json"))
+            self.assertEqual(head["results"][0]["median_ms"], 10.0)
+            self.assertTrue((root / "out" / f"{base}.json").is_file())
+            self.assertFalse((root / "out" / "ceilings" / f"{SHA}.json").exists())
+
+    def test_floor_sha_equal_to_head_still_writes_a_ceiling(self):
+        base = "1111111111111111111111111111111111111111"
+        head_value = report([("core/fsrs", 100.0, 10.0)])
+        base_value = report([("core/fsrs", 100.0, 12.0)])
+        floor = floor_for(head_value)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "shards" / base
+            target.mkdir(parents=True)
+            floor_path = root / "floor.json"
+            floor_path.write_text(json.dumps(floor), encoding="utf-8")
+            for round_number in range(1, 4):
+                (target / f"{SHA}-{round_number}.json").write_text(
+                    json.dumps(head_value), encoding="utf-8"
+                )
+                (target / f"{base}-{round_number}.json").write_text(
+                    json.dumps(base_value), encoding="utf-8"
+                )
+            out = root / "out"
+            stitch(str(root / "shards"), str(floor_path), SHA, str(out))
+            ceiling = out / "ceilings" / f"{SHA}.json"
+            self.assertTrue(ceiling.is_file())
+            head = validate_aggregate(read_json(out / f"{SHA}.json"))
+            result = compare(head, ceiling_dir=out / "ceilings", floor=floor)
+            self.assertFalse(result["failed"])
+            self.assertFalse(
+                any(item["kind"] == "ceiling" for item in result["global_findings"])
+            )
+
 
 
 if __name__ == "__main__":
