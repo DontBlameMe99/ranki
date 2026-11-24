@@ -1,9 +1,9 @@
 //! Shared navigation rail, toasts, and modal overlays.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement, IntoElement,
+    AnyElement, ClickEvent, Context, Corner, InteractiveElement, IntoElement,
     ParentElement, SharedString, StatefulInteractiveElement, Styled, Window,
-    div, px,
+    anchored, div, point, px,
 };
 
 use crate::{
@@ -259,6 +259,78 @@ impl Root {
                         ("toast", usize::try_from(toast.seq).unwrap_or(0)),
                         self.motion_ms(crate::theme::MOTION_QUICK_MS),
                     ))
+                    .into_any_element(),
+            );
+        }
+        if self.view == View::Decks
+            && let Some(menu) = self.deck_menu
+            && self
+                .visible_deck_rows(cx)
+                .iter()
+                .any(|row| row.id == Some(menu.id))
+            && let Some(deck) =
+                self.decks.iter().find(|deck| deck.id == menu.id).cloned()
+        {
+            let rename_deck = deck.clone();
+            let remove_deck = deck;
+            layers.push(
+                anchored()
+                    .anchor(Corner::TopRight)
+                    .position(menu.anchor)
+                    .offset(point(px(0.), px(8.)))
+                    .child(
+                        div()
+                            .id("deck-actions-menu")
+                            .flex()
+                            .gap(px(6.))
+                            .p(px(8.))
+                            .rounded(px(12.))
+                            .bg(colors.mantle)
+                            .border_1()
+                            .border_color(colors.surface1)
+                            .child(
+                                div()
+                                    .id("decks-rename")
+                                    .px(px(10.))
+                                    .py(px(6.))
+                                    .rounded(px(8.))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(colors.surface0))
+                                    .text_size(px(13.))
+                                    .on_click(cx.listener(
+                                        move |this, _: &ClickEvent, _, cx| {
+                                            this.deck_menu = None;
+                                            this.start_rename(&rename_deck, cx);
+                                        },
+                                    ))
+                                    .child("Rename"),
+                            )
+                            .child(
+                                div()
+                                    .id("decks-remove")
+                                    .px(px(10.))
+                                    .py(px(6.))
+                                    .rounded(px(8.))
+                                    .cursor_pointer()
+                                    .text_size(px(13.))
+                                    .text_color(colors.red)
+                                    .on_click(cx.listener(
+                                        move |this, _: &ClickEvent, _, cx| {
+                                            this.deck_menu = None;
+                                            this.confirmation = Some(
+                                                Confirmation::RemoveDeck {
+                                                    id: remove_deck.id,
+                                                    name: remove_deck
+                                                        .name
+                                                        .clone(),
+                                                },
+                                            );
+                                            cx.notify();
+                                        },
+                                    ))
+                                    .child("Remove"),
+                            ),
+                    )
                     .into_any_element(),
             );
         }

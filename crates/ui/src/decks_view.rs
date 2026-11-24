@@ -3,17 +3,31 @@
 use std::collections::HashSet;
 
 use gpui::{
-    ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, Rgba,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, px,
+    App, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement,
+    Rgba, SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use crate::{
-    app::{self, Confirmation, Root, UiAction, due_total, leaf_deck_totals},
+    app::{self, Root, UiAction, due_total, leaf_deck_totals},
     components::{icon, icon_tile, keycap, small_button},
     theme::{PAGE_X, PAGE_Y, Style, TABLE_COLUMNS, queue_text},
 };
 
 impl Root {
+    pub(crate) fn visible_deck_rows(&self, cx: &App) -> Vec<app::DeckRow> {
+        let query = self.deck_search.read(cx).text();
+        if query.trim().is_empty() {
+            return self.deck_rows.clone();
+        }
+        let expanded = self
+            .decks
+            .iter()
+            .map(|deck| deck.name.clone())
+            .collect::<HashSet<_>>();
+        let rows = app::build_deck_rows(&self.decks, &self.stats, &expanded);
+        app::filter_decks(&rows, &query)
+    }
+
     pub(crate) fn render_decks(
         &mut self,
         window: &mut Window,
@@ -21,18 +35,7 @@ impl Root {
     ) -> impl IntoElement {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
-        let query = self.deck_search.read(cx).text();
-        let all_rows = if query.trim().is_empty() {
-            self.deck_rows.clone()
-        } else {
-            let expanded = self
-                .decks
-                .iter()
-                .map(|deck| deck.name.clone())
-                .collect::<HashSet<_>>();
-            app::build_deck_rows(&self.decks, &self.stats, &expanded)
-        };
-        let rows = app::filter_decks(&all_rows, &query);
+        let rows = self.visible_deck_rows(cx);
         let totals = leaf_deck_totals(&self.decks, &self.stats);
         let due = due_total(totals);
 
@@ -393,7 +396,6 @@ impl Root {
             .and_then(|id| self.decks.iter().position(|deck| deck.id == id));
         let is_selected = index.is_some() && index == self.selected;
         let has_due = due_total(row.stats) > 0;
-        let menu_open = row.id.is_some_and(|id| self.deck_menu == Some(id));
         let meta = app::deck_meta(&self.deck_rows, row);
         let mut name_cell = div()
             .flex()
@@ -478,7 +480,6 @@ impl Root {
             name_cell = name_cell.child(label);
         }
         if let Some(deck_id) = row.id
-            && menu_open
             && let Some(edit) = self.deck_edit.clone()
             && edit.id == deck_id
         {
@@ -546,11 +547,17 @@ impl Root {
                     .rounded(px(8.))
                     .cursor_pointer()
                     .on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            this.deck_menu = if this.deck_menu == Some(id) {
+                        move |this, event: &ClickEvent, _, cx| {
+                            let open = this
+                                .deck_menu
+                                .is_some_and(|menu| menu.id == id);
+                            this.deck_menu = if open {
                                 None
                             } else {
-                                Some(id)
+                                Some(app::DeckMenu {
+                                    id,
+                                    anchor: event.position(),
+                                })
                             };
                             cx.notify();
                         },
@@ -563,7 +570,7 @@ impl Root {
         } else {
             colors.surface0
         };
-        let mut row_div = div()
+        div()
             .id(SharedString::from(format!("deck-row-{}", row.path)))
             .flex()
             .items_center()
@@ -589,67 +596,7 @@ impl Root {
             .child(count(row.stats.new_cards, queue_text(0, self.theme())))
             .child(count(row.stats.learning_cards, queue_text(1, self.theme())))
             .child(count(row.stats.review_cards, queue_text(2, self.theme())))
-            .child(action);
-        if menu_open
-            && let Some(deck) = row.id.and_then(|id| {
-                self.decks.iter().find(|deck| deck.id == id).cloned()
-            })
-        {
-            let rename_deck = deck.clone();
-            let remove_deck = deck;
-            row_div = row_div.child(
-                div()
-                    .absolute()
-                    .right(px(20.))
-                    .top(px(56.))
-                    .flex()
-                    .gap(px(6.))
-                    .p(px(8.))
-                    .rounded(px(12.))
-                    .bg(colors.mantle)
-                    .border_1()
-                    .border_color(colors.surface1)
-                    .child(
-                        div()
-                            .id("decks-rename")
-                            .px(px(10.))
-                            .py(px(6.))
-                            .rounded(px(8.))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(colors.surface0))
-                            .text_size(px(13.))
-                            .on_click(cx.listener(
-                                move |this, _: &ClickEvent, _, cx| {
-                                    this.start_rename(&rename_deck, cx);
-                                },
-                            ))
-                            .child("Rename"),
-                    )
-                    .child(
-                        div()
-                            .id("decks-remove")
-                            .px(px(10.))
-                            .py(px(6.))
-                            .rounded(px(8.))
-                            .cursor_pointer()
-                            .text_size(px(13.))
-                            .text_color(colors.red)
-                            .on_click(cx.listener(
-                                move |this, _: &ClickEvent, _, cx| {
-                                    this.deck_menu = None;
-                                    this.confirmation =
-                                        Some(Confirmation::RemoveDeck {
-                                            id: remove_deck.id,
-                                            name: remove_deck.name.clone(),
-                                        });
-                                    cx.notify();
-                                },
-                            ))
-                            .child("Remove"),
-                    ),
-            );
-        }
-        row_div
+            .child(action)
     }
 
     fn render_empty(&self, kind: app::EmptyKind) -> impl IntoElement {
