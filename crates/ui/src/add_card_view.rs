@@ -70,7 +70,6 @@ impl Root {
                 })
         });
         let save = self.action_click(UiAction::SaveNote);
-        let cancel = self.action_click(UiAction::CancelAdd);
         let preview_tab = |label: &'static str,
                            side: Side,
                            selected: bool,
@@ -507,22 +506,6 @@ impl Root {
                 .border_t_1()
                 .border_color(colors.surface1)
                 .child(div().flex_1())
-                .child(
-                    div()
-                        .id("add-cancel")
-                        .h(px(48.))
-                        .px(px(20.))
-                        .flex()
-                        .items_center()
-                        .rounded(px(14.))
-                        .border_1()
-                        .border_color(colors.surface1)
-                        .text_size(px(15.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .cursor_pointer()
-                        .on_click(cancel)
-                        .child("Cancel"),
-                )
                 .child(
                     div()
                         .id("add-save")
