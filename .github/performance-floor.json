@@ -135,14 +135,14 @@
     },
     "mcp/roundtrip/tools-list": {
       "budget_ms": 100.0,
-      "median_ms": 0.13712,
+      "median_ms": 0.110015,
       "method": 1,
       "repeat": 1,
       "samples": 10,
-      "sha": "1957c2e8512920f404ad6cc0a2b4f83f0d7543b0",
-      "updated_at": "2026-11-23T05:42:51.679744+00:00",
+      "sha": "5941e6fe1904063c6813e3c98c2d1f47175225ed",
+      "updated_at": "2026-11-24T22:07:49.187021+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.144359
+      "worst_median_ms": 0.118869
     },
     "mcp/startup": {
       "budget_ms": 1000.0,
@@ -244,7 +244,7 @@
       "worst_median_ms": 0.12108200000000001
     }
   },
-  "sha": "81ee5449bc843dd194b1ea897997aa81b14af1f0",
+  "sha": "5941e6fe1904063c6813e3c98c2d1f47175225ed",
   "version": 1,
   "workload_hash": "bb3b56caa290a9f6"
 }
