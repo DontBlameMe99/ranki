@@ -329,41 +329,36 @@ impl Root {
         }
         let tag_input = tags_field;
         let click_handle = tags_handle;
-        left = left.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(colors.subtext)
-                        .child("Tags"),
-                )
-                .child(
-                    tags_row
-                        .on_click(cx.listener(
-                            move |_, _: &ClickEvent, window, _| {
-                                window.focus(&click_handle);
-                            },
-                        ))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .min_w(px(140.))
-                                .child(icon("icon-tag", 14., colors.mauve))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w(px(80.))
-                                        .child(tag_input),
-                                ),
-                        ),
-                ),
-        );
+        let tags_group = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(colors.subtext)
+                    .child("Tags"),
+            )
+            .child(
+                tags_row
+                    .on_click(cx.listener(
+                        move |_, _: &ClickEvent, window, _| {
+                            window.focus(&click_handle);
+                        },
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .min_w(px(140.))
+                            .child(icon("icon-tag", 14., colors.mauve))
+                            .child(
+                                div().flex_1().min_w(px(80.)).child(tag_input),
+                            ),
+                    ),
+            );
 
         let mut preview = div()
             .flex()
@@ -473,27 +468,44 @@ impl Root {
 
         let mut form = div().flex().w_full().gap(px(ADD_GAP));
         if occlusion_mode {
-            form = form.flex_col().child(left).child(history);
+            form = form
+                .flex_col()
+                .gap(px(18.))
+                .child(left)
+                .child(tags_group)
+                .child(history);
+            column = column.child(form);
         } else if side_by_side {
             form = form
                 .items_start()
                 .child(
                     div().flex_1().min_w(px(ADD_FORM_WIDTH * 0.5)).child(left),
                 )
+                .child(div().w(px(PREVIEW_WIDTH)).flex_none().child(preview));
+            let tags_and_history = div()
+                .mt(px(18.))
+                .flex()
+                .w_full()
+                .items_start()
+                .gap(px(ADD_GAP))
                 .child(
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(18.))
-                        .w(px(PREVIEW_WIDTH))
-                        .flex_none()
-                        .child(preview)
-                        .child(history),
-                );
+                        .flex_1()
+                        .min_w(px(ADD_FORM_WIDTH * 0.5))
+                        .child(tags_group),
+                )
+                .child(div().w(px(PREVIEW_WIDTH)).flex_none().child(history));
+            column = column.child(form).child(tags_and_history);
         } else {
-            form = form.flex_col().child(left).child(preview).child(history);
+            form = form
+                .flex_col()
+                .gap(px(18.))
+                .child(left)
+                .child(tags_group)
+                .child(preview)
+                .child(history);
+            column = column.child(form);
         }
-        column = column.child(form);
 
         column = column.child(
             div()
@@ -1009,6 +1021,7 @@ fn added_history(
         .bg(colors.mantle)
         .border_1()
         .border_color(colors.surface0)
+        .min_h(px(46.))
         .overflow_hidden();
     if added.is_empty() {
         card = card.child(
@@ -1066,10 +1079,9 @@ fn added_history(
         .gap(px(8.))
         .child(
             div()
-                .mt(px(18.))
-                .mb(px(2.))
                 .text_size(px(13.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(colors.subtext)
                 .child("Added this session"),
         )
         .child(card)
