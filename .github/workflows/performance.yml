@@ -13,13 +13,17 @@ concurrency:
 permissions:
   contents: read
 
-# Measurements run on PR code with a read-only token. The trusted audit workflow
+# Measurements run on PR code with a read-only token. Planning and aggregation
+# use the gate script from the default branch, and the trusted audit workflow
 # turns the uploaded artifacts into the required check and PR comment.
 jobs:
-  measure:
-    name: Measure all surfaces
+  plan:
+    name: Plan shards
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 10
+    outputs:
+      head: ${{ steps.plan.outputs.head }}
+      shards: ${{ steps.plan.outputs.shards }}
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       RUN_KIND: ${{ github.event_name == 'pull_request' && 'pull_request' || 'push' }}
@@ -29,14 +33,19 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: cachix/install-nix-action@v31
+      - name: Check gate
+        uses: actions/checkout@v5
         with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+          path: gate
 
       - name: Plan variants
+        id: plan
         run: |
-          mkdir -p performance/raw performance/aggregated
+          set -euo pipefail
+          mkdir -p performance
           floor="$RUNNER_TEMP/floor.json"
           set +e
           git ls-remote --exit-code --heads origin floors >/dev/null 2>&1
@@ -46,71 +55,158 @@ jobs:
             git fetch --depth=1 origin floors
             git show FETCH_HEAD:.github/performance-floor.json > "$floor"
           elif [ "$floors_status" -eq 2 ]; then
-            python3 .github/scripts/performance.py bootstrap --out "$floor"
+            python3 gate/.github/scripts/performance.py bootstrap --out "$floor"
           else
             echo 'Cannot check the floors branch.' >&2
             exit 1
           fi
-          python3 .github/scripts/performance.py plan \
-            --head "$(git rev-parse HEAD)" \
+          head="$(git rev-parse HEAD)"
+          python3 gate/.github/scripts/performance.py plan \
+            --head "$head" \
             --base "$BASE_SHA" \
             --floor "$floor" \
             --kind "$RUN_KIND" \
-            --out performance/meta.json > "$RUNNER_TEMP/variants.txt"
+            --out performance/meta.json > "$RUNNER_TEMP/refs.txt"
           cp "$floor" performance/floor.json
+          refs="$(jq -cn --rawfile lines "$RUNNER_TEMP/refs.txt" \
+            '$lines | split("\n") | map(select(length > 0)) | unique')"
+          shards="$(jq -cn --arg head "$head" --argjson refs "$refs" \
+            'if ($refs | length) == 0 then [$head] else $refs end')"
+          {
+            echo "head=$head"
+            echo "shards=$shards"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Prepare variants
+      - uses: actions/upload-artifact@v4
+        with:
+          name: performance-plan
+          path: |
+            performance/meta.json
+            performance/floor.json
+          retention-days: 1
+
+  measure:
+    name: Measure shard
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build and measure
+        env:
+          HEAD_SHA: ${{ needs.plan.outputs.head }}
+          SHARD: ${{ matrix.shard }}
         run: |
-          head="$(git rev-parse HEAD)"
-          : > "$RUNNER_TEMP/variants.tsv"
-          printf '%s %s 0\n' "$head" "$GITHUB_WORKSPACE" >> "$RUNNER_TEMP/variants.tsv"
-          while read -r sha; do
-            [ -n "$sha" ] || continue
-            git fetch --depth=1 origin "$sha"
-            dir="$RUNNER_TEMP/variant-$sha"
-            git worktree add --detach "$dir" "$sha"
-            # Older commits without the headless GUI hook run the same harness
-            # with the GUI feature off, leaving their own review code untouched.
-            # The head harness is copied below, so a variant only builds the GUI
-            # workloads when it exposes the type that harness uses. That keeps a
-            # UI rewrite on the head measurable against an older base.
-            skip_gui=0
-            if grep -q 'ranki_ui::BenchKey' "$GITHUB_WORKSPACE/crates/bench/src/measure.rs"; then
-              grep -q 'pub enum BenchKey' "$dir/crates/ui/src/bench.rs" 2>/dev/null || skip_gui=1
-            else
-              grep -q 'pub struct BenchApp' "$dir/crates/ui/src/app.rs" || skip_gui=1
-            fi
-            # The harness comes from the head so every variant runs exactly the
-            # same workloads and sampling rules.
+          set -euo pipefail
+          if [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ]; then
+            echo 'Checkout does not match the planned head' >&2
+            exit 1
+          fi
+          : > "$RUNNER_TEMP/measure.tsv"
+          mkdir -p "performance/raw/$SHARD"
+          printf '%s %s 0\n' "$HEAD_SHA" "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/variants.tsv"
+          if [ "$SHARD" != "$HEAD_SHA" ]; then
+            git fetch --depth=1 origin "$SHARD"
+            dir="$RUNNER_TEMP/variant-$SHARD"
+            git worktree add --detach "$dir" "$SHARD"
             mkdir -p "$dir/crates/bench"
             cp -R "$GITHUB_WORKSPACE/crates/bench/." "$dir/crates/bench/"
-            printf '%s %s %s\n' "$sha" "$dir" "$skip_gui" >> "$RUNNER_TEMP/variants.tsv"
-          done < "$RUNNER_TEMP/variants.txt"
-
-      - name: Build variants
-        run: |
-          while read -r sha dir skip_gui; do
-            echo "Building $sha"
+            printf '%s %s 1\n' "$SHARD" "$dir" >> "$RUNNER_TEMP/variants.tsv"
+          fi
+          while read -r sha dir is_variant; do
+            skip_gui=0
+            if [ "$is_variant" = 1 ]; then
+              if grep -q 'ranki_ui::BenchKey' "$GITHUB_WORKSPACE/crates/bench/src/measure.rs"; then
+                grep -q 'pub enum BenchKey' "$dir/crates/ui/src/bench.rs" 2>/dev/null || skip_gui=1
+              else
+                grep -q 'pub struct BenchApp' "$dir/crates/ui/src/app.rs" 2>/dev/null || skip_gui=1
+              fi
+            fi
             features=()
-            [ "$skip_gui" = 1 ] && features=(--no-default-features)
-            (cd "$dir" && CARGO_TARGET_DIR="$RUNNER_TEMP/target/$sha" \
+            if [ "$skip_gui" = 1 ]; then
+              features=(--no-default-features)
+            fi
+            target="$RUNNER_TEMP/target/$sha"
+            echo "Building $sha"
+            (cd "$dir" && CARGO_TARGET_DIR="$target" \
               nix develop --command cargo build --release -p ranki -p ranki-bench "${features[@]}")
+            prefix="$GITHUB_WORKSPACE/performance/raw/$SHARD/$sha"
+            printf '%s %s %s %s\n' "$sha" "$dir" "$target" "$prefix" \
+              >> "$RUNNER_TEMP/measure.tsv"
           done < "$RUNNER_TEMP/variants.tsv"
-
-      - name: Measure
-        run: |
           for round in 1 2 3; do
-            while read -r sha _; do
-              target="$RUNNER_TEMP/target/$sha"
-              echo "Measuring $sha round $round"
-              RANKI_BIN="$target/release/ranki" \
-                "$target/release/ranki-bench" measure \
-                --out "$GITHUB_WORKSPACE/performance/raw/$sha-$round.json"
-            done < "$RUNNER_TEMP/variants.tsv"
+            while read -r sha dir target prefix; do
+              echo "Measuring $sha round $round in shard $SHARD"
+              (
+                cd "$dir"
+                nix develop --command env RANKI_BIN="$target/release/ranki" \
+                  "$target/release/ranki-bench" measure --out "$prefix-$round.json"
+              )
+            done < "$RUNNER_TEMP/measure.tsv"
           done
-          python3 .github/scripts/performance.py aggregate \
-            --dir performance/raw --out performance/aggregated --rounds 3
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: performance-shard-${{ matrix.shard }}
+          path: performance/raw
+          retention-days: 1
+
+  aggregate:
+    name: Aggregate measurements
+    needs: [plan, measure]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.head }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+          path: head
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: performance-plan
+          path: performance
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: performance-shard-*
+          path: performance/shards
+          merge-multiple: true
+
+      - name: Stitch shards
+        run: |
+          set -euo pipefail
+          head="$(jq -r .head_sha performance/meta.json)"
+          script=.github/scripts/performance.py
+          if ! python3 "$script" stitch --help >/dev/null 2>&1; then
+            script=head/.github/scripts/performance.py
+          fi
+          python3 "$script" stitch \
+            --dir performance/shards \
+            --floor performance/floor.json \
+            --head "$head" \
+            --out performance/aggregated
 
       - uses: actions/upload-artifact@v4
         with:
@@ -119,6 +215,6 @@ jobs:
             performance/meta.json
             performance/floor.json
             performance/aggregated/*.json
-            performance/raw/*.json
+            performance/aggregated/ceilings/*.json
+            performance/shards/*/*.json
           retention-days: 30
-
