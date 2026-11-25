@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use gpui::{
     App, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement,
-    Rgba, SharedString, StatefulInteractiveElement, Styled, Window, div, px,
+    Rgba, SharedString, StatefulInteractiveElement, Styled, div, px,
 };
 
 use crate::{
@@ -39,7 +39,6 @@ impl Root {
 
     pub(crate) fn render_decks(
         &mut self,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = self.colors();
@@ -48,8 +47,7 @@ impl Root {
         let totals = leaf_deck_totals(&self.decks, &self.stats);
         let due = due_total(totals);
 
-        let search_creating =
-            self.create_field.read(cx).focus_handle().is_focused(window);
+        let search_creating = self.create_open;
         let create_click = self.action_click(UiAction::CreateDeck);
         let mut content = div()
             .size_full()

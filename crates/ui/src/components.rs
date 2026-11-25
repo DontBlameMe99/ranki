@@ -85,7 +85,8 @@ pub fn small_button(
     let hover = crate::theme::accent_hover(style.theme);
     let press = crate::theme::accent_press(style.theme);
     div()
-        .id(id)
+        .id(id.clone())
+        .debug_selector(|| id.to_string())
         .flex()
         .items_center()
         .justify_center()
