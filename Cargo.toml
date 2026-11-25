@@ -17,6 +17,7 @@ ranki-core = { path = "crates/core" }
 ranki-storage = { path = "crates/storage" }
 ranki-format = { path = "crates/format" }
 ranki-ui = { path = "crates/ui" }
+ranki-sync = { path = "crates/sync" }
 
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }

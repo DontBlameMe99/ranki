@@ -4426,7 +4426,9 @@ dependencies = [
  "gpui",
  "ranki-core",
  "ranki-model",
+ "ranki-sync",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

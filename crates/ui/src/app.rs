@@ -21,7 +21,7 @@ use ranki_model::{
 };
 
 use crate::{
-    Options, SchedulerKind, ThemeChoice,
+    Options, SchedulerKind, SettingsSaver, ThemeChoice,
     browser_view::BrowseState,
     card_view::{self, RenderedCard, Side},
     occlusion::{
@@ -69,6 +69,8 @@ actions!(
         NextDeck,
         ClearSearch,
         ClearBrowseSearch,
+        ToggleSync,
+        SyncSignIn,
     ]
 );
 
@@ -154,6 +156,13 @@ pub struct Toast {
     pub seq: u64,
 }
 
+/// `AnkiWeb` sign-in state kept only for the lifetime of the window.
+pub struct SyncUiState {
+    pub username: Entity<TextField>,
+    pub password: Entity<TextField>,
+    pub signed_in: bool,
+    pub busy: bool,
+}
 impl Toast {
     /// A toast outlives its text only by the timer that clears it.
     fn expired(&self, now: Instant) -> bool {
@@ -303,6 +312,9 @@ pub struct Root {
     pub(crate) external_change: bool,
     pub(crate) collection_modified: i64,
     pub(crate) collection_start: i64,
+    pub(crate) sync: SyncUiState,
+    pub(crate) last_sync: Option<i64>,
+    pub(crate) save_settings: SettingsSaver,
     pub(crate) images: Entity<card_view::LruImageCache>,
     pub(crate) font_family: &'static str,
 }
@@ -311,6 +323,7 @@ pub struct Root {
 pub struct Launch {
     pub store: Box<dyn Store>,
     pub options: Options,
+    pub save_settings: SettingsSaver,
 }
 
 impl Root {
@@ -374,7 +387,11 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let Launch { store, options } = launch;
+        let Launch {
+            store,
+            options,
+            save_settings,
+        } = launch;
         let focus = cx.focus_handle();
         let dialog_focus = cx.focus_handle();
         let settings_focus = cx.focus_handle();
@@ -399,6 +416,19 @@ impl Root {
         let tags = cx.new(|cx| make_field(cx, "Add a tag"));
         let tag_hook = Self::tag_hook(cx);
         tags.update(cx, |field, _| field.set_edit_hook(tag_hook));
+        let sync_username = cx.new(|cx| make_field(cx, "AnkiWeb username"));
+        let sync_password = cx.new(|cx| {
+            let mut field = TextField::new(cx, "AnkiWeb password");
+            field.set_secure(true, cx);
+            field
+        });
+        let sync_state = crate::sync_view::read_state(&options.collection);
+        let signed_in = sync_state
+            .as_ref()
+            .is_some_and(|state| !state.host_key.is_empty());
+        if let Some(name) = options.sync.username.clone() {
+            sync_username.update(cx, |field, cx| field.seed(name, cx));
+        }
         let mut root = Self {
             scheduler: scheduler_from_options(&options),
             store,
@@ -451,6 +481,14 @@ impl Root {
             external_change: false,
             collection_modified: 0,
             collection_start: 0,
+            sync: SyncUiState {
+                username: sync_username,
+                password: sync_password,
+                signed_in,
+                busy: false,
+            },
+            last_sync: sync_state.as_ref().and_then(|state| state.last_success),
+            save_settings,
             images: card_view::LruImageCache::new(cx),
             font_family: theme::ui_font_family(),
         };
@@ -1780,6 +1818,11 @@ impl Root {
                 window.focus(self.browse.search.read(cx).focus_handle());
                 cx.notify();
             }
+            UiAction::ToggleSync => {
+                let enabled = !self.options.sync.enabled;
+                self.set_sync_enabled(enabled, cx);
+            }
+            UiAction::SyncSignIn => self.sign_in(cx),
         }
         if self.confirmation.is_some() != had_dialog {
             if self.confirmation.is_some() {
@@ -1817,6 +1860,8 @@ pub enum UiAction {
     NextDeck,
     ClearSearch,
     ClearBrowseSearch,
+    ToggleSync,
+    SyncSignIn,
 }
 
 impl From<&Reveal> for UiAction {
@@ -2035,6 +2080,12 @@ pub fn dispatch_app_action(
         UiAction::ClearBrowseSearch => {
             window.dispatch_action(Box::new(ClearBrowseSearch), cx);
         }
+        UiAction::ToggleSync => {
+            window.dispatch_action(Box::new(ToggleSync), cx);
+        }
+        UiAction::SyncSignIn => {
+            window.dispatch_action(Box::new(SyncSignIn), cx);
+        }
     }
 }
 
@@ -2167,6 +2218,12 @@ impl Render for Root {
             ))
             .on_action(cx.listener(|this, action: &NextDeck, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSync, window, cx| {
+                this.dispatch(UiAction::ToggleSync, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SyncSignIn, window, cx| {
+                this.dispatch(UiAction::SyncSignIn, window, cx);
             }))
             .when(view != View::Review, |this| this.child(self.render_nav()))
             .child(div().flex_1().overflow_hidden().child(main))
@@ -2609,10 +2666,6 @@ pub fn relative_age(modified: i64, now: i64) -> String {
     }
 }
 
-/// Last successful sync in Unix seconds. The store exposes no sync stamp yet,
-/// so the footer truthfully reports a local, unsynced collection.
-pub const SYNC_STATE: Option<i64> = None;
-
 /// Footer sync badge: local state, or the age of the last sync.
 #[must_use]
 pub fn status_label(last_sync: Option<i64>, now: i64) -> String {
@@ -2909,7 +2962,7 @@ mod tests {
     use crate::Options;
 
     use super::{
-        DeckRow, EmptyKind, Phase, SYNC_STATE, UiAction, View, build_deck_rows,
+        DeckRow, EmptyKind, Phase, UiAction, View, build_deck_rows,
         collect_tags, date_label, deck_meta, due_total, duration_label,
         empty_copy, empty_kind, filter_decks, focused_delta,
         forecast_bar_height, forecast_total, model_index, models_with_stock,
@@ -3363,8 +3416,7 @@ mod tests {
 
     #[test]
     fn footer_status_reports_local_until_a_sync_stamp_exists() {
-        assert_eq!(SYNC_STATE, None);
-        assert_eq!(status_label(SYNC_STATE, 1_000), "Local \u{b7} not synced");
+        assert_eq!(status_label(None, 1_000), "Local \u{b7} not synced");
         assert_eq!(status_label(Some(1_000), 1_120), "Synced \u{b7} 2 min ago");
     }
 

@@ -1,4 +1,4 @@
-//! Settings screen. Theme choice is the only setting exposed in the window.
+//! Settings screen for theme and optional `AnkiWeb` sync.
 
 use gpui::{
     FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
@@ -126,5 +126,6 @@ impl Root {
                             .child(segments),
                     ),
             )
+            .child(self.render_sync())
     }
 }

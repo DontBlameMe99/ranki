@@ -6,6 +6,7 @@ use std::fs::{self, Permissions};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::path::PathBuf;
 
 const STATE_VERSION: u8 = 1;
 const STATE_MODE: u32 = 0o600;
@@ -70,7 +71,12 @@ impl fmt::Debug for SyncState {
 }
 
 impl SyncState {
-    pub(crate) fn load(path: &Path) -> Result<Self> {
+    /// Reads the state file, returning defaults when it does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read or has an unknown version.
+    pub fn load(path: &Path) -> Result<Self> {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -110,4 +116,11 @@ impl SyncState {
             .map_err(|error| SyncError::State(error.to_string()))?;
         Ok(())
     }
+}
+
+/// Path of the sync state file beside a collection.
+#[must_use]
+pub fn state_path(collection: &Path) -> PathBuf {
+    let parent = collection.parent().unwrap_or_else(|| Path::new("."));
+    parent.join("ranki-sync.json")
 }

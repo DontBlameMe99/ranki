@@ -106,8 +106,7 @@ pub(super) fn load_auth(
 /// Path of the sync state file beside a collection.
 #[must_use]
 pub(super) fn state_path(collection: &Path) -> PathBuf {
-    let parent = collection.parent().unwrap_or_else(|| Path::new("."));
-    parent.join("ranki-sync.json")
+    ranki_sync::state_path(collection)
 }
 
 /// Adapts an injected transport to the generic sync client.
