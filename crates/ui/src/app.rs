@@ -34,6 +34,7 @@ use crate::{
 };
 
 pub const DEBOUNCE: Duration = Duration::from_millis(120);
+pub const FORECAST_DAYS: usize = 7;
 const TOAST_LIFETIME: Duration = Duration::from_secs(5);
 const MAX_REVIEW_TIME: Duration = Duration::from_secs(60);
 
@@ -280,6 +281,8 @@ pub struct Root {
     pub(crate) decks: Vec<Deck>,
     pub(crate) models: Vec<NoteModel>,
     pub(crate) stats: Vec<DeckStats>,
+    /// Cards scheduled in each of the next seven Anki days, today first.
+    pub(crate) forecast: Vec<usize>,
     pub(crate) statistics: Statistics,
     pub(crate) deck_rows: Vec<DeckRow>,
     pub(crate) selected: Option<usize>,
@@ -409,6 +412,7 @@ impl Root {
             decks: Vec::new(),
             models: Vec::new(),
             stats: Vec::new(),
+            forecast: Vec::new(),
             statistics: Statistics::default(),
             deck_rows: Vec::new(),
             selected: None,
@@ -759,6 +763,10 @@ impl Root {
                 })
                 .collect(),
         };
+        self.forecast = self
+            .store
+            .due_forecast(FORECAST_DAYS, now)
+            .unwrap_or_default();
         self.rebuild_deck_rows();
     }
 
@@ -2350,6 +2358,23 @@ pub const fn due_total(stats: DeckStats) -> usize {
         .saturating_add(stats.review_cards)
 }
 
+/// Total cards in the forecast window.
+#[must_use]
+pub fn forecast_total(counts: &[usize]) -> usize {
+    counts
+        .iter()
+        .fold(0_usize, |total, count| total.saturating_add(*count))
+}
+
+/// Height of one forecast bar. Zero days keep a small baseline.
+#[must_use]
+pub fn forecast_bar_height(count: usize, peak: usize) -> f32 {
+    if count == 0 || peak == 0 {
+        return 6.0;
+    }
+    18.0 + (count as f32 / peak as f32) * 42.0
+}
+
 /// Graded share of the session. An empty queue is never full.
 #[must_use]
 pub fn session_progress(answered: usize, total: usize) -> f32 {
@@ -2885,10 +2910,11 @@ mod tests {
     use super::{
         DeckRow, EmptyKind, Phase, SYNC_STATE, UiAction, View, build_deck_rows,
         collect_tags, date_label, deck_meta, due_total, duration_label,
-        empty_copy, empty_kind, filter_decks, focused_delta, model_index,
-        models_with_stock, next_due_deck, next_view, note_type_name,
-        queue_counts, relative_age, session_progress, status_label,
-        sum_leaf_counts, validate_draft, validate_occlusion,
+        empty_copy, empty_kind, filter_decks, focused_delta,
+        forecast_bar_height, forecast_total, model_index, models_with_stock,
+        next_due_deck, next_view, note_type_name, queue_counts, relative_age,
+        session_progress, status_label, sum_leaf_counts, validate_draft,
+        validate_occlusion,
     };
     #[test]
     fn session_progress_never_fills_an_empty_queue() {
@@ -3321,6 +3347,17 @@ mod tests {
     fn due_totals_add_all_queues() {
         let (_, stats) = deck(1, "A", 2, 3, 4);
         assert_eq!(due_total(stats), 9);
+    }
+
+    #[test]
+    fn forecast_bars_scale_to_the_busiest_day() {
+        let days = [5, 2, 0, 3, 1, 0, 4];
+        assert_eq!(forecast_total(&days), 15);
+        assert_eq!(forecast_total(&[]), 0);
+        assert_eq!(forecast_bar_height(0, 5), 6.0);
+        assert_eq!(forecast_bar_height(2, 0), 6.0);
+        assert_eq!(forecast_bar_height(1, 4), 28.5);
+        assert_eq!(forecast_bar_height(4, 4), 60.0);
     }
 
     #[test]

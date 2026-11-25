@@ -56,14 +56,14 @@ impl Statistics {
 }
 
 /// Anki numbers days from the collection's creation time, not from midnight.
-fn day_number(timestamp_secs: i64, collection_start_secs: i64) -> i64 {
+pub fn day_number(timestamp_secs: i64, collection_start_secs: i64) -> i64 {
     timestamp_secs
         .saturating_sub(collection_start_secs)
         .div_euclid(SECONDS_PER_DAY)
 }
 
 /// Weekday names for the history bars, using the Unix epoch as the anchor.
-fn weekday(day: i64, collection_start_secs: i64) -> &'static str {
+pub fn weekday(day: i64, collection_start_secs: i64) -> &'static str {
     let absolute = collection_start_secs
         .div_euclid(SECONDS_PER_DAY)
         .saturating_add(day);

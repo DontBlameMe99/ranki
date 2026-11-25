@@ -64,6 +64,7 @@ use serde_json::Map;
 use serde_json::Value as Json;
 use serde_json::json;
 pub const SEARCH_SYNTAX: &str = "deck:, tag:, note:, is:new/learn/review/suspended/buried, plain field text, * wildcard";
+const FORECAST_DAY_MS: i64 = 86_400_000;
 
 /// An Anki collection backed by a SQLite file.
 pub struct Collection {
@@ -735,6 +736,50 @@ impl Store for Collection {
         Ok(stats_from_counts(counts))
     }
 
+    fn due_forecast(
+        &self,
+        days: usize,
+        now_secs: i64,
+    ) -> Result<Vec<usize>, StoreError> {
+        let mut counts = vec![0_usize; days];
+        if days == 0 {
+            return Ok(counts);
+        }
+        let created = self.collection_created()?;
+        let today = anki::day_number(now_secs, created)?;
+        let last = i64::try_from(days)
+            .map_err(|_| invalid("forecast too long"))?
+            .saturating_sub(1);
+        let horizon = today
+            .checked_add(last)
+            .ok_or_else(|| invalid("forecast overflow"))?;
+        let end_today_ms = today
+            .checked_add(1)
+            .and_then(|day| day.checked_mul(FORECAST_DAY_MS))
+            .and_then(|offset| {
+                created
+                    .checked_mul(1_000)
+                    .and_then(|millis| millis.checked_add(offset))
+            })
+            .ok_or_else(|| invalid("forecast overflow"))?;
+        let sql = "SELECT CASE WHEN c.queue = 1 OR c.due < ?1 THEN ?1 ELSE c.due END AS due_day, \
+                   COUNT(*) FROM cards c WHERE (c.queue = 1 AND c.due <= ?2) \
+                   OR (c.queue IN (2, 3) AND c.due <= ?3) GROUP BY due_day";
+        let mut statement = self.conn.prepare(sql).map_err(backend)?;
+        let rows = statement
+            .query_map(params![today, end_today_ms, horizon], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(backend)?;
+        for row in rows {
+            let (day, count) = row.map_err(backend)?;
+            let offset = usize::try_from(day.saturating_sub(today))
+                .unwrap_or(usize::MAX);
+            record_forecast_count(&mut counts, offset, count);
+        }
+        Ok(counts)
+    }
+
     fn deck_stats(&self) -> Result<DeckTotals, StoreError> {
         let decks = self.deck_list()?;
         let counts = deck_card_counts(&self.conn)?;
@@ -1025,6 +1070,11 @@ const fn add_deck_stats(total: &mut DeckStats, counts: DeckStats) {
         total.learning_cards.saturating_add(counts.learning_cards);
     total.review_cards = total.review_cards.saturating_add(counts.review_cards);
     total.total_cards = total.total_cards.saturating_add(counts.total_cards);
+}
+fn record_forecast_count(counts: &mut [usize], offset: usize, count: i64) {
+    if let Some(slot) = counts.get_mut(offset) {
+        *slot = usize::try_from(count).unwrap_or(usize::MAX);
+    }
 }
 
 fn stats_from_counts(counts: Counts) -> DeckStats {
