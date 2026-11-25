@@ -5227,6 +5227,53 @@ mod tests {
         assert_eq!(state.1, 0);
     }
 
+    #[gpui::test]
+    fn image_button_removes_the_chosen_image(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(ModalStore),
+                    options: Options::default(),
+                    save_settings: Arc::new(|_| Ok(())),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(1280.), px(800.)));
+        cx.update_entity(&root, |root, cx| {
+            root.view = super::View::AddCard;
+            let occlusion = root
+                .models
+                .iter()
+                .position(ranki_model::NoteModel::is_image_occlusion)
+                .expect("stock occlusion");
+            root.add.model_index = occlusion;
+            root.add.occlusion.image = Some(String::from("diagram.png"));
+            root.add.occlusion.masks = vec![crate::occlusion::default_mask(0)];
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+            root.clone()
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let button = cx
+            .debug_bounds("io-image")
+            .expect("unified image button bounds");
+        click_test_point(cx, button.center());
+
+        let state = cx.read_entity(&root, |root, _| {
+            (
+                root.add.occlusion.image.clone(),
+                root.add.occlusion.masks.len(),
+            )
+        });
+        assert_eq!(state, (None, 0));
+    }
+
     #[test]
     fn installing_a_stock_type_keeps_its_tab_selected() {
         let mut installed = ranki_model::StockModelKind::Cloze.definition();
