@@ -122,20 +122,9 @@ fn review_records(history: &[RevLog]) -> Vec<ReviewRecord> {
 }
 
 fn configured_params(config: &Config) -> FsrsParams {
-    if config.scheduler.params.is_empty() {
-        return FsrsParams::default();
-    }
-    let mut values = config.scheduler.params.clone();
-    match values.len() {
-        19 => values.push(config.scheduler.decay),
-        21 => {
-            if let Some(slot) = values.get_mut(20) {
-                *slot = config.scheduler.decay;
-            }
-        }
-        _ => {}
-    }
-    FsrsParams::from_slice(&values).unwrap_or_default()
+    let params =
+        FsrsParams::from_slice(&config.scheduler.params).unwrap_or_default();
+    params.with_decay(config.scheduler.decay)
 }
 
 #[cfg(test)]

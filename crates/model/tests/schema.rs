@@ -27,7 +27,8 @@ fn anki_codes_round_trip() {
         (CardQueue::DayLearning, 3),
         (CardQueue::Suspended, -1),
         (CardQueue::Buried, -2),
-        (CardQueue::Preview, -3),
+        (CardQueue::ManuallyBuried, -3),
+        (CardQueue::Preview, 4),
     ] {
         assert_eq!(queue.code(), code);
         assert_eq!(CardQueue::from_code(code), queue);

@@ -66,23 +66,29 @@ pub const CREATE_STATEMENTS: &[&str] = &[
         type integer not null
     )",
     "CREATE TABLE graves (
-        oid integer not null,
-        type integer not null,
         usn integer not null,
-        PRIMARY KEY (oid, type)
-    ) WITHOUT ROWID",
+        oid integer not null,
+        type integer not null
+    )",
     "CREATE INDEX ix_notes_csum ON notes (csum)",
     "CREATE INDEX ix_notes_usn ON notes (usn)",
-    "CREATE INDEX idx_notes_mid ON notes (mid)",
     "CREATE INDEX ix_cards_nid ON cards (nid)",
     "CREATE INDEX ix_cards_sched ON cards (did, queue, due)",
     "CREATE INDEX ix_cards_usn ON cards (usn)",
-    "CREATE INDEX idx_cards_odid ON cards (odid) WHERE odid != 0",
     "CREATE INDEX ix_revlog_cid ON revlog (cid)",
     "CREATE INDEX ix_revlog_usn ON revlog (usn)",
-    "CREATE INDEX idx_graves_pending ON graves (usn)",
 ];
 
+const FSRS_PARAMS6: [f64; 21] = [
+    0.212, 1.2931, 2.3065, 8.2956, 6.4133, 0.8334, 3.0194, 0.001, 1.8722,
+    0.1666, 0.796, 1.4835, 0.0614, 0.2629, 1.6483, 0.6014, 1.8729, 0.5425,
+    0.0912, 0.0658, 0.1542,
+];
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the default collection JSON mirrors Anki's schema 11 defaults"
+)]
 pub fn default_col(now_secs: i64, now_ms: i64) -> Value {
     let model = json!({
         "id": DEFAULT_MODEL_ID,
@@ -120,7 +126,15 @@ pub fn default_col(now_secs: i64, now_ms: i64) -> Value {
         "mod": now_secs,
         "conf": 1,
         "desc": "",
-        "dyn": 0
+        "dyn": 0,
+        "collapsed": false,
+        "browserCollapsed": false,
+        "lrnToday": [0, 0],
+        "revToday": [0, 0],
+        "newToday": [0, 0],
+        "timeToday": [0, 0],
+        "extendNew": 0,
+        "extendRev": 0
     });
 
     let config = json!({
@@ -132,21 +146,51 @@ pub fn default_col(now_secs: i64, now_ms: i64) -> Value {
         "autoplay": true,
         "timer": 0,
         "replayq": true,
-        "new": {"perDay": 20, "delays": [1, 10], "separate": true, "order": 0},
-        "rev": {"perDay": 200, "fuzz": 0.05, "maxInterval": 36500},
-        "lap": {"ease4": 1.3, "ivlFct": 1.0, "maxIvl": 36500},
-        "ease4": 2.5,
-        "minSpace": 1,
-        "maxIvl": 36500,
-        "bury": true,
+        "new": {
+            "bury": false,
+            "delays": [1.0, 10.0],
+            "initialFactor": 2500,
+            "ints": [1, 4, 0],
+            "order": 1,
+            "perDay": 20
+        },
+        "rev": {
+            "bury": false,
+            "ease4": 1.3,
+            "hardFactor": 1.2,
+            "ivlFct": 1.0,
+            "maxIvl": 36500,
+            "perDay": 200
+        },
+        "lapse": {
+            "delays": [10.0],
+            "leechAction": 1,
+            "leechFails": 8,
+            "minInt": 1,
+            "mult": 0.0
+        },
         "dyn": false,
         "newMix": 0,
         "newPerDayMinimum": 0,
         "interdayLearningMix": 0,
-        "buryNew": true,
-        "buryRev": true,
-        "suspendNew": false,
-        "newOrder": 0
+        "reviewOrder": 0,
+        "newSortOrder": 0,
+        "newGatherPriority": 0,
+        "buryInterdayLearning": false,
+        "stopTimerOnAnswer": false,
+        "secondsToShowQuestion": 0.0,
+        "secondsToShowAnswer": 0.0,
+        "questionAction": 0,
+        "answerAction": 0,
+        "waitForAudio": true,
+        "easyDaysPercentages": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        "fsrsWeights": [],
+        "fsrsParams5": [],
+        "fsrsParams6": FSRS_PARAMS6,
+        "desiredRetention": 0.9,
+        "sm2Retention": 0.9,
+        "weightSearch": "",
+        "ignoreRevlogsBeforeDate": ""
     });
 
     json!({
@@ -158,7 +202,7 @@ pub fn default_col(now_secs: i64, now_ms: i64) -> Value {
         "dty": 0_i64,
         "usn": 0_i64,
         "ls": now_ms,
-        "conf": json!({"nextPos": 1_i64, "estimateReps": 0_i64, "autoUpdateEnabled": true}),
+        "conf": json!({"nextPos": 1_i64, "estimateReps": 0_i64, "autoUpdateEnabled": true, "fsrs": true, "schedVer": 2_i64, "creationOffset": 0_i64, "lastFsrsOptimize": 0_i64, "loadBalancerEnabled": true}),
         "models": json!({DEFAULT_MODEL_ID.to_string(): model}),
         "decks": json!({DEFAULT_DECK_ID.to_string(): deck}),
         "dconf": json!({"1": config}),

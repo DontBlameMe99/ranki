@@ -464,7 +464,8 @@ fn card_view(card: &ranki_model::Card) -> CardView {
     };
     let queue_view = match card.queue {
         ranki_model::CardQueue::Suspended => CardQueueView::Suspended,
-        ranki_model::CardQueue::Buried => CardQueueView::Buried,
+        ranki_model::CardQueue::Buried
+        | ranki_model::CardQueue::ManuallyBuried => CardQueueView::Buried,
         ranki_model::CardQueue::Preview => CardQueueView::Preview,
         ranki_model::CardQueue::New
         | ranki_model::CardQueue::Learning

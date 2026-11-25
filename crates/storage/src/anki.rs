@@ -6,12 +6,15 @@ use ranki_model::StoreError;
 use sha1::Digest;
 use sha1::Sha1;
 use std::process;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 const DAY_SECS: i64 = 86_400;
+static GUID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const BASE91: &[u8; 91] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\"";
+    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&()*+,-./:;<=>?@[]^_`{|}~";
 
 pub fn now_secs() -> Result<i64, StoreError> {
     let millis = now_ms()?;
@@ -54,12 +57,12 @@ pub fn guid(id: Id) -> Result<String, StoreError> {
     let nanos = duration
         .as_secs()
         .wrapping_mul(1_000_000_000)
-        .wrapping_add(u64::from(duration.subsec_nanos()))
-        .wrapping_add(u64::from(process::id()));
-    let mut bytes = Vec::with_capacity(16);
-    bytes.extend_from_slice(&id.to_be_bytes());
-    bytes.extend_from_slice(&nanos.to_be_bytes());
-    Ok(base91(&bytes))
+        .wrapping_add(u64::from(duration.subsec_nanos()));
+    let seed = nanos
+        ^ u64::from(process::id()).rotate_left(32)
+        ^ u64::try_from(id).unwrap_or_default().rotate_left(17)
+        ^ GUID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    Ok(anki_base91(seed))
 }
 
 pub fn encode_fields(fields: &[String]) -> String {
@@ -141,23 +144,30 @@ pub fn encode_deck_name(name: &str) -> String {
 }
 
 #[must_use]
-pub fn deck_common(usn: i32, modified: i64) -> Vec<u8> {
-    let mut bytes = vec![0x08];
-    append_varint(&mut bytes, u64::try_from(usn).unwrap_or(0));
-    bytes.push(0x18);
-    append_varint(&mut bytes, u64::try_from(modified).unwrap_or(0));
+pub fn normal_deck_kind(config_id: i64) -> Vec<u8> {
+    let mut normal = vec![0x08];
+    append_varint(&mut normal, u64::try_from(config_id).unwrap_or(1));
+    let mut bytes = vec![0x0a];
+    append_varint(&mut bytes, u64::try_from(normal.len()).unwrap_or(2));
+    bytes.extend_from_slice(&normal);
     bytes
 }
 
 /// Builds a schema-18 `notetypes.config` blob: kind, CSS, stock kind.
 #[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the schema-18 config fields are written together"
+)]
 pub fn notetype_config(
     kind: i32,
+    sort_field_index: u16,
     stock_kind: Option<i32>,
     css: &str,
 ) -> Vec<u8> {
     let mut bytes = Vec::new();
     varint_field(&mut bytes, 1, u64::try_from(kind).unwrap_or(0));
+    varint_field(&mut bytes, 2, u64::from(sort_field_index));
     string_field(&mut bytes, 3, css);
     if let Some(stock) = stock_kind {
         varint_field(&mut bytes, 9, u64::try_from(stock).unwrap_or(0));
@@ -282,35 +292,14 @@ fn read_varint(bytes: &[u8], pos: &mut usize) -> Option<u64> {
     }
 }
 
-fn base91(bytes: &[u8]) -> String {
-    let mut output = String::new();
-    let mut buffer = 0u32;
-    let mut bits = 0u8;
-    for byte in bytes {
-        buffer |= u32::from(*byte).wrapping_shl(u32::from(bits));
-        bits = bits.saturating_add(8);
-        while bits > 13 {
-            push_base91(&mut output, buffer);
-            buffer >>= 13;
-            bits = bits.saturating_sub(13);
-        }
+fn anki_base91(mut value: u64) -> String {
+    let mut reversed = String::new();
+    while value > 0 {
+        let digit = usize::try_from(value % 91).unwrap_or(0);
+        reversed.push(char::from(BASE91.get(digit).copied().unwrap_or(b'?')));
+        value /= 91;
     }
-    if bits > 0 {
-        push_base91(&mut output, buffer);
-    }
-    output
-}
-fn push_base91(output: &mut String, buffer: u32) {
-    let value = buffer & 8191;
-    let index = usize::try_from(value % 91).unwrap_or(0);
-    let character = BASE91.get(index).copied().unwrap_or(b'?');
-    output.push(char::from(character));
-    if value > 90 {
-        let second =
-            usize::try_from(value.checked_div(91).unwrap_or(0)).unwrap_or(0);
-        let character = BASE91.get(second).copied().unwrap_or(b'?');
-        output.push(char::from(character));
-    }
+    reversed.chars().rev().collect()
 }
 
 fn remove_tags(input: &str) -> String {
@@ -360,5 +349,23 @@ fn decode_entity(entity: &str) -> Option<char> {
             .strip_prefix('#')
             .and_then(|value| value.parse::<u32>().ok())
             .and_then(char::from_u32),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::anki_base91;
+
+    #[test]
+    fn base91_matches_anki_vectors() {
+        assert_eq!(anki_base91(0), "");
+        assert_eq!(anki_base91(1), "b");
+        assert_eq!(anki_base91(1_234_567_890), "saAKk");
+        assert_eq!(anki_base91(u64::MAX), "Rj&Z5m[>Zp");
+    }
+
+    #[test]
+    fn normal_deck_kind_declares_a_normal_deck() {
+        assert_eq!(super::normal_deck_kind(1), vec![0x0a, 0x02, 0x08, 0x01]);
     }
 }

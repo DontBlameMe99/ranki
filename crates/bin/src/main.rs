@@ -908,6 +908,12 @@ pub(crate) fn open_or_create(path: &Path) -> CliResult<Collection> {
 }
 
 pub(crate) fn now_secs() -> CliResult<i64> {
+    let pinned = env::var("RANKI_DEV_NOW_SECS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok());
+    if let Some(seconds) = pinned {
+        return Ok(seconds);
+    }
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| CliError::Message(error.to_string()))?;

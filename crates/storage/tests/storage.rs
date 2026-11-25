@@ -99,7 +99,7 @@ fn create_writes_anki_schema_and_default_json() {
         .map(|row| row.expect("row"))
         .collect();
     assert!(indexes.contains(&"ix_cards_sched".to_owned()));
-    assert!(indexes.contains(&"idx_graves_pending".to_owned()));
+    assert!(indexes.contains(&"ix_notes_csum".to_owned()));
     let (configuration, models, decks, dconf, tags): (
         String,
         String,
@@ -166,8 +166,8 @@ fn review_and_day_learning_dues_use_days_since_collection_creation() {
             (22, 2, today.saturating_add(1)),
             (23, 3, today),
             (24, 3, today.saturating_add(1)),
-            (25, 1, now.saturating_mul(1_000)),
-            (26, 1, now.saturating_mul(1_000).saturating_add(1)),
+            (25, 1, now),
+            (26, 1, now.saturating_add(1)),
         ];
         for (id, queue, due) in rows {
             conn.execute(
@@ -207,7 +207,7 @@ fn due_forecast_buckets_current_overdue_learning_and_future_cards() {
     let (_directory, path) = fixture();
     let created = 1_685_412_000_i64;
     let now = created.saturating_add(172_800);
-    let day_ms = 86_400_000_i64;
+    let day_secs = 86_400_i64;
     {
         let conn = Connection::open(&path).expect("open");
         conn.execute("UPDATE col SET crt = ?1 WHERE id = 1", [created])
@@ -216,14 +216,8 @@ fn due_forecast_buckets_current_overdue_learning_and_future_cards() {
             (31_i64, 2_i64, 1_i64),
             (32, 2, 2),
             (33, 3, 2),
-            (34, 1, now.saturating_mul(1_000)),
-            (
-                35,
-                1,
-                created
-                    .saturating_mul(1_000)
-                    .saturating_add(day_ms.saturating_mul(5)),
-            ),
+            (34, 1, now),
+            (35, 1, created.saturating_add(day_secs.saturating_mul(5))),
             (36, 2, 3),
             (37, 2, 3),
             (38, 3, 4),
@@ -430,8 +424,8 @@ fn due_cards_respects_queue_and_time_windows() {
         .expect("set crt");
     let rows = [
         (10_i64, 0_i64, 7_i64),
-        (11, 1, now.saturating_mul(1000)),
-        (12, 1, now.saturating_mul(1000).saturating_add(60_000)),
+        (11, 1, now),
+        (12, 1, now.saturating_add(60)),
         (13, 2, today),
         (14, 2, today.saturating_add(1)),
         (15, 3, today),
@@ -471,8 +465,8 @@ fn stats_count_only_cards_due_at_the_given_time() {
         .expect("set crt");
     let rows = [
         (10_i64, 0_i64, 7_i64),
-        (11, 1, now.saturating_mul(1_000)),
-        (12, 1, now.saturating_mul(1_000).saturating_add(60_000)),
+        (11, 1, now),
+        (12, 1, now.saturating_add(60)),
         (13, 2, 0),
         (14, 2, 1),
         (15, 3, 0),
@@ -609,10 +603,11 @@ fn apply_review_updates_card_log_and_collection_metadata() {
     assert_eq!(log.card_id, card.id);
     assert_eq!(log.ease, Rating::Good);
     assert!(store.collection_modified().expect("modified") > before);
-    assert!(store.apply_review(&decision).is_err());
+    store.apply_review(&decision).expect("second review");
     assert_eq!(
-        store.revlog(9_000).expect("revlog").expect("entry").ease,
-        Rating::Good
+        store.review_history().expect("history").len(),
+        2,
+        "review ids are uniquified"
     );
 }
 
@@ -648,7 +643,7 @@ fn undo_review_restores_card_and_deletes_log() {
             .expect("undo")
     );
     let mut restored = store.card(before.id).expect("card").expect("exists");
-    assert!(restored.usn > before.usn, "undo stamps a new sync usn");
+    assert_eq!(restored.usn, -1, "local undo stays pending sync");
     restored.usn = before.usn;
     assert_eq!(restored, before);
     assert_eq!(
@@ -736,7 +731,7 @@ fn stale_review_writes_are_rejected() {
 }
 
 #[test]
-fn second_review_with_the_same_stamp_is_rejected() {
+fn repeated_review_gets_a_unique_log_id() {
     let (_directory, path) = fixture();
     let mut store = Collection::open(&path).expect("open");
     store
@@ -757,8 +752,8 @@ fn second_review_with_the_same_stamp_is_rejected() {
     );
     let second = first.clone();
     store.apply_review(&first).expect("first write");
-    assert!(store.apply_review(&second).is_err());
-    assert_eq!(store.review_history().expect("history").len(), 1);
+    store.apply_review(&second).expect("second write");
+    assert_eq!(store.review_history().expect("history").len(), 2);
 }
 
 #[test]
@@ -825,7 +820,7 @@ fn due_stats_count_only_cards_due_now() {
             .expect("set crt");
         for (id, queue, due) in [
             (21_i64, 0_i64, 0_i64),
-            (22, 1, now.saturating_mul(1_000)),
+            (22, 1, now),
             (23, 3, 1_i64),
             (24, 2, 2_i64),
             (25, 2, 1_i64),

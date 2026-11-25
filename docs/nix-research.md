@@ -31,7 +31,7 @@ from the devShell `shellHook`. Install the wrapped package from `self.packages.<
 There is no config file reader in the Rust code. `Cli` has only global `--collection` and
 `--media_dir`, both `Option<PathBuf>`. `ranki_ui::Options` has `light_theme: bool`, so
 `theme = "system"` needs Rust work. `DUE_BATCH` is 20, the hint bar is always drawn, and the
-UI starts on FSRS with `desired_retention = 0.9`. The user can toggle FSRS and SM-2 with `T`.
+UI starts on FSRS with `desired_retention = 0.9`. The scheduler is fixed to FSRS.
 Cargo has `serde` and `serde_json`, but no direct TOML crate. A reader needs `toml` with serde.
 
 ## Proposed config schema
@@ -54,10 +54,9 @@ desired_retention = 0.9
 
 The schema matches current defaults. Keep paths as strings, since a Nix path literal in a
 generated config can be copied into the store. Validate `theme` as `dark | light | system`,
-`algorithm` as `fsrs | sm2`, `font_size` as a positive float, `review_batch_size` as an
-integer from 1 to 1000, `desired_retention` as a float in `(0, 1)`, and
-`show_keyboard_hints` as a bool. Scheduler values are initial values, since the user can
-change the scheduler during a session.
+`algorithm` as `fsrs`, `font_size` as a positive float, `review_batch_size` as an
+integer from 1 to 1000, `desired_retention` as a float in `0.7..=0.99`, and
+`show_keyboard_hints` as a bool.
 
 ## Flake patch sketch
 

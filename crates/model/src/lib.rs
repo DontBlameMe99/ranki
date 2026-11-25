@@ -89,6 +89,7 @@ pub enum CardQueue {
     DayLearning,
     Suspended,
     Buried,
+    ManuallyBuried,
     Preview,
 }
 
@@ -102,7 +103,8 @@ impl CardQueue {
             Self::DayLearning => 3,
             Self::Suspended => -1,
             Self::Buried => -2,
-            Self::Preview => -3,
+            Self::ManuallyBuried => -3,
+            Self::Preview => 4,
         }
     }
 
@@ -115,7 +117,8 @@ impl CardQueue {
             2 => Self::Review,
             3 => Self::DayLearning,
             -2 => Self::Buried,
-            -3 => Self::Preview,
+            -3 => Self::ManuallyBuried,
+            4 => Self::Preview,
             _ => Self::Suspended,
         }
     }
@@ -283,6 +286,8 @@ pub struct NoteModel {
     pub fields: Vec<String>,
     pub templates: Vec<CardTemplate>,
     pub css: String,
+    #[serde(default)]
+    pub sort_field_index: u16,
     #[serde(default)]
     pub kind: NoteKind,
     #[serde(default)]
@@ -536,7 +541,7 @@ pub trait Store {
     fn apply_review(
         &mut self,
         decision: &ReviewDecision,
-    ) -> Result<(), StoreError>;
+    ) -> Result<Id, StoreError>;
 
     /// Reverses one persisted review: deletes the review log and restores the
     /// card row to the snapshot taken before that review.

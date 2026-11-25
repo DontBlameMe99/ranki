@@ -1,14 +1,13 @@
 use ranki_model::{
     Card, CardQueue, CardType, Rating, RevLogKind, ReviewDecision,
 };
-use serde_json::{Map, Number, Value};
+use serde_json::{Map, Value};
 
 use crate::shared::{
     FuzzInput, ReviewContext, ReviewOutcome, StepConfig, as_f32, as_i32,
-    due_from_days, elapsed_days, f32_from_f64, factor_or_default, finish,
-    fuzz_interval, is_schedulable, minimum_review_fuzz_interval,
-    positive_factor, preview_interval, step_outcome, unchanged,
-    unchanged_outcome,
+    due_from_days, elapsed_days, f32_from_f64, finish, fuzz_interval,
+    is_schedulable, minimum_review_fuzz_interval, positive_factor,
+    preview_interval, step_outcome, unchanged, unchanged_outcome,
 };
 
 /// Anki's default FSRS-6 parameters (21 weights, positive `w20` decay).
@@ -143,6 +142,21 @@ pub const fn clamp_desired_retention(value: f32) -> f32 {
     } else {
         DEFAULT_DESIRED_RETENTION
     }
+}
+
+fn difficulty_factor(difficulty: f32) -> u32 {
+    if !difficulty.is_finite() || difficulty <= 0.0 {
+        return 0;
+    }
+    let shifted = ((difficulty - 1.0) / 9.0 + 0.1) * 1_000.0;
+    let scaled = shifted.round().min(4_294_967_295.0);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "difficulty is clamped to a non-negative u32 range"
+    )]
+    let factor = scaled as u32;
+    factor
 }
 
 fn forgetting_factor(decay: f32) -> f32 {
@@ -357,7 +371,7 @@ impl FsrsScheduler {
                     now_secs: ctx.now_secs,
                 },
             ),
-            factor: factor_or_default(ctx.card.factor),
+            factor: difficulty_factor(memory.difficulty),
             graduation,
         }
     }
@@ -658,10 +672,9 @@ fn read_memory(data: &str) -> Option<Memory> {
     })
 }
 
-fn json_number(value: f32) -> Value {
-    Value::Number(
-        Number::from_f64(f64::from(value)).unwrap_or_else(|| Number::from(0)),
-    )
+fn json_number(value: f32, decimals: usize) -> Value {
+    let text = format!("{value:.decimals$}");
+    serde_json::from_str(&text).unwrap_or(Value::Null)
 }
 fn rounded(value: f32, factor: f32) -> f32 {
     (value * factor).round() / factor
@@ -681,19 +694,12 @@ fn write_memory(data: &str, memory: Memory, write: MemoryWrite) -> String {
         rounded(clamp_desired_retention(write.desired_retention), 100.0);
     let rounded_decay =
         rounded(positive_factor(write.decay, DEFAULT_DECAY), 1_000.0);
-    if data.trim().is_empty() {
-        return format!(
-            "{{\"s\":{stability},\"d\":{difficulty},\"dr\":{retention},\
-             \"decay\":{rounded_decay},\"lrt\":{}}}",
-            write.now_secs
-        );
-    }
     let mut object: Map<String, Value> =
         serde_json::from_str(data).ok().unwrap_or_default();
-    object.insert(String::from("s"), json_number(stability));
-    object.insert(String::from("d"), json_number(difficulty));
-    object.insert(String::from("dr"), json_number(retention));
-    object.insert(String::from("decay"), json_number(rounded_decay));
-    object.insert(String::from("lrt"), Value::from(write.now_secs));
+    let _ = object.insert(String::from("s"), json_number(stability, 4));
+    let _ = object.insert(String::from("d"), json_number(difficulty, 3));
+    let _ = object.insert(String::from("dr"), json_number(retention, 2));
+    let _ = object.insert(String::from("decay"), json_number(rounded_decay, 3));
+    let _ = object.insert(String::from("lrt"), Value::from(write.now_secs));
     serde_json::to_string(&object).unwrap_or_default()
 }

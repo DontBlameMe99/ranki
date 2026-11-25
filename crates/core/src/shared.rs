@@ -3,13 +3,21 @@ use ranki_model::next_id;
 use ranki_model::{
     Card, CardQueue, CardType, Rating, RevLog, RevLogKind, ReviewDecision,
 };
+use std::cell::RefCell;
+use std::collections::HashMap;
 
-use crate::{DEFAULT_FACTOR, LEFT_STEP_MARKER, SECONDS_PER_DAY};
+use crate::SECONDS_PER_DAY;
+use rand::RngExt as _;
+use rand::SeedableRng as _;
+use rand::rngs::StdRng;
 
+thread_local! {
+    static FUZZ_FACTORS: RefCell<HashMap<u64, f32>> = RefCell::new(HashMap::new());
+}
 const I32_MAX_F32: f32 = 2_147_483_647.0;
 const I32_MIN_F32: f32 = -2_147_483_648.0;
 
-const MAX_STEPS: u32 = u32::MAX - LEFT_STEP_MARKER;
+const MAX_STEPS: u32 = u32::MAX;
 
 pub struct ReviewContext<'card> {
     pub card: &'card Card,
@@ -65,7 +73,19 @@ pub const fn day_number(now_secs: i64, collection_start_secs: i64) -> i64 {
 }
 
 pub fn elapsed_days(card: &Card, now_secs: i64) -> u32 {
-    let elapsed = now_secs.saturating_sub(card.modified);
+    let last = card
+        .data
+        .contains("lrt")
+        .then(|| {
+            serde_json::from_str::<serde_json::Value>(&card.data)
+                .ok()
+                .and_then(|value| {
+                    value.get("lrt").and_then(serde_json::Value::as_i64)
+                })
+        })
+        .flatten()
+        .unwrap_or(card.modified);
+    let elapsed = now_secs.saturating_sub(last);
     u32::try_from(elapsed.div_euclid(SECONDS_PER_DAY)).unwrap_or(u32::MAX)
 }
 
@@ -79,20 +99,13 @@ pub fn due_from_days(
 }
 
 pub fn due_from_seconds(now_secs: i64, seconds: u32) -> i64 {
-    now_secs
-        .saturating_mul(1_000)
-        .saturating_add(i64::from(seconds).saturating_mul(1_000))
+    now_secs.saturating_add(i64::from(seconds))
 }
 
 /// Converts Anki's packed `left` value into a step count.
 pub fn remaining_steps(left: u32, total: usize) -> usize {
     let cap = u32::try_from(total).unwrap_or(u32::MAX);
-    let packed = if left >= LEFT_STEP_MARKER {
-        left.saturating_sub(LEFT_STEP_MARKER)
-    } else {
-        left
-    };
-    usize::try_from(packed.min(cap)).unwrap_or(total)
+    usize::try_from(left.min(cap)).unwrap_or(total)
 }
 
 /// Step presets are minutes, while Anki stores step delays in seconds.
@@ -190,8 +203,6 @@ pub fn step_outcome(
                 Rating::Good => remaining.saturating_sub(1),
                 Rating::Easy => 0,
             };
-            let interval =
-                i32::try_from(seconds).unwrap_or(i32::MAX).saturating_neg();
             ReviewOutcome {
                 card_type: if config.relearning {
                     CardType::Relearning
@@ -200,11 +211,9 @@ pub fn step_outcome(
                 },
                 queue: CardQueue::Learning,
                 due: due_from_seconds(ctx.now_secs, seconds),
-                interval,
+                interval: 0,
                 lapses: 0,
-                left: LEFT_STEP_MARKER.saturating_add(
-                    u32::try_from(steps_left).unwrap_or(MAX_STEPS),
-                ),
+                left: u32::try_from(steps_left).unwrap_or(MAX_STEPS),
                 factor: config.factor,
                 data: config.data,
                 kind,
@@ -269,7 +278,11 @@ pub fn finish(
     card.queue = outcome.queue;
     card.due = outcome.due;
     card.interval = outcome.interval;
-    card.factor = outcome.factor;
+    card.factor = if outcome.step_seconds.is_some() {
+        0
+    } else {
+        2_500
+    };
     card.reps = card.reps.saturating_add(1);
     card.lapses = card.lapses.saturating_add(outcome.lapses);
     card.left = outcome.left;
@@ -285,7 +298,7 @@ pub fn finish(
             .last_interval
             .unwrap_or_else(|| ctx.card.interval.max(0)),
         factor: outcome.factor,
-        time_ms: 0,
+        time_ms: 1_000,
         kind: outcome.kind,
     };
     ReviewDecision {
@@ -316,10 +329,6 @@ pub fn unchanged(ctx: &ReviewContext<'_>) -> ReviewDecision {
         expected_modified: ctx.card.modified,
         expected_usn: ctx.card.usn,
     }
-}
-
-pub const fn factor_or_default(factor: u32) -> u32 {
-    if factor == 0 { DEFAULT_FACTOR } else { factor }
 }
 
 pub fn positive_factor(value: f32, fallback: f32) -> f32 {
@@ -354,17 +363,8 @@ pub const fn f32_from_f64(value: f64) -> f32 {
     value as f32
 }
 
-const fn mix64(value: u64) -> u64 {
-    let mut state = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    state ^ (state >> 31)
-}
-
-fn hash_interval(card_id: i64, reps: u32) -> u64 {
-    let id = u64::from_be_bytes(card_id.to_be_bytes());
-    let seed = id ^ u64::from(reps).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    mix64(seed)
+fn fuzz_seed(card_id: i64, reps: u32) -> u64 {
+    u64::from_be_bytes(card_id.to_be_bytes()).wrapping_add(u64::from(reps))
 }
 
 fn as_u32(value: f32) -> u32 {
@@ -427,10 +427,14 @@ pub fn fuzz_interval(input: FuzzInput) -> i32 {
             .unwrap_or(i32::MAX);
     }
     let (lower, upper) = fuzz_bounds(raw, minimum, maximum);
-    let seed = hash_interval(input.card_id, input.reps)
-        .checked_rem(1_000_000)
-        .unwrap_or(0);
-    let factor = as_f32_u32(u32::try_from(seed).unwrap_or(0)) / 1_000_000.0;
+    let seed = fuzz_seed(input.card_id, input.reps);
+    let factor = FUZZ_FACTORS.with(|slot| {
+        let mut cache = slot.borrow_mut();
+        *cache.entry(seed).or_insert_with(|| {
+            let mut rng = StdRng::seed_from_u64(seed);
+            rng.random_range(0.0..1.0)
+        })
+    });
     let span = as_f32_u32(upper.saturating_sub(lower).saturating_add(1));
     let picked = (as_f32_u32(lower) + factor * span).floor();
     i32::try_from(as_u32(picked).clamp(minimum, maximum)).unwrap_or(i32::MAX)

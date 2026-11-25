@@ -7,7 +7,7 @@ use zip::result::ZipError;
 
 /// An error produced while reading or writing an Anki package.
 #[derive(Debug, thiserror::Error)]
-#[error("{message}")]
+#[error("{message}{}", source.as_ref().map(|error| format!(": {error}")).unwrap_or_default())]
 pub struct FormatError {
     message: String,
     #[source]

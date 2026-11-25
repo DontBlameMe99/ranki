@@ -14,6 +14,7 @@ use rusqlite::Connection;
 use rusqlite::MAIN_DB;
 use rusqlite::backup::Progress;
 use serde::Serialize;
+use serde_json::Value;
 use tempfile::NamedTempFile;
 use zip::CompressionMethod;
 use zip::ZipArchive;
@@ -413,8 +414,113 @@ fn snapshot_collection(collection: &Path) -> Result<Vec<u8>, FormatError> {
         .backup(MAIN_DB, snapshot.path(), None::<fn(Progress)>)
         .map_err(db_error("cannot snapshot collection"))?;
     drop(source);
+    let snapshot_db = Connection::open(snapshot.path())
+        .map_err(db_error("cannot open collection snapshot"))?;
+    ranki_storage::register_collations(&snapshot_db).map_err(|error| {
+        FormatError::with_source("cannot register collection collations", error)
+    })?;
+    normalize_pending_usns(&snapshot_db)?;
+    normalize_col_metadata(&snapshot_db)?;
+    drop(snapshot_db);
     fs::read(snapshot.path())
         .map_err(io_error("cannot read collection snapshot"))
+}
+fn normalize_pending_usns(conn: &Connection) -> Result<(), FormatError> {
+    let mut statement = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .map_err(db_error("cannot inspect collection snapshot"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(db_error("cannot inspect collection snapshot"))?;
+    let mut tables = Vec::new();
+    for row in rows {
+        tables
+            .push(row.map_err(db_error("cannot inspect collection snapshot"))?);
+    }
+    drop(statement);
+    for table in tables {
+        if [
+            "notes",
+            "cards",
+            "revlog",
+            "graves",
+            "config",
+            "notetypes",
+            "templates",
+            "decks",
+            "deck_config",
+            "tags",
+            "col",
+        ]
+        .contains(&table.as_str())
+        {
+            conn.execute(
+                &format!("UPDATE {table} SET usn = 0 WHERE usn < 0"),
+                [],
+            )
+            .map_err(db_error("cannot normalize pending sync ids"))?;
+        }
+    }
+    Ok(())
+}
+
+fn normalize_col_metadata(conn: &Connection) -> Result<(), FormatError> {
+    for key in ["conf", "models", "decks", "dconf", "tags"] {
+        let raw: Option<String> = conn
+            .query_row(
+                &format!("SELECT {key} FROM col WHERE id = 1"),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db_error("cannot read collection metadata"))?;
+        let Some(value) = raw else {
+            continue;
+        };
+        let serialized = if value.contains("\"usn\":-1") {
+            normalize_metadata(&value)?
+        } else {
+            value
+        };
+        conn.execute(
+            &format!("UPDATE col SET {key} = ?1 WHERE id = 1"),
+            [serialized],
+        )
+        .map_err(db_error("cannot normalize pending sync ids"))?;
+    }
+    Ok(())
+}
+
+fn normalize_metadata(raw: &str) -> Result<String, FormatError> {
+    let Ok(parsed) = serde_json::from_str::<Value>(raw) else {
+        return Ok(raw.to_owned());
+    };
+    serde_json::to_string(&normalize_usn(parsed))
+        .map_err(json_error("cannot encode collection metadata"))
+}
+
+fn normalize_usn(value: Value) -> Value {
+    match value {
+        Value::Object(mut map) => {
+            if map
+                .get("usn")
+                .is_some_and(|entry| entry.as_i64() == Some(-1))
+            {
+                let _ = map.insert("usn".to_owned(), Value::from(0));
+            }
+            Value::Object(
+                map.into_iter()
+                    .map(|(key, entry)| (key, normalize_usn(entry)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(normalize_usn).collect())
+        }
+        other @ (Value::Null
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)) => other,
+    }
 }
 
 fn media_mapping(media_files: &[MediaFile]) -> BTreeMap<String, String> {

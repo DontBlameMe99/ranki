@@ -1177,6 +1177,7 @@ mod tests {
                 ord: 0,
             }],
             css: String::new(),
+            sort_field_index: 0,
             kind: NoteKind::Normal,
             original_stock_kind: None,
             field_tags: Vec::new(),

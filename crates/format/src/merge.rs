@@ -7,6 +7,7 @@ use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
 use rusqlite::params;
+use rusqlite::types::Value as SqlValue;
 use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
@@ -503,6 +504,7 @@ fn insert_deck_row(
         .and_then(|usn| i32::try_from(usn).ok())
         .unwrap_or_default();
     let modified = entry.get("mod").and_then(Value::as_i64).unwrap_or_default();
+    let config_id = entry.get("conf").and_then(Value::as_i64).unwrap_or(1);
     transaction
         .execute(
             "INSERT OR IGNORE INTO main.decks (id, name, mtime_secs, usn, common, kind)
@@ -512,8 +514,8 @@ fn insert_deck_row(
                 ranki_storage::encode_deck_name(name),
                 modified,
                 usn,
-                ranki_storage::deck_common(usn, modified),
                 Vec::<u8>::new(),
+                ranki_storage::normal_deck_kind(config_id),
             ],
         )
         .map(|_| ())
@@ -614,7 +616,37 @@ fn merge_tags(
     }
     Ok(())
 }
+fn text_value(value: SqlValue) -> String {
+    match value {
+        SqlValue::Text(text) => text,
+        SqlValue::Blob(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        SqlValue::Integer(number) => number.to_string(),
+        SqlValue::Real(number) => number.to_string(),
+        SqlValue::Null => String::new(),
+    }
+}
 
+fn merge_sparse_config(existing: Option<&Value>, incoming: &Value) -> Value {
+    let Some(full) = existing.and_then(Value::as_object) else {
+        return incoming.clone();
+    };
+    let Some(partial) = incoming.as_object() else {
+        return incoming.clone();
+    };
+    if partial.len() > 4 {
+        return incoming.clone();
+    }
+    let mut merged = full.clone();
+    for (field, field_value) in partial {
+        let _ = merged.insert(field.clone(), field_value.clone());
+    }
+    Value::Object(merged)
+}
+
+#[expect(
+    clippy::excessive_nesting,
+    reason = "sparse schema-18 preset entries inherit destination defaults"
+)]
 fn merge_dconf(
     destination: &mut Value,
     incoming: &Value,
@@ -633,6 +665,27 @@ fn merge_dconf(
             let _ = used.insert(old_id);
             old_id
         };
+        let config_name =
+            value.get("name").and_then(Value::as_str).map(str::to_owned);
+        let existing = configs
+            .get(&old_id.to_string())
+            .or_else(|| {
+                config_name.as_deref().and_then(|name| {
+                    configs.values().find(|entry| {
+                        entry.get("name").and_then(Value::as_str) == Some(name)
+                    })
+                })
+            })
+            .cloned();
+        let base = existing.or_else(|| {
+            configs
+                .values()
+                .find(|entry| {
+                    entry.as_object().is_some_and(|object| object.len() > 10)
+                })
+                .cloned()
+        });
+        value = merge_sparse_config(base.as_ref(), &value);
         set_id(&mut value, new_id, "deck config")?;
         mapping.insert(old_id, new_id);
         state.imported_deck_configs.push((old_id, new_id));
@@ -643,6 +696,10 @@ fn merge_dconf(
     Ok(mapping)
 }
 
+#[expect(
+    clippy::excessive_nesting,
+    reason = "sparse schema-18 deck entries inherit destination defaults"
+)]
 fn merge_decks(
     destination: &mut Value,
     incoming: &Value,
@@ -675,6 +732,24 @@ fn merge_decks(
             .and_then(Value::as_i64)
             .ok_or_else(|| FormatError::new("deck has no identifier"))?;
         remapper.mapping.insert(old_id, new_id);
+        let deck_name = deck_name(&value);
+        let base = decks
+            .get(&old_id.to_string())
+            .or_else(|| {
+                deck_name.as_deref().and_then(|name| {
+                    decks.values().find(|entry| {
+                        entry.get("name").and_then(Value::as_str) == Some(name)
+                    })
+                })
+            })
+            .or_else(|| {
+                decks.values().find(|entry| {
+                    entry.as_object().is_some_and(|object| object.len() > 10)
+                })
+            })
+            .cloned();
+        value = merge_sparse_config(base.as_ref(), &value);
+        set_id(&mut value, new_id, "deck")?;
         if merged.is_none() {
             decks.insert(new_id.to_string(), value);
         }
@@ -944,7 +1019,7 @@ fn rewrite_incoming_notes(
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
+                text_value(row.get::<_, SqlValue>(2)?),
             ))
         })
         .map_err(db_error("cannot read package notes"))?
@@ -1009,20 +1084,6 @@ fn merge_notes(
     transaction: &Transaction<'_>,
     state: &mut MergeState,
 ) -> Result<usize, FormatError> {
-    let duplicate: Option<String> = transaction
-        .query_row(
-            "SELECT guid FROM incoming.notes GROUP BY guid HAVING COUNT(*) > 1 ORDER BY guid LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(db_error("cannot check package note guids"))?;
-    if let Some(guid) = duplicate {
-        return Err(FormatError::new(format!(
-            "duplicate guid in package: '{guid}'"
-        )));
-    }
-
     let mut used = all_ids(transaction, "main.notes")?;
     let mut guids = existing_guids(transaction)?;
     let mut statement = transaction
@@ -1040,8 +1101,8 @@ fn merge_notes(
                 modified: row.get(3)?,
                 usn: row.get(4)?,
                 tags: row.get(5)?,
-                fields: row.get(6)?,
-                sort_field: row.get(7)?,
+                fields: text_value(row.get::<_, SqlValue>(6)?),
+                sort_field: text_value(row.get::<_, SqlValue>(7)?),
                 checksum: row.get(8)?,
                 flags: row.get(9)?,
                 data: row.get(10)?,

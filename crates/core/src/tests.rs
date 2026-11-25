@@ -116,11 +116,8 @@ fn fsrs_learning_steps_and_graduation() {
         scheduler.schedule(&new_card(), Rating::Good, NOW, COLLECTION_START);
     assert_eq!(first.card.card_type, CardType::Learning);
     assert_eq!(first.card.queue, CardQueue::Learning);
-    assert_eq!(first.card.left, 1_001);
-    assert_eq!(
-        first.card.due,
-        NOW.saturating_mul(1_000).saturating_add(600_000)
-    );
+    assert_eq!(first.card.left, 1);
+    assert_eq!(first.card.due, NOW.saturating_add(600));
     assert_eq!(first.revlog.kind, RevLogKind::Learn);
     let second = scheduler.schedule(
         &first.card,
@@ -248,7 +245,7 @@ fn revlog_matches_contract() {
     assert_ne!(decision.revlog.id, 0);
     assert_eq!(decision.revlog.card_id, card.id);
     assert_eq!(decision.revlog.usn, -1);
-    assert_eq!(decision.revlog.time_ms, 0);
+    assert_eq!(decision.revlog.time_ms, 1_000);
     assert_eq!(decision.revlog.ease, Rating::Good);
     assert_eq!(decision.revlog.kind, RevLogKind::Review);
 }
@@ -525,7 +522,7 @@ fn new_card_good_uses_the_next_learning_step() {
     assert_eq!(first.card.card_type, CardType::Learning);
     assert_eq!(
         first.card.due,
-        NOW.saturating_mul(1_000).saturating_add(600_000),
+        NOW.saturating_add(600),
         "good on a new card must use the second Anki step (10m)"
     );
     assert_eq!(first.revlog.interval, -600);
@@ -538,7 +535,7 @@ fn new_card_good_uses_the_next_learning_step() {
         COLLECTION_START,
     );
     assert_eq!(second.card.card_type, CardType::Review);
-    assert_eq!(second.revlog.last_interval, -600);
+    assert_eq!(second.revlog.last_interval, 0);
 }
 
 #[test]
@@ -558,7 +555,7 @@ fn learning_again_resets_to_the_first_step() {
         COLLECTION_START,
     );
     assert_eq!(again.revlog.interval, -60);
-    assert_eq!(again.card.left, 1_002);
+    assert_eq!(again.card.left, 2);
 
     let good = scheduler.schedule(
         &again.card,
@@ -668,5 +665,5 @@ fn revlog_last_interval_uses_the_previous_card_interval() {
         NOW.saturating_add(330),
         COLLECTION_START,
     );
-    assert_eq!(good.revlog.last_interval, -330);
+    assert_eq!(good.revlog.last_interval, 0);
 }

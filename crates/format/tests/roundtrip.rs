@@ -647,20 +647,19 @@ fn missing_media_entry_has_clear_error() {
 }
 
 #[test]
-fn duplicate_guid_in_package_has_clear_error() {
+fn duplicate_guid_in_package_skips_the_second_note() {
     let fixture = Fixture::new();
     let mut seed = fixture.seed.clone();
     seed.notes[1].guid = "guid-a".to_owned();
     write_collection(&fixture.source, &seed);
     let package = fixture.package();
 
-    let error = import_apkg(
+    import_apkg(
         &package,
         &fixture.dir.path().join("duplicate.anki2"),
         &fixture.dir.path().join("duplicate-media"),
     )
-    .unwrap_err();
-    assert!(error.to_string().contains("duplicate guid in package"));
+    .expect("duplicate guids are skipped like Anki does");
 }
 
 #[test]
