@@ -23,6 +23,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       head: ${{ steps.plan.outputs.head }}
+      variants: ${{ steps.plan.outputs.variants }}
       shards: ${{ steps.plan.outputs.shards }}
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -70,10 +71,13 @@ jobs:
           cp "$floor" performance/floor.json
           refs="$(jq -cn --rawfile lines "$RUNNER_TEMP/refs.txt" \
             '$lines | split("\n") | map(select(length > 0)) | unique')"
+          variants="$(jq -cn --arg head "$head" --argjson refs "$refs" \
+            '[$head] + $refs | unique')"
           shards="$(jq -cn --arg head "$head" --argjson refs "$refs" \
             'if ($refs | length) == 0 then [$head] else $refs end')"
           {
             echo "head=$head"
+            echo "variants=$variants"
             echo "shards=$shards"
           } >> "$GITHUB_OUTPUT"
 
@@ -85,11 +89,108 @@ jobs:
             performance/floor.json
           retention-days: 1
 
-  measure:
-    name: Measure shard
+  build:
+    name: Build variant
     needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        sha: ${{ fromJSON(needs.plan.outputs.variants) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check head
+        env:
+          HEAD_SHA: ${{ needs.plan.outputs.head }}
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ]; then
+            echo 'Checkout does not match the planned head' >&2
+            exit 1
+          fi
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Prepare variant
+        id: variant
+        env:
+          SHA: ${{ matrix.sha }}
+          HEAD_SHA: ${{ needs.plan.outputs.head }}
+        run: |
+          set -euo pipefail
+          if [ "$SHA" = "$HEAD_SHA" ]; then
+            dir="$GITHUB_WORKSPACE"
+          else
+            git fetch --depth=1 origin "$SHA"
+            dir="$RUNNER_TEMP/variant-$SHA"
+            git worktree add --detach "$dir" "$SHA"
+            mkdir -p "$dir/crates/bench"
+            cp -R "$GITHUB_WORKSPACE/crates/bench/." "$dir/crates/bench/"
+          fi
+          skip_gui=0
+          if [ "$SHA" != "$HEAD_SHA" ]; then
+            if grep -q 'ranki_ui::BenchKey' "$GITHUB_WORKSPACE/crates/bench/src/measure.rs"; then
+              grep -q 'pub enum BenchKey' "$dir/crates/ui/src/bench.rs" 2>/dev/null || skip_gui=1
+            else
+              grep -q 'pub struct BenchApp' "$dir/crates/ui/src/app.rs" 2>/dev/null || skip_gui=1
+            fi
+          fi
+          key="$(cat "$dir/Cargo.lock" "$dir/flake.lock" | sha256sum | cut -d' ' -f1)"
+          {
+            echo "dir=$dir"
+            echo "key=$key"
+            echo "skip_gui=$skip_gui"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-bench-release-${{ runner.os }}-${{ matrix.sha }}-${{ steps.variant.outputs.skip_gui }}-${{ steps.variant.outputs.key }}
+          restore-keys: |
+            cargo-bench-release-${{ runner.os }}-${{ steps.variant.outputs.skip_gui }}-${{ steps.variant.outputs.key }}-
+            cargo-bench-release-${{ runner.os }}-${{ steps.variant.outputs.skip_gui }}-
+
+      - name: Build variant
+        env:
+          SHA: ${{ matrix.sha }}
+          HEAD_SHA: ${{ needs.plan.outputs.head }}
+          DIR: ${{ steps.variant.outputs.dir }}
+          SKIP_GUI: ${{ steps.variant.outputs.skip_gui }}
+          CARGO_PROFILE_RELEASE_LTO: off
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
+        run: |
+          set -euo pipefail
+          features=()
+          if [ "$SKIP_GUI" = 1 ]; then
+            features=(--no-default-features)
+          fi
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+          (cd "$DIR" && nix develop --command cargo build --release -p ranki -p ranki-bench "${features[@]}")
+          mkdir -p "$RUNNER_TEMP/artifact/$SHA"
+          cp "$CARGO_TARGET_DIR/release/ranki" "$RUNNER_TEMP/artifact/$SHA/ranki"
+          cp "$CARGO_TARGET_DIR/release/ranki-bench" "$RUNNER_TEMP/artifact/$SHA/ranki-bench"
+          printf '{"sha":"%s","skip_gui":%s}\n' "$SHA" "$SKIP_GUI" \
+            > "$RUNNER_TEMP/artifact/$SHA/meta.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: performance-build-${{ matrix.sha }}
+          path: ${{ runner.temp }}/artifact
+          retention-days: 1
+
+  measure:
+    name: Measure shard
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -101,62 +202,68 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Check head
+        env:
+          HEAD_SHA: ${{ needs.plan.outputs.head }}
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ]; then
+            echo 'Checkout does not match the planned head' >&2
+            exit 1
+          fi
+
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Build and measure
+      - name: Download reference build
+        uses: actions/download-artifact@v4
+        with:
+          name: performance-build-${{ matrix.shard }}
+          path: performance/build
+
+      - name: Download head build
+        if: matrix.shard != needs.plan.outputs.head
+        uses: actions/download-artifact@v4
+        with:
+          name: performance-build-${{ needs.plan.outputs.head }}
+          path: performance/build
+
+      - name: Measure
         env:
           HEAD_SHA: ${{ needs.plan.outputs.head }}
           SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
-          if [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ]; then
-            echo 'Checkout does not match the planned head' >&2
+          mkdir -p "performance/raw/$SHARD"
+          : > "$RUNNER_TEMP/measure.tsv"
+          for meta in performance/build/*/meta.json; do
+            [ -f "$meta" ] || continue
+            dir="${meta%/meta.json}"
+            sha="$(jq -r .sha "$meta")"
+            chmod +x "$dir/ranki" "$dir/ranki-bench"
+            prefix="$GITHUB_WORKSPACE/performance/raw/$SHARD/$sha"
+            printf '%s %s %s\n' "$sha" "$dir" "$prefix" \
+              >> "$RUNNER_TEMP/measure.tsv"
+          done
+          if [ ! -s "$RUNNER_TEMP/measure.tsv" ]; then
+            echo 'No build artifacts found' >&2
             exit 1
           fi
-          : > "$RUNNER_TEMP/measure.tsv"
-          mkdir -p "performance/raw/$SHARD"
-          printf '%s %s 0\n' "$HEAD_SHA" "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/variants.tsv"
-          if [ "$SHARD" != "$HEAD_SHA" ]; then
-            git fetch --depth=1 origin "$SHARD"
-            dir="$RUNNER_TEMP/variant-$SHARD"
-            git worktree add --detach "$dir" "$SHARD"
-            mkdir -p "$dir/crates/bench"
-            cp -R "$GITHUB_WORKSPACE/crates/bench/." "$dir/crates/bench/"
-            printf '%s %s 1\n' "$SHARD" "$dir" >> "$RUNNER_TEMP/variants.tsv"
-          fi
-          while read -r sha dir is_variant; do
-            skip_gui=0
-            if [ "$is_variant" = 1 ]; then
-              if grep -q 'ranki_ui::BenchKey' "$GITHUB_WORKSPACE/crates/bench/src/measure.rs"; then
-                grep -q 'pub enum BenchKey' "$dir/crates/ui/src/bench.rs" 2>/dev/null || skip_gui=1
-              else
-                grep -q 'pub struct BenchApp' "$dir/crates/ui/src/app.rs" 2>/dev/null || skip_gui=1
-              fi
-            fi
-            features=()
-            if [ "$skip_gui" = 1 ]; then
-              features=(--no-default-features)
-            fi
-            target="$RUNNER_TEMP/target/$sha"
-            echo "Building $sha"
-            (cd "$dir" && CARGO_TARGET_DIR="$target" \
-              nix develop --command cargo build --release -p ranki -p ranki-bench "${features[@]}")
-            prefix="$GITHUB_WORKSPACE/performance/raw/$SHARD/$sha"
-            printf '%s %s %s %s\n' "$sha" "$dir" "$target" "$prefix" \
-              >> "$RUNNER_TEMP/measure.tsv"
-          done < "$RUNNER_TEMP/variants.tsv"
           for round in 1 2 3; do
-            while read -r sha dir target prefix; do
-              echo "Measuring $sha round $round in shard $SHARD"
-              (
-                cd "$dir"
-                nix develop --command env RANKI_BIN="$target/release/ranki" \
-                  "$target/release/ranki-bench" measure --out "$prefix-$round.json"
-              )
-            done < "$RUNNER_TEMP/measure.tsv"
+            (
+              cd "$GITHUB_WORKSPACE"
+              # shellcheck disable=SC2016
+              nix develop --command bash -c '
+                root="$1"
+                round="$2"
+                while read -r sha dir prefix; do
+                  export RANKI_BIN="$root/$dir/ranki"
+                  echo "Measuring $sha round $round"
+                  "$root/$dir/ranki-bench" measure --out "$prefix-$round.json"
+                done < "$3"
+              ' _ "$GITHUB_WORKSPACE" "$round" "$RUNNER_TEMP/measure.tsv"
+            )
           done
 
       - uses: actions/upload-artifact@v4
@@ -176,6 +283,7 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           sparse-checkout: .github/scripts
           persist-credentials: false
+
       - uses: actions/checkout@v5
         with:
           ref: ${{ needs.plan.outputs.head }}

@@ -33,11 +33,16 @@ watchdog, and writes one JSON report. The timing `method` is 1. Change it when
 the way a workload is timed changes, so old ceilings stop gating the new
 method.
 
-CI builds the pull request, its base, and every recorded ceiling commit in
-parallel. Each measurement shard runs one reference commit beside the pull
-request through all three rounds on one runner. The gate stitches each workload's
-head result with the ceiling measured in that shard, so a runner's speed cancels
-out and a ceiling is never compared with a number from another runner.
+CI builds each variant once in a parallel matrix. A shared Cargo target cache
+keyed by variant, `Cargo.lock`, `flake.lock`, and the GUI feature keeps warm
+builds out of the release compiler. Audit builds disable LTO and use 16 codegen
+units, so every variant uses the same faster profile.
+Each measurement shard downloads the head and one reference binary, then
+runs both inside the head Nix development shell, which realizes the same store
+paths used by every planned variant. Head and reference rounds alternate on
+one runner. The gate stitches each workload's head result with the ceiling
+measured in that shard, so a runner's speed cancels out and a ceiling is never
+compared with a number from another runner.
 A pull request must keep the timing method, sample count, repetitions, warmup,
 and workload definition hash of the recorded ceiling. Otherwise a regression
 could hide behind a cheaper measurement. The oldest variants run the same
@@ -79,7 +84,8 @@ branch ruleset to block merges.
 
 ```sh
 nix develop
-cargo build --release -p ranki -p ranki-bench
+CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+  cargo build --release -p ranki -p ranki-bench
 mkdir -p .tmp/performance
 sha="$(git rev-parse HEAD)"
 mkdir -p .tmp/performance/aggregated
