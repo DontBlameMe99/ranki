@@ -407,6 +407,7 @@ impl Root {
                 this.cancel_create(window, cx);
             });
             let style = Style::new(colors, self.theme());
+            let create_error = self.create_error.clone();
             layers.push(
                 div()
                     .absolute()
@@ -469,7 +470,11 @@ impl Root {
                                     .rounded(px(12.))
                                     .bg(colors.surface0)
                                     .border_1()
-                                    .border_color(colors.mauve)
+                                    .border_color(if create_error.is_some() {
+                                        colors.red
+                                    } else {
+                                        colors.mauve
+                                    })
                                     .text_size(px(14.))
                                     .text_color(colors.text)
                                     .child(
@@ -479,6 +484,21 @@ impl Root {
                                             .child(self.create_field.clone()),
                                     ),
                             )
+                            .children(create_error.map(|message| {
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .gap(px(SPACE_INLINE))
+                                    .text_size(px(13.))
+                                    .text_color(colors.red)
+                                    .child(icon("icon-bell", 14., colors.red))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .child(message),
+                                    )
+                            }))
                             .child(
                                 div()
                                     .flex()
