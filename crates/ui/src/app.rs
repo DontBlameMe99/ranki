@@ -308,7 +308,7 @@ pub struct UndoEntry {
     pub rating: Rating,
     /// Time the undone card contributed to the session total.
     pub spent: Duration,
-    /// Whether this grade added a learning repeat to the session total.
+    /// Whether this grade left the card in the session for another step.
     pub requeued: bool,
 }
 
@@ -335,6 +335,8 @@ pub struct ReviewState {
     pub last_tick: Option<Instant>,
     pub last_grade_at: Option<Instant>,
     pub answered: usize,
+    /// Cards finished for session progress. Learning repeats stay pending.
+    pub completed: usize,
     pub session_total: usize,
     pub again_count: usize,
     pub scope_all: bool,
@@ -1736,6 +1738,9 @@ impl Root {
             decision.card.queue,
             CardQueue::Learning | CardQueue::DayLearning
         );
+        if !requeued {
+            self.review.completed = self.review.completed.saturating_add(1);
+        }
         self.review.last_grade = Some(UndoEntry {
             card,
             revlog_id: decision.revlog.id,
@@ -1746,8 +1751,6 @@ impl Root {
         if requeued {
             let _ = self.review.seen.remove(&decision.card.id);
             self.review.pending.push_back(decision.card);
-            self.review.session_total =
-                self.review.session_total.saturating_add(1);
         }
         self.review.focused_elapsed = Duration::ZERO;
         self.review.current = None;
@@ -1760,10 +1763,10 @@ impl Root {
         cx.notify();
     }
 
-    /// Fraction of the session that is graded, clamped for both ends of the
-    /// queue. Undo lowers it again because the answered count drops.
+    /// Fraction of the session that is finished, clamped for both ends of the
+    /// queue. Repeats stay pending, so they leave the bar unchanged.
     pub(crate) fn progress_fraction(&self) -> f32 {
-        session_progress(self.review.answered, self.review.session_total)
+        session_progress(self.review.completed, self.review.session_total)
     }
 
     /// Reverses the last grade in this session: the review log is deleted, the
@@ -1808,9 +1811,9 @@ impl Root {
                     }
                 }
                 self.review.pending.retain(|card| card.id != entry.card.id);
-                if entry.requeued {
-                    self.review.session_total =
-                        self.review.session_total.saturating_sub(1);
+                if !entry.requeued {
+                    self.review.completed =
+                        self.review.completed.saturating_sub(1);
                 }
                 let _ = self.review.seen.remove(&entry.card.id);
                 let Some(restored) =
@@ -3775,6 +3778,57 @@ mod tests {
         assert_eq!(session_progress(21, 20), 1.0);
     }
 
+    #[gpui::test]
+    fn repeated_hard_answers_leave_progress_unchanged(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("collection.anki2");
+        let mut store =
+            ranki_storage::Collection::create(&path).expect("collection");
+        let _ = store
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![
+                    String::from("Question?"),
+                    String::from("Answer!"),
+                ],
+                tags: Vec::new(),
+            })
+            .expect("note");
+        let options = Options {
+            collection: path,
+            ..Options::default()
+        };
+        let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(store),
+                    options,
+                    save_settings,
+                },
+                window,
+                cx,
+            )
+        });
+        cx.update_entity(&root, super::Root::study_all);
+
+        let mut grade = |rating| {
+            cx.update_entity(&root, |root, cx| {
+                root.review.phase = Phase::Answer;
+                root.review.last_grade_at = None;
+                root.grade(rating, cx);
+            });
+            cx.read_entity(&root, |root, _| {
+                (root.progress_fraction(), root.review.answered)
+            })
+        };
+        assert_eq!(grade(ranki_model::Rating::Hard), (0.0, 1));
+        assert_eq!(grade(ranki_model::Rating::Hard), (0.0, 2));
+        assert_eq!(grade(ranki_model::Rating::Easy), (1.0, 3));
+    }
     #[test]
     fn duration_labels_read_like_a_session_summary() {
         assert_eq!(duration_label(Duration::from_secs(0)), "0s");
