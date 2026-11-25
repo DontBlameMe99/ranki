@@ -73,9 +73,10 @@ three equal columns. Each column has a colored 8 px dot, 12 px label, and 20/600
 value 2 px below. Right card has flex 1, radius 24, `#181825`, 1 px
 `#313244` border, padding 24, "Next 7 days" at 14/600, a 12/600 mauve pill with
 4/10 padding and radius 10, and seven 8 px radius bars in a 10 px gap. The mock
-has no revlog query, so render this card's slot with the same geometry and a
-12 px weak "7-day forecast unavailable" line until a Store query exists. Do not
-show a streak or estimated minutes.
+Each bar shows the count and weekday from the store's daily due forecast,
+starting with today. Overdue and currently due learning cards join today's
+bucket. A store without the query keeps a weak "7-day forecast unavailable"
+line. Do not show a streak or estimated minutes.
 Deck table: radius 20, `#181825`, 1 px `#313244` border, clipped. Header and
 rows use five cells: `1fr 72px 72px 72px 108px`. Header padding is `12px 20px`,
 label 12/600 with 0.08em tracking. New, Learning, and Review are right aligned
@@ -210,9 +211,9 @@ Font: direct conflict. The mockups load Inter and Noto Sans JP. Ranki requires
 CCL Nerd Font. Substitute CCL Nerd Font for every Inter role and keep Noto Sans
 JP only as a CJK fallback. Use the mockup sizes and weights unchanged.
 Data: direct conflicts exist for sync status, 7-day history, streak, and true
-nested deck records. Replace sync with a local collection timestamp, leave the
-forecast slot without data, drop the streak, and render `::` names as a view
-only. Do not add a sync feature, revlog query, or deck hierarchy write.
+nested deck records. Replace sync with a local collection timestamp, read the
+forecast from card dues, drop the streak, and render `::` names as a view only.
+Do not add a sync feature or deck hierarchy write.
 
 ## 6\. Acceptance criteria
 
@@ -256,7 +257,7 @@ Nice:
 
 1. Ctrl+Enter or Cmd+Enter saves from any field. A and D switch Add and Decks
    outside text fields. Unit test key routing.
-2. The forecast card gains real bars and streak when a revlog query reaches
-   `Store`. Test the view model with fixed daily counts.
+2. The forecast card shows real bars when the daily dues query reaches `Store`.
+   Test the view model with fixed daily counts.
 3. At widths below 1000 px the preview rail moves below the form without
    clipping. Verify visually.

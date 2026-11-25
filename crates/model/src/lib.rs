@@ -565,6 +565,24 @@ pub trait Store {
             "review_history is not supported by this store".to_owned(),
         ))
     }
+    /// Counts scheduled cards for each of the next `days` Anki days.
+    ///
+    /// The first entry is today. It includes overdue cards and learning cards
+    /// due before the next day rollover. New cards have no scheduled day and
+    /// are excluded.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
+    fn due_forecast(
+        &self,
+        _days: usize,
+        _now_secs: i64,
+    ) -> Result<Vec<usize>, StoreError> {
+        Err(StoreError::Unsupported(
+            "due_forecast is not supported by this store".to_owned(),
+        ))
+    }
+
     /// Returns card counts for a deck.
     ///
     /// # Errors

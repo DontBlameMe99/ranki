@@ -182,6 +182,57 @@ fn review_and_day_learning_dues_use_days_since_collection_creation() {
 }
 
 #[test]
+fn due_forecast_buckets_current_overdue_learning_and_future_cards() {
+    let (_directory, path) = fixture();
+    let created = 1_685_412_000_i64;
+    let now = created.saturating_add(172_800);
+    let day_ms = 86_400_000_i64;
+    {
+        let conn = Connection::open(&path).expect("open");
+        conn.execute("UPDATE col SET crt = ?1 WHERE id = 1", [created])
+            .expect("set crt");
+        let rows = [
+            (31_i64, 2_i64, 1_i64),
+            (32, 2, 2),
+            (33, 3, 2),
+            (34, 1, now.saturating_mul(1_000)),
+            (
+                35,
+                1,
+                created
+                    .saturating_mul(1_000)
+                    .saturating_add(day_ms.saturating_mul(5)),
+            ),
+            (36, 2, 3),
+            (37, 2, 3),
+            (38, 3, 4),
+            (39, 2, 8),
+            (40, 2, 9),
+            (41, 0, 3),
+            (42, -1, 2),
+        ];
+        for (id, queue, due) in rows {
+            conn.execute(
+                "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, \
+                 reps, lapses, left, odue, odid, flags, data) VALUES (?1, 1, 1, 0, 0, 0, 2, ?2, \
+                 ?3, 1, 0, 0, 0, 0, 0, 0, 0, '')",
+                [id, queue, due],
+            )
+            .expect("insert card");
+        }
+    }
+    let store = Collection::open(&path).expect("open");
+    assert_eq!(
+        store.due_forecast(7, now).expect("forecast"),
+        [4, 2, 1, 0, 0, 0, 1]
+    );
+    assert_eq!(
+        store.due_forecast(0, now).expect("empty forecast"),
+        Vec::<usize>::new()
+    );
+}
+
+#[test]
 fn create_rejects_existing_collection_and_open_rejects_missing_file() {
     let (_directory, path) = fixture();
     assert!(matches!(

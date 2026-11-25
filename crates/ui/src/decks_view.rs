@@ -361,14 +361,32 @@ impl Root {
                     .border_1()
                     .border_color(colors.surface0)
                     .child(
-                        div().flex().items_center().justify_between().child(
-                            div()
-                                .text_size(px(14.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child("Next 7 days"),
-                        ),
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("Next 7 days"),
+                            )
+                            .child(
+                                div()
+                                    .px(px(10.))
+                                    .py(px(4.))
+                                    .rounded(px(10.))
+                                    .bg(colors.surface0)
+                                    .text_size(px(12.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(colors.mauve)
+                                    .child(format!(
+                                        "{} due",
+                                        app::forecast_total(&self.forecast)
+                                    )),
+                            ),
                     )
-                    .child(
+                    .child(if self.forecast.is_empty() {
                         div()
                             .flex_1()
                             .flex()
@@ -379,8 +397,80 @@ impl Root {
                                     .text_size(px(12.))
                                     .text_color(colors.overlay)
                                     .child("7-day forecast unavailable"),
-                            ),
-                    ),
+                            )
+                    } else {
+                        let today = crate::statistics_view::day_number(
+                            Self::now(),
+                            self.collection_start,
+                        );
+                        let peak = self
+                            .forecast
+                            .iter()
+                            .copied()
+                            .max()
+                            .unwrap_or_default();
+                        let mut bars =
+                            div().mt(px(16.)).flex().flex_1().gap(px(10.));
+                        for (index, count) in self.forecast.iter().enumerate() {
+                            bars = bars.child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_end()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .font_weight(
+                                                gpui::FontWeight::SEMIBOLD,
+                                            )
+                                            .text_color(if *count == 0 {
+                                                colors.overlay
+                                            } else {
+                                                colors.text
+                                            })
+                                            .child(format!("{count}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .h(px(app::forecast_bar_height(
+                                                *count, peak,
+                                            )))
+                                            .rounded(px(8.))
+                                            .bg(if *count == 0 {
+                                                colors.surface1
+                                            } else {
+                                                colors.mauve
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(if index == 0 {
+                                                colors.mauve
+                                            } else {
+                                                colors.subtext
+                                            })
+                                            .child(
+                                                crate::statistics_view::weekday(
+                                                    today.saturating_add(
+                                                        i64::try_from(index)
+                                                            .unwrap_or(
+                                                                i64::MAX,
+                                                            ),
+                                                    ),
+                                                    self.collection_start,
+                                                ),
+                                            ),
+                                    ),
+                            );
+                        }
+                        bars
+                    }),
             )
     }
 
