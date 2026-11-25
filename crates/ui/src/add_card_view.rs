@@ -715,13 +715,21 @@ impl Root {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    this.occlusion_press(pointer(event.position), cx);
+                    this.occlusion_press(
+                        pointer(event.position),
+                        MouseButton::Left,
+                        cx,
+                    );
                 }),
             )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    this.remove_mask_at(pointer(event.position), cx);
+                    this.occlusion_press(
+                        pointer(event.position),
+                        MouseButton::Right,
+                        cx,
+                    );
                 }),
             )
             .on_mouse_move(cx.listener(
@@ -735,8 +743,20 @@ impl Root {
                     this.occlusion_release(cx);
                 }),
             )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.occlusion_release(cx);
+                }),
+            )
             .on_mouse_up_out(
                 MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.cancel_occlusion_drag(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Right,
                 cx.listener(|this, _: &MouseUpEvent, _, cx| {
                     this.cancel_occlusion_drag(cx);
                 }),
