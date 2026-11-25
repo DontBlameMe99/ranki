@@ -69,14 +69,14 @@
     },
     "format/export-apkg": {
       "budget_ms": 500.0,
-      "median_ms": 10.021075000000002,
+      "median_ms": 9.825276,
       "method": 1,
       "repeat": 1,
       "samples": 5,
-      "sha": "e1f1a72588c64a7c372680e1628c3aad697970b7",
-      "updated_at": "2026-11-25T18:13:27.565312+00:00",
+      "sha": "bff91fb88132ad88f46a90d4841b28f8dd742bf0",
+      "updated_at": "2026-11-25T21:42:19.175852+00:00",
       "warmup": 2,
-      "worst_median_ms": 10.236338
+      "worst_median_ms": 9.868273
     },
     "format/import-apkg": {
       "budget_ms": 1000.0,
@@ -233,7 +233,7 @@
       "worst_median_ms": 0.12679600000000002
     }
   },
-  "sha": "8be7e7088dbc7164526a8d4fb9437b0c4e0fa816",
+  "sha": "bff91fb88132ad88f46a90d4841b28f8dd742bf0",
   "version": 1,
   "workload_hash": "41c505710405ce82"
 }
