@@ -51,6 +51,8 @@ actions!(
         Retry,
         Reload,
         Undo,
+        NextField,
+        PreviousField,
         StudyAgain,
         EndSession,
         OpenDecks,
@@ -2434,6 +2436,12 @@ impl Render for Root {
             .on_action(cx.listener(|this, action: &Undo, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
+            .on_action(cx.listener(|_, _: &NextField, window, _| {
+                window.focus_next();
+            }))
+            .on_action(cx.listener(|_, _: &PreviousField, window, _| {
+                window.focus_prev();
+            }))
             .on_action(cx.listener(|this, action: &StudyAgain, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
@@ -3213,6 +3221,9 @@ const REVIEW_CONTEXT: &str =
 const STATISTICS_CONTEXT: &str =
     "ranki && !ranki_review && !ranki_input && !ranki_dialog";
 
+/// Tab navigation stays out of modal dialogs.
+const FOCUS_CONTEXT: &str = "ranki && !ranki_dialog";
+
 #[must_use]
 pub fn key_bindings() -> Vec<KeyBinding> {
     let mut bindings = vec![
@@ -3242,6 +3253,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("2", UseDarkTheme, Some(SETTINGS_CONTEXT)),
         KeyBinding::new("3", UseSystemTheme, Some(SETTINGS_CONTEXT)),
         KeyBinding::new("esc", EndSession, Some("ranki")),
+        KeyBinding::new("tab", NextField, Some(FOCUS_CONTEXT)),
+        KeyBinding::new("shift-tab", PreviousField, Some(FOCUS_CONTEXT)),
         KeyBinding::new("cmd-enter", SaveNote, Some("ranki")),
         KeyBinding::new("ctrl-enter", SaveNote, Some("ranki")),
         KeyBinding::new("enter", ConfirmDialog, Some("ranki_dialog")),
@@ -3419,6 +3432,33 @@ mod tests {
             let stroke = gpui::Keystroke::parse(key).expect("keystroke");
             let (bindings, _) = keymap.bindings_for_input(&[stroke], &root);
             assert_eq!(bindings.len(), expected, "{key}");
+        }
+    }
+
+    #[test]
+    fn tab_moves_focus_in_and_out_of_text_inputs() {
+        let mut keymap = gpui::Keymap::default();
+        keymap.add_bindings(super::key_bindings());
+        let root = [gpui::KeyContext::parse("ranki").expect("ranki context")];
+        let typing = [
+            gpui::KeyContext::parse("ranki").expect("ranki context"),
+            gpui::KeyContext::parse("ranki_input").expect("input context"),
+        ];
+        let dialog = [
+            gpui::KeyContext::parse("ranki").expect("ranki context"),
+            gpui::KeyContext::parse("ranki_dialog").expect("dialog context"),
+        ];
+        for key in ["tab", "shift-tab"] {
+            let stroke = gpui::Keystroke::parse(key).expect("keystroke");
+            let (from_root, _) =
+                keymap.bindings_for_input(std::slice::from_ref(&stroke), &root);
+            let (from_input, _) = keymap
+                .bindings_for_input(std::slice::from_ref(&stroke), &typing);
+            assert_eq!(from_root.len(), 1, "{key}");
+            assert_eq!(from_input.len(), 1, "{key}");
+            let (in_dialog, _) = keymap
+                .bindings_for_input(std::slice::from_ref(&stroke), &dialog);
+            assert!(in_dialog.is_empty(), "{key}");
         }
     }
 
