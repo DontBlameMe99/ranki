@@ -376,6 +376,52 @@ fn create_deck_builds_hierarchy_and_filters_subdecks() {
 }
 
 #[test]
+fn default_deck_is_hidden_only_when_empty_and_childless() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+
+    let names: Vec<_> = store
+        .decks()
+        .expect("decks")
+        .into_iter()
+        .map(|deck| deck.name)
+        .collect();
+    assert_eq!(names, ["Default".to_owned()]);
+
+    store.create_deck("Flags").expect("flags");
+    let names: Vec<_> = store
+        .decks()
+        .expect("decks")
+        .into_iter()
+        .map(|deck| deck.name)
+        .collect();
+    assert_eq!(names, ["Flags".to_owned()]);
+
+    store
+        .add_note(&note(&["front", "back"], &[]))
+        .expect("note");
+    let names: Vec<_> = store
+        .decks()
+        .expect("decks")
+        .into_iter()
+        .map(|deck| deck.name)
+        .collect();
+    assert!(names.contains(&"Default".to_owned()));
+
+    let (_child_directory, child_path) = fixture();
+    let mut child_store = Collection::open(&child_path).expect("open");
+    child_store.create_deck("Flags").expect("flags");
+    child_store.create_deck("Default::Kids").expect("child");
+    let names: Vec<_> = child_store
+        .decks()
+        .expect("decks")
+        .into_iter()
+        .map(|deck| deck.name)
+        .collect();
+    assert!(names.contains(&"Default".to_owned()));
+}
+
+#[test]
 fn due_cards_respects_queue_and_time_windows() {
     let (_directory, path) = fixture();
     let now = now_secs();
@@ -930,7 +976,7 @@ fn reads_a_real_anki_collection_without_touching_the_original() {
     }
     let decks = store.decks().expect("decks");
     assert!(decks.len() > 1);
-    assert!(decks.iter().any(|deck| deck.name == "Default"));
+    assert!(!decks.iter().any(|deck| deck.name == "Default"));
     assert!(decks.iter().any(|deck| deck.name.contains("::")));
     let first_card: i64 = conn
         .query_row("SELECT id FROM cards ORDER BY id LIMIT 1", [], |row| {

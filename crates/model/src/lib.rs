@@ -413,7 +413,8 @@ pub enum StoreError {
 
 /// Synchronous collection access. Implementations must be atomic per call.
 pub trait Store {
-    /// Lists all decks in the collection.
+    /// Lists the decks shown to the user. An empty default deck with no
+    /// subdecks is omitted, as in Anki.
     ///
     /// # Errors
     /// Returns [`StoreError`] if the collection cannot be read.

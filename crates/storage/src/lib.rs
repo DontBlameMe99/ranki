@@ -345,7 +345,37 @@ impl Collection {
 
 impl Store for Collection {
     fn decks(&self) -> Result<Vec<Deck>, StoreError> {
-        self.deck_list()
+        let decks = self.deck_list()?;
+        if decks.len() <= 1 {
+            return Ok(decks);
+        }
+        let Some(default) =
+            decks.iter().find(|deck| deck.id == DEFAULT_DECK_ID)
+        else {
+            return Ok(decks);
+        };
+        let child_prefix = format!("{}::", default.name);
+        if decks
+            .iter()
+            .any(|deck| deck.name.starts_with(&child_prefix))
+        {
+            return Ok(decks);
+        }
+        let occupied = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM cards WHERE did = ?1)",
+                [DEFAULT_DECK_ID],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(backend)?;
+        if occupied {
+            return Ok(decks);
+        }
+        Ok(decks
+            .into_iter()
+            .filter(|deck| deck.id != DEFAULT_DECK_ID)
+            .collect())
     }
 
     fn create_deck(&mut self, name: &str) -> Result<Deck, StoreError> {
