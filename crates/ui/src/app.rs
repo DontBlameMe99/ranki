@@ -28,7 +28,7 @@ use crate::{
     },
     statistics_view::{Statistics, build_statistics},
     text_field::{EditHook, TextField},
-    theme::{self, Palette, Theme, interval_label},
+    theme::{self, Palette, Theme},
 };
 
 /// Anki shows learning cards due within this window when the queue runs dry.
@@ -338,7 +338,6 @@ pub struct ReviewState {
     pub session_total: usize,
     pub again_count: usize,
     pub scope_all: bool,
-    pub status: Option<String>,
     /// Visible time spent on graded cards, accumulated per answer.
     pub studied: Duration,
     /// Fraction the progress bar had before the last grade, for its transition.
@@ -1722,11 +1721,6 @@ impl Root {
         if rating == Rating::Again {
             self.review.again_count = self.review.again_count.saturating_add(1);
         }
-        self.review.status = Some(format!(
-            "Rated {}, next in {}",
-            rating_name(rating),
-            interval_label(decision.revlog.interval)
-        ));
         self.review.progress_from = before_progress;
         self.review.studied = self
             .review
@@ -1796,10 +1790,6 @@ impl Root {
                         self.review.again_count.saturating_sub(1);
                 }
                 self.review.progress_from = before;
-                self.review.status = Some(format!(
-                    "Undone {}. Grade again.",
-                    rating_name(entry.rating)
-                ));
                 if let Some(current) = self.review.current.clone() {
                     let _ = self.review.seen.remove(&current.id);
                     self.review.pending.retain(|card| card.id != current.id);
@@ -4700,6 +4690,64 @@ mod tests {
         assert!(!state.2);
         assert_eq!(state.3, 1);
         assert!(state.4);
+    }
+
+    #[gpui::test]
+    fn space_reveals_after_clicking_a_deck_row(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("collection.anki2");
+        let mut store =
+            ranki_storage::Collection::create(&path).expect("collection");
+        store
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![
+                    String::from("Question?"),
+                    String::from("Answer!"),
+                ],
+                tags: Vec::new(),
+            })
+            .expect("note");
+        let options = Options {
+            collection: path,
+            ..Options::default()
+        };
+        let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
+        cx.update(|cx| cx.bind_keys(super::key_bindings()));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(store),
+                    options,
+                    save_settings,
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(1280.), px(800.)),
+            |_, _| root.clone(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let row = cx
+            .debug_bounds("deck-row-Default")
+            .expect("deck row bounds");
+        cx.simulate_click(row.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("space");
+
+        let phase = cx.read_entity(&root, |root, _| root.review.phase);
+        assert_eq!(phase, Phase::Answer);
     }
 
     #[gpui::test]
