@@ -2011,9 +2011,8 @@ impl Root {
                     field.seed("", cx);
                 });
                 self.add.errors.clear();
-                self.add.occlusion.masks.clear();
-                self.add.occlusion.selected = None;
                 self.refresh_stats();
+                self.add.occlusion = OcclusionState::default();
                 self.record_local_write();
                 self.show_toast(
                     ToastKind::Success,
@@ -4154,6 +4153,62 @@ mod tests {
             errors.get("model").map(String::as_str),
             Some("This note type is not in the collection")
         );
+    }
+
+    #[gpui::test]
+    fn saving_an_occlusion_note_clears_the_chosen_image(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("collection.anki2");
+        let store = Box::new(
+            ranki_storage::Collection::create(&path).expect("collection"),
+        );
+        let options = Options {
+            collection: path,
+            ..Options::default()
+        };
+        let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store,
+                    options,
+                    save_settings,
+                },
+                window,
+                cx,
+            )
+        });
+        cx.update_entity(&root, |root, cx| {
+            root.view = super::View::AddCard;
+            let occlusion = root
+                .models
+                .iter()
+                .position(ranki_model::NoteModel::is_image_occlusion)
+                .expect("stock occlusion");
+            root.select_model(occlusion, cx);
+            root.add.occlusion.image = Some(String::from("diagram.png"));
+            root.add.occlusion.masks = vec![crate::occlusion::default_mask(0)];
+            root.add.occlusion.selected = Some(0);
+            cx.notify();
+        });
+        assert!(
+            cx.read_entity(&root, |root, _| root.add.occlusion.image.is_some())
+        );
+
+        cx.update_entity(&root, super::Root::save_note);
+
+        let state = cx.read_entity(&root, |root, _| {
+            (
+                root.add.occlusion.image.clone(),
+                root.add.occlusion.masks.len(),
+                root.add.occlusion.selected,
+            )
+        });
+        assert_eq!(state.0, None);
+        assert_eq!(state.1, 0);
+        assert_eq!(state.2, None);
     }
 
     #[test]
