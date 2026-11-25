@@ -27,10 +27,10 @@ impl Root {
             .p(px(SPACE_INLINE))
             .rounded(px(12.))
             .bg(colors.surface0);
-        for (choice, label, key) in [
-            (ThemeChoice::Light, "Light", "1"),
-            (ThemeChoice::Dark, "Dark", "2"),
-            (ThemeChoice::System, "System", "3"),
+        for (choice, label) in [
+            (ThemeChoice::Light, "Light"),
+            (ThemeChoice::Dark, "Dark"),
+            (ThemeChoice::System, "System"),
         ] {
             let selected = chosen == choice;
             let ink = if selected {
@@ -77,8 +77,7 @@ impl Root {
                         .cursor_pointer(),
                 )
                 .on_click(self.action_click(UiAction::SetTheme(choice)))
-                .child(label)
-                .child(keycap(key, colors, false)),
+                .child(label),
             );
         }
 

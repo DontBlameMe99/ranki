@@ -3300,9 +3300,6 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("n", NextDeck, Some(STUDY_CONTEXT)),
         KeyBinding::new("d", OpenDecks, Some(SETTINGS_CONTEXT)),
         KeyBinding::new("a", OpenAdd, Some(SETTINGS_CONTEXT)),
-        KeyBinding::new("1", UseLightTheme, Some(SETTINGS_CONTEXT)),
-        KeyBinding::new("2", UseDarkTheme, Some(SETTINGS_CONTEXT)),
-        KeyBinding::new("3", UseSystemTheme, Some(SETTINGS_CONTEXT)),
         KeyBinding::new("esc", EndSession, Some("ranki")),
         KeyBinding::new("tab", NextField, Some(FOCUS_CONTEXT)),
         KeyBinding::new("shift-tab", PreviousField, Some(FOCUS_CONTEXT)),
@@ -3650,7 +3647,7 @@ mod tests {
     }
 
     #[test]
-    fn theme_bindings_only_live_in_settings() {
+    fn theme_has_no_number_shortcuts() {
         let mut keymap = gpui::Keymap::default();
         keymap.add_bindings(super::key_bindings());
         let settings = [
@@ -3658,14 +3655,14 @@ mod tests {
             gpui::KeyContext::parse("ranki_settings")
                 .expect("settings context"),
         ];
-        let decks = [gpui::KeyContext::parse("ranki").expect("ranki context")];
-        let one = gpui::Keystroke::parse("1").expect("keystroke");
-        let (in_settings, _) =
-            keymap.bindings_for_input(std::slice::from_ref(&one), &settings);
-        let (in_decks, _) =
-            keymap.bindings_for_input(std::slice::from_ref(&one), &decks);
-        assert_eq!(in_settings.len(), 1);
-        assert_eq!(in_decks.len(), 1);
+        for key in ["1", "2", "3"] {
+            let keystroke = gpui::Keystroke::parse(key).expect("keystroke");
+            let (in_settings, _) = keymap.bindings_for_input(
+                std::slice::from_ref(&keystroke),
+                &settings,
+            );
+            assert!(in_settings.is_empty());
+        }
     }
 
     #[test]
