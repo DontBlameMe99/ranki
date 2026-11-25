@@ -37,6 +37,7 @@ mod nav;
 pub mod occlusion;
 mod review_view;
 mod settings_view;
+mod smooth_scroll;
 mod statistics_view;
 mod sync_view;
 mod text_field;

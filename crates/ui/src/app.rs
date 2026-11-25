@@ -25,6 +25,7 @@ use crate::{
     occlusion::{
         self, MaskShape, NormalizedRect, OcclusionMask, image_occlusion_fields,
     },
+    smooth_scroll::SmoothScroll,
     statistics_view::{Statistics, build_statistics},
     text_field::{EditHook, TextField},
     theme::{self, Palette, Theme},
@@ -568,6 +569,7 @@ pub struct Root {
     pub(crate) external_change: bool,
     pub(crate) collection_modified: i64,
     pub(crate) collection_start: i64,
+    pub(crate) decks_scroll: SmoothScroll,
     pub(crate) sync: SyncUiState,
     pub(crate) save_settings: SettingsSaver,
     pub(crate) images: Entity<card_view::LruImageCache>,
@@ -716,6 +718,7 @@ impl Root {
             external_change: false,
             collection_modified: 0,
             collection_start: 0,
+            decks_scroll: SmoothScroll::new(),
             sync: SyncUiState {
                 username: sync_username,
                 password: sync_password,
@@ -736,6 +739,22 @@ impl Root {
         if let Ok(tags) = env::var("RANKI_UI_DEV_TAGS") {
             root.add.tag_chips =
                 tags.split_whitespace().map(str::to_owned).collect();
+        }
+        if let Ok(spec) = env::var("RANKI_UI_DEV_SCROLL")
+            && let Some((delay, distance)) = spec.split_once(':')
+            && let Ok(delay) = delay.parse::<u64>()
+            && let Ok(distance) = distance.parse::<f32>()
+        {
+            let timer =
+                cx.background_executor().timer(Duration::from_millis(delay));
+            cx.spawn(async move |this, cx| {
+                timer.await;
+                let _ = this.update(cx, |root, cx| {
+                    root.decks_scroll.wheel(distance);
+                    cx.notify();
+                });
+            })
+            .detach();
         }
         match env::var("RANKI_UI_DEV_VIEW").as_deref() {
             Ok("statistics") => root.view = View::Statistics,
@@ -2735,7 +2754,7 @@ impl Render for Root {
         let colors = self.colors();
         let view = self.view;
         let main = match view {
-            View::Decks => self.render_decks(cx).into_any_element(),
+            View::Decks => self.render_decks(window, cx).into_any_element(),
             View::Browse => self.render_browse(window, cx).into_any_element(),
             View::Review => self.render_review(window, cx).into_any_element(),
             View::AddCard => {
@@ -3614,8 +3633,8 @@ mod tests {
 
     use ranki_model::Store as _;
     use ranki_model::{
-        Card, CardQueue, CardTemplate, CardType, Deck, Id, NewNote, Note,
-        NoteKind, NoteModel, ReviewDecision, StoreError,
+        Card, CardQueue, CardTemplate, CardType, Deck, DeckStats, Id, NewNote,
+        Note, NoteKind, NoteModel, ReviewDecision, StoreError,
     };
 
     use crate::Options;
@@ -4188,6 +4207,114 @@ mod tests {
 
         scroll(cx, point(px(1100.), px(600.)));
         assert!(!cx.read_entity(&root, |root, _| root.add.deck_picker));
+    }
+
+    #[gpui::test]
+    fn deck_scroll_animates_toward_the_wheel_target(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(ModalStore),
+                    options: Options::default(),
+                    save_settings: Arc::new(|_| Ok(())),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(1280.), px(800.)));
+        cx.update_entity(&root, |root, cx| {
+            root.decks = (0..200i64)
+                .map(|index| Deck {
+                    id: index.saturating_add(1),
+                    name: format!("Deck {index:03}"),
+                    description: String::new(),
+                })
+                .collect();
+            root.stats = vec![DeckStats::default(); root.decks.len()];
+            root.rebuild_deck_rows();
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+            root.clone()
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("deck-row-Deck 199").is_none(),
+            "offscreen decks must not be built"
+        );
+        let row = cx
+            .debug_bounds("deck-row-Deck 000")
+            .expect("first deck row")
+            .center();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: row,
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-240.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+
+        let mut target =
+            cx.read_entity(&root, |root, _| root.decks_scroll.target());
+        let offset =
+            cx.read_entity(&root, |root, _| root.decks_scroll.offset());
+        assert!(target >= 240.0, "wheel step should move the target");
+        assert!(offset < 20.0, "the wheel must not jump to the target");
+
+        cx.update_entity(&root, |_, cx| cx.notify());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let first_frame =
+            cx.read_entity(&root, |root, _| root.decks_scroll.offset());
+        assert!(
+            first_frame > 0.0 && first_frame < target,
+            "one frame should be partway through the transition"
+        );
+
+        cx.update_entity(&root, |root, cx| {
+            root.options.reduce_motion = Some(true);
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            !cx.read_entity(&root, |root, _| root.decks_scroll.animating()),
+            "reduced motion must stop the animation loop"
+        );
+        cx.update_entity(&root, |root, cx| {
+            root.options.reduce_motion = Some(false);
+            root.decks_scroll.wheel(240.0);
+            cx.notify();
+        });
+        target = cx.read_entity(&root, |root, _| root.decks_scroll.target());
+
+        cx.update_entity(&root, |root, _| root.decks_scroll.settle());
+        let settled =
+            cx.read_entity(&root, |root, _| root.decks_scroll.offset());
+        assert_eq!(
+            settled, target,
+            "the animation should settle exactly ({settled} vs {target})"
+        );
+
+        cx.update_entity(&root, |root, cx| {
+            root.decks_scroll
+                .handle()
+                .set_offset(point(px(0.), px(-20_000.)));
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("deck-row-Deck 199").is_some(),
+            "the last deck must appear when scrolled to the bottom"
+        );
     }
 
     #[test]
@@ -5233,6 +5360,7 @@ mod tests {
             gpui::MouseButton::Left,
             gpui::Modifiers::none(),
         );
+
         cx.run_until_parked();
         let names = cx.read_entity(&root, |root, _| {
             root.decks
