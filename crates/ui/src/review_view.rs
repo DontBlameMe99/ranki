@@ -69,7 +69,6 @@ impl Root {
             })
             .flatten();
         let note = self.review.note.clone();
-        let status = self.review.status.clone();
         let answered = self.review.answered;
         let load_errors = self.review.load_errors;
         let load_error = self.review.load_error.clone();
@@ -596,12 +595,6 @@ impl Root {
                 } else {
                     rating_row(colors, &previews, cx).into_any_element()
                 })
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(colors.subtext)
-                        .child(status.unwrap_or_default()),
-                )
                 .into_any_element()
         };
         screen = screen.child(body);

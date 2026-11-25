@@ -634,8 +634,9 @@ impl Root {
                                 .cursor_pointer(),
                         )
                         .on_click(cx.listener(
-                            move |this, _: &ClickEvent, _, cx| {
+                            move |this, _: &ClickEvent, window, cx| {
                                 cx.stop_propagation();
+                                this.focus.focus(window);
                                 this.study_deck(target, cx);
                             },
                         ))
@@ -748,8 +749,9 @@ impl Root {
                     }
                 }),
             )
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 if let Some(index) = index {
+                    this.focus.focus(window);
                     this.study_deck(index, cx);
                 }
             }))
