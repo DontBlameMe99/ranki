@@ -414,11 +414,16 @@ mod tests {
             return;
         };
 
-        let result = login_and_sync(
-            &mut client,
-            String::from("user"),
-            String::from("pass"),
-        );
+        let password = directory
+            .path()
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .chars()
+            .rev()
+            .collect();
+        let result =
+            login_and_sync(&mut client, String::from("user"), password);
 
         let Ok((username, outcome)) = result else {
             return;
