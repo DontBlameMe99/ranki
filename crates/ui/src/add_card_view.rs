@@ -90,6 +90,14 @@ impl Root {
             .flex()
             .flex_col()
             .overflow_scroll()
+            .on_scroll_wheel(cx.listener(
+                |this, _: &gpui::ScrollWheelEvent, _, cx| {
+                    if this.add.deck_picker {
+                        this.add.deck_picker = false;
+                        cx.notify();
+                    }
+                },
+            ))
             .px(px(PAGE_X))
             .pt(px(SPACE_GUTTER));
         let mut column = div()
@@ -136,6 +144,9 @@ impl Root {
                                     .apply(
                                         div()
                                             .id("add-deck-picker")
+                                            .debug_selector(|| {
+                                                "add-deck-picker".to_owned()
+                                            })
                                             .flex()
                                             .items_center()
                                             .gap(px(SPACE_GROUP))
@@ -146,10 +157,34 @@ impl Root {
                                             .cursor_pointer(),
                                     )
                                     .on_click(cx.listener(
-                                        |this, _: &ClickEvent, window, cx| {
-                                            this.toggle_add_deck_picker(
-                                                window, cx,
-                                            );
+                                        |this, event: &ClickEvent, window, cx| {
+                                            let same_press = match event {
+                                                ClickEvent::Mouse(click) => this
+                                                    .add
+                                                    .deck_picker_dismissed_press
+                                                    .as_ref()
+                                                    .is_some_and(|down| {
+                                                        down.button
+                                                            == click.down.button
+                                                            && down.position
+                                                                == click.down.position
+                                                            && down.click_count
+                                                                == click.down.click_count
+                                                            && down.first_mouse
+                                                                == click.down.first_mouse
+                                                    }),
+                                                ClickEvent::Keyboard(_) => false,
+                                            };
+                                            this.add
+                                                .deck_picker_dismissed_press =
+                                                None;
+                                            if !same_press {
+                                                this.toggle_add_deck_picker(
+                                                    event.position(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
                                         },
                                     ))
                                     .child(
@@ -227,9 +262,6 @@ impl Root {
                             )),
                     ),
             );
-        if self.add.deck_picker {
-            column = column.child(self.render_deck_picker(colors, cx));
-        }
 
         if let Some(error) = errors.get("deck") {
             column = column.child(validation(error, colors));
@@ -899,11 +931,11 @@ impl Root {
     }
 }
 impl Root {
-    fn render_deck_picker(
-        &mut self,
+    pub(crate) fn render_deck_picker(
+        &self,
         colors: crate::theme::Palette,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let query = self.add.deck_filter.read(cx).text();
         let needle = query.trim().to_lowercase();
         let filter = self.add.deck_filter.clone();
@@ -913,7 +945,8 @@ impl Root {
             .gap(px(SPACE_INLINE))
             .max_h(px(220.))
             .id("add-deck-list")
-            .overflow_scroll();
+            .overflow_scroll()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
         let mut matches = 0;
         for (index, deck) in self.decks.iter().enumerate() {
             if !needle.is_empty() && !deck.name.to_lowercase().contains(&needle)
@@ -943,6 +976,7 @@ impl Root {
                 .apply(
                     div()
                         .id(SharedString::from(format!("add-deck-{index}")))
+                        .debug_selector(move || format!("add-deck-{index}"))
                         .flex()
                         .items_center()
                         .justify_between()
@@ -994,6 +1028,18 @@ impl Root {
             );
         }
         div()
+            .id("add-deck-picker-popup")
+            .debug_selector(|| "add-deck-picker-popup".to_owned())
+            .w(px(320.))
+            .occlude()
+            .on_mouse_down_out(cx.listener(
+                |this, event: &MouseDownEvent, window, cx| {
+                    this.add.deck_picker = false;
+                    this.add.deck_picker_dismissed_press = Some(event.clone());
+                    window.focus(&this.focus);
+                    cx.notify();
+                },
+            ))
             .flex()
             .flex_col()
             .gap(px(SPACE_GROUP))
@@ -1110,6 +1156,7 @@ fn formatting_toolbar(
             .apply(
                 div()
                     .id(SharedString::from(format!("add-format-{label}")))
+                    .debug_selector(move || format!("add-format-{label}"))
                     .flex()
                     .items_center()
                     .justify_center()

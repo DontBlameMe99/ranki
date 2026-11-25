@@ -391,6 +391,16 @@ impl Root {
                     .into_any_element(),
             );
         }
+        if self.view == View::AddCard && self.add.deck_picker {
+            layers.push(
+                anchored()
+                    .anchor(Corner::TopLeft)
+                    .position(self.add.deck_picker_anchor)
+                    .offset(point(px(0.), px(SPACE_BLOCK + SPACE_INLINE)))
+                    .child(self.render_deck_picker(colors, cx))
+                    .into_any_element(),
+            );
+        }
         if self.create_modal {
             let cancel = cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.cancel_create(window, cx);
