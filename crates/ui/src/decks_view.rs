@@ -9,7 +9,7 @@ use gpui::{
 
 use crate::{
     app::{self, Root, UiAction, due_total, leaf_deck_totals},
-    components::{Interaction, icon, icon_tile, keycap, small_button},
+    components::{Interaction, icon, icon_tile, keycap},
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED,
         SPACE_SECTION, Style, TABLE_COLUMNS, alpha, blend, queue_text,
@@ -42,12 +42,10 @@ impl Root {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = self.colors();
-        let style = Style::new(colors, self.theme());
         let rows = self.visible_deck_rows(cx);
         let totals = leaf_deck_totals(&self.decks, &self.stats);
         let due = due_total(totals);
 
-        let search_creating = self.create_open;
         let create_click = self.action_click(UiAction::CreateDeck);
         let mut content = div()
             .size_full()
@@ -135,59 +133,6 @@ impl Root {
                         ),
                 ),
         );
-
-        if search_creating {
-            content = content.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(SPACE_GROUP))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .w(px(320.))
-                            .h(px(44.))
-                            .px(px(SPACE_RELATED))
-                            .rounded(px(12.))
-                            .overflow_hidden()
-                            .bg(colors.surface0)
-                            .border_1()
-                            .border_color(colors.mauve)
-                            .text_size(px(14.))
-                            .text_color(colors.text)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .child(self.create_field.clone()),
-                            ),
-                    )
-                    .child(small_button(
-                        "Create",
-                        style,
-                        Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.create_deck(cx);
-                        })),
-                    ))
-                    .child(
-                        Interaction::surface(colors)
-                            .apply(
-                                div()
-                                    .id("decks-create-cancel")
-                                    .text_size(px(13.))
-                                    .text_color(colors.subtext)
-                                    .cursor_pointer(),
-                            )
-                            .on_click(cx.listener(
-                                |this, _: &ClickEvent, window, cx| {
-                                    this.cancel_create(window, cx);
-                                },
-                            ))
-                            .child("Cancel"),
-                    ),
-            );
-        }
 
         content = content.child(self.render_summary(totals, cx));
 
