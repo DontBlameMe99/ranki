@@ -23,7 +23,7 @@ use ranki_model::{
 use crate::{
     Options, SchedulerKind, SettingsSaver, ThemeChoice,
     browser_view::BrowseState,
-    card_view::{self, RenderedCard, Side},
+    card_view::{self, RenderedCard},
     occlusion::{
         self, MaskShape, NormalizedRect, OcclusionMask, default_mask,
         image_occlusion_fields,
@@ -172,14 +172,6 @@ impl Toast {
     }
 }
 
-/// One note added during this session, shown under the live preview.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AddedNote {
-    pub headline: String,
-    pub detail: String,
-    pub time: String,
-}
-
 /// Image-occlusion editor state.
 #[derive(Default)]
 pub struct OcclusionState {
@@ -229,9 +221,7 @@ pub struct AddState {
     pub fields: Vec<Entity<TextField>>,
     pub tags: Entity<TextField>,
     pub tag_chips: Vec<String>,
-    pub preview_side: Side,
     pub errors: BTreeMap<String, String>,
-    pub added: Vec<AddedNote>,
     pub media_filter: Entity<TextField>,
     pub deck_filter: Entity<TextField>,
     pub deck_picker: bool,
@@ -481,9 +471,7 @@ impl Root {
                 fields: Vec::new(),
                 tags,
                 tag_chips: Vec::new(),
-                preview_side: Side::Question,
                 errors: BTreeMap::new(),
-                added: Vec::new(),
                 media_filter,
                 deck_filter,
                 deck_picker: false,
@@ -1264,25 +1252,6 @@ impl Root {
         }
     }
 
-    fn occlusion_headline(&self, cx: &mut Context<Self>) -> String {
-        let header = self
-            .add
-            .fields
-            .get(2)
-            .map(|field| field.read(cx).text())
-            .unwrap_or_default();
-        let text = if header.trim().is_empty() {
-            self.add
-                .occlusion
-                .image
-                .clone()
-                .unwrap_or_else(|| String::from("Image occlusion"))
-        } else {
-            header.trim().to_owned()
-        };
-        text.chars().take(32).collect()
-    }
-
     /// Image Occlusion field values in the stock model order.
     pub(crate) fn occlusion_fields(
         &self,
@@ -1857,16 +1826,6 @@ impl Root {
             cx.notify();
             return;
         }
-        let headline = if model.is_image_occlusion() {
-            self.occlusion_headline(cx)
-        } else {
-            fields
-                .iter()
-                .map(|value| value.trim())
-                .find(|value| !value.is_empty())
-                .map(|value| value.chars().take(32).collect::<String>())
-                .unwrap_or_default()
-        };
         let note = NewNote {
             model_id: model.id,
             deck_id: deck.id,
@@ -1876,11 +1835,6 @@ impl Root {
         self.poll_external_change(cx);
         match self.store.add_note(&note) {
             Ok(ids) => {
-                self.add.added.push(AddedNote {
-                    headline,
-                    detail: model.name,
-                    time: clock_label(),
-                });
                 let count = ids.len();
                 self.clear_toast();
                 for field in &self.add.fields {
@@ -3168,17 +3122,6 @@ pub const fn next_view(current: View, target: View) -> View {
         (View::Review, View::Decks) => View::Decks,
         (_, target) => target,
     }
-}
-
-fn clock_label() -> String {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        % 86_400;
-    let hours = seconds / 3600;
-    let minutes = (seconds % 3600) / 60;
-    format!("{hours:02}:{minutes:02}")
 }
 
 /// Study shortcuts stay out of text input, dialogs, and the settings screen.

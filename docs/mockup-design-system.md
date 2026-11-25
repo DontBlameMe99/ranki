@@ -112,10 +112,10 @@ are used on all deck count columns.
 | Secondary button | Transparent fill, 1px `surface1` border, text ink; Create deck, Cancel |
 | Tertiary button | `surface0` fill or transparent, subtext ink; End session, Undo, Flag, Edit, Bury |
 | Icon button | Mauve tint with mauve icon (audio), subtext icon on transparent (overflow, editor tools, footer) |
-| Segmented control | Track `surface0`, selected segment mauve at 22% with mauve text, others subtext; note types and preview Front/Back (A) |
+| Segmented control | Track `surface0`, selected segment mauve at 22% with mauve text, others subtext; note types (A) |
 | Inputs | Active front editor (mauve 1.5px border and caret), idle back editor (surface1 border), search field (surface0, placeholder, keycap), deck selector rendered as a button with chevron, tags as removable chips, Add tag dashed, toggle on (A) |
 | Deck rows | Parent expanded and collapsed chevrons, child rows with selected fill, subtree guide line, count columns in queue colors, zero count in overlay1, per-row Study button on selected child, overflow menu (D) |
-| Cards and panels | Study stage 760x440 radius 32 with tags, audio, question, answer divider, and example box (Q, R); due panel, 7-day bar chart, table (D); live preview and Added this session list (A) |
+| Cards and panels | Study stage 760x440 radius 32 with tags, audio, question, answer divider, and example box (Q, R); due panel, 7-day bar chart, table (D); add-card preview (A) |
 | Modal | None shown. If added, use `mantle` fill, 1px `surface0` border, radius 24, centered |
 | Toast | None shown. Existing app toast uses error fg on noninteractive fill; use `red` tint and 12px caption if aligned to this system |
 | Progress | 420x6 track, radius 3, `surface0` track, mauve fill at 43% (Q, R); 7-day bars use mauve for today and `surface1` otherwise (D); add-card stepper uses filled check, mauve outline for current, `surface0` for future (A) |
