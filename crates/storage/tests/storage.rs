@@ -396,6 +396,48 @@ fn due_cards_respects_queue_and_time_windows() {
 }
 
 #[test]
+fn stats_count_only_cards_due_at_the_given_time() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let conn = Connection::open(&path).expect("open");
+    conn.execute("UPDATE col SET crt = ?1 WHERE id = 1", [now])
+        .expect("set crt");
+    let rows = [
+        (10_i64, 0_i64, 7_i64),
+        (11, 1, now.saturating_mul(1_000)),
+        (12, 1, now.saturating_mul(1_000).saturating_add(60_000)),
+        (13, 2, 0),
+        (14, 2, 1),
+        (15, 3, 0),
+        (16, 3, 1),
+    ];
+    for (id, queue, due) in rows {
+        conn.execute(
+            "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, \
+             lapses, left, odue, odid, flags, data) VALUES (?1, 1, 1, 0, 0, 0, 0, ?2, ?3, 0, 0, \
+             0, 0, 0, 0, 0, 0, '')",
+            [id, queue, due],
+        )
+        .expect("insert card");
+    }
+    let store = Collection::open(&path).expect("open");
+    let stats = store.stats(None, now).expect("stats");
+    assert_eq!(stats.new_cards, 1);
+    assert_eq!(stats.learning_cards, 2);
+    assert_eq!(stats.review_cards, 1);
+    assert_eq!(stats.total_cards, 7);
+
+    let batch = store.deck_stats(now).expect("deck stats");
+    assert_eq!(
+        batch
+            .into_iter()
+            .find(|(id, _)| *id == 1)
+            .map(|(_, stats)| stats),
+        Some(stats)
+    );
+}
+
+#[test]
 fn find_cards_matches_text_wildcards_and_state() {
     let (_directory, path) = fixture();
     let mut store = Collection::open(&path).expect("open");
@@ -1017,7 +1059,7 @@ fn deck_stats_matches_per_deck_stats_for_a_hierarchy() {
             })
             .expect("add");
     }
-    let batch = store.deck_stats().expect("deck stats");
+    let batch = store.deck_stats(now_secs()).expect("deck stats");
     let decks = store.decks().expect("decks");
     assert_eq!(batch.len(), decks.len());
     for (id, stats) in batch {
@@ -1028,7 +1070,7 @@ fn deck_stats_matches_per_deck_stats_for_a_hierarchy() {
         );
     }
     let root_stats = store
-        .deck_stats()
+        .deck_stats(now_secs())
         .expect("deck stats")
         .into_iter()
         .find(|(id, _)| *id == root.id)
@@ -1051,7 +1093,7 @@ fn deck_stats_counts_children_of_names_ending_in_a_colon() {
             tags: Vec::new(),
         })
         .expect("add");
-    let batch = store.deck_stats().expect("deck stats");
+    let batch = store.deck_stats(now_secs()).expect("deck stats");
     let totals = batch
         .iter()
         .find(|(id, _)| *id == parent.id)

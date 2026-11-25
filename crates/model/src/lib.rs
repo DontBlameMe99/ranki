@@ -593,14 +593,15 @@ pub trait Store {
         now_secs: i64,
     ) -> Result<DeckStats, StoreError>;
 
-    /// Returns card counts for every deck, each including its subdecks.
+    /// Returns due card counts for every deck at `now_secs`, each including
+    /// its subdecks.
     ///
     /// Implementations without a batch query return
     /// [`StoreError::Unsupported`].
     ///
     /// # Errors
     /// Returns [`StoreError`] if the collection cannot be read.
-    fn deck_stats(&self) -> Result<DeckTotals, StoreError> {
+    fn deck_stats(&self, _now_secs: i64) -> Result<DeckTotals, StoreError> {
         Err(StoreError::Unsupported(
             "deck_stats is not supported by this store".to_owned(),
         ))

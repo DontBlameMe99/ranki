@@ -166,7 +166,7 @@ impl BenchApp {
 /// Counts each deck's cards in one store call, aligned with `decks`.
 fn deck_stats(store: &dyn Store, decks: &[Deck]) -> Vec<DeckStats> {
     let counts = store
-        .deck_stats()
+        .deck_stats(BENCH_CLOCK)
         .unwrap_or_default()
         .into_iter()
         .collect::<HashMap<_, _>>();
