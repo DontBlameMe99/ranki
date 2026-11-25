@@ -6,7 +6,10 @@ use gpui::{
     svg,
 };
 
-use crate::theme::{Palette, Style, alpha, keycap_ink};
+use crate::theme::{
+    Palette, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED, Style,
+    alpha, keycap_ink,
+};
 
 pub type ClickHandler =
     Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -55,9 +58,9 @@ pub fn secondary_button(
         .flex()
         .items_center()
         .justify_center()
-        .gap(px(8.))
+        .gap(px(SPACE_GROUP))
         .h(px(44.))
-        .px(px(16.))
+        .px(px(SPACE_BLOCK))
         .rounded(px(12.))
         .border_1()
         .border_color(colors.surface1)
@@ -87,7 +90,7 @@ pub fn small_button(
         .items_center()
         .justify_center()
         .h(px(30.))
-        .px(px(14.))
+        .px(px(SPACE_RELATED))
         .rounded(px(9.))
         .bg(style.colors.mauve)
         .text_color(style.ink())
@@ -138,8 +141,8 @@ pub fn keycap(
     };
     div()
         .flex_none()
-        .px(px(6.))
-        .py(px(2.))
+        .px(px(SPACE_GROUP))
+        .py(px(SPACE_INLINE))
         .rounded(px(6.))
         .bg(fill)
         .text_color(ink)
@@ -153,8 +156,8 @@ pub fn keycap(
 pub fn chip(label: impl Into<SharedString>, colors: Palette) -> Div {
     div()
         .flex_none()
-        .px(px(10.))
-        .py(px(5.))
+        .px(px(SPACE_RELATED))
+        .py(px(SPACE_INLINE))
         .rounded(px(10.))
         .bg(colors.surface1)
         .text_size(px(12.))
@@ -177,10 +180,10 @@ pub fn removable_chip(
         .flex_none()
         .flex()
         .items_center()
-        .gap(px(6.))
-        .py(px(7.))
-        .pr(px(8.))
-        .pl(px(12.))
+        .gap(px(SPACE_GROUP))
+        .py(px(SPACE_GROUP))
+        .pr(px(SPACE_GROUP))
+        .pl(px(SPACE_RELATED))
         .rounded(px(12.))
         .bg(colors.surface0)
         .text_size(px(13.))

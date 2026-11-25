@@ -12,9 +12,10 @@ use crate::{
     components::{ClickHandler, chip, fade_in, icon, keycap, progress_bar},
     theme::{
         CONTROL_HEIGHT, FOOTER_HEIGHT, MOTION_PROGRESS_MS, MOTION_QUICK_MS,
-        PROGRESS_WIDTH, RATING_GAP, STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS,
-        STAGE_WIDTH, TOPBAR_HEIGHT, accent_hover, accent_press, alpha,
-        interval_label, rating_fill, rating_label,
+        PROGRESS_WIDTH, RATING_GAP, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER,
+        SPACE_INLINE, SPACE_RELATED, SPACE_SECTION, STAGE_HEIGHT,
+        STAGE_PADDING, STAGE_RADIUS, STAGE_WIDTH, TOPBAR_HEIGHT, accent_hover,
+        accent_press, alpha, interval_label, rating_fill, rating_label,
     },
 };
 
@@ -85,8 +86,8 @@ impl Root {
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap(px(2.))
-                .pb(px(4.))
+                .gap(px(SPACE_INLINE))
+                .pb(px(SPACE_INLINE))
                 .border_b_2()
                 .border_color(if active { color } else { alpha(color, 0.0) });
             if active {
@@ -122,15 +123,15 @@ impl Root {
                 .flex()
                 .items_center()
                 .justify_between()
-                .px(px(32.))
+                .px(px(SPACE_GUTTER))
                 .child(
                     div()
                         .id("review-end")
                         .flex()
                         .items_center()
-                        .gap(px(10.))
+                        .gap(px(SPACE_GROUP))
                         .h(px(40.))
-                        .px(px(14.))
+                        .px(px(SPACE_RELATED))
                         .rounded(px(12.))
                         .bg(colors.surface0)
                         .text_size(px(14.))
@@ -148,7 +149,7 @@ impl Root {
                         .flex()
                         .flex_col()
                         .items_center()
-                        .gap(px(2.))
+                        .gap(px(SPACE_INLINE))
                         .child(
                             div()
                                 .text_size(px(14.))
@@ -168,7 +169,7 @@ impl Root {
                     div()
                         .flex()
                         .items_end()
-                        .gap(px(22.))
+                        .gap(px(SPACE_SECTION))
                         .child(queue_count(
                             "New",
                             session.new_cards,
@@ -219,8 +220,8 @@ impl Root {
                         .flex()
                         .flex_col()
                         .items_center()
-                        .gap(px(14.))
-                        .p(px(32.))
+                        .gap(px(SPACE_BLOCK))
+                        .p(px(SPACE_GUTTER))
                         .rounded(px(STAGE_RADIUS))
                         .bg(colors.surface0)
                         .child(
@@ -238,7 +239,7 @@ impl Root {
                         .child(
                             div()
                                 .flex()
-                                .gap(px(10.))
+                                .gap(px(SPACE_GROUP))
                                 .child(footer_button(
                                     "Back to decks",
                                     colors,
@@ -265,8 +266,8 @@ impl Root {
                         .flex()
                         .flex_col()
                         .items_center()
-                        .gap(px(18.))
-                        .p(px(32.))
+                        .gap(px(SPACE_BLOCK))
+                        .p(px(SPACE_GUTTER))
                         .rounded(px(STAGE_RADIUS))
                         .bg(colors.surface0)
                         .child(
@@ -285,7 +286,7 @@ impl Root {
                         .child(
                             div()
                                 .flex()
-                                .gap(px(14.))
+                                .gap(px(SPACE_BLOCK))
                                 .child(summary_tile(
                                     "REVIEWED",
                                     &format!("{answered}"),
@@ -320,7 +321,7 @@ impl Root {
                         .child(
                             div()
                                 .flex()
-                                .gap(px(10.))
+                                .gap(px(SPACE_GROUP))
                                 .child(footer_button(
                                     "Back to decks",
                                     colors,
@@ -349,7 +350,7 @@ impl Root {
                         .flex_col()
                         .items_center()
                         .justify_center()
-                        .gap(px(10.))
+                        .gap(px(SPACE_GROUP))
                         .w(px(STAGE_WIDTH))
                         .h(px(240.))
                         .rounded(px(STAGE_RADIUS))
@@ -386,7 +387,7 @@ impl Root {
                 .rounded(px(STAGE_RADIUS))
                 .bg(colors.surface0)
                 .child(div().flex().items_center().justify_between().child(
-                    div().flex().gap(px(6.)).children(
+                    div().flex().gap(px(SPACE_GROUP)).children(
                         tags.iter().map(|tag| chip(tag.clone(), colors)),
                     ),
                 ));
@@ -423,7 +424,7 @@ impl Root {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(10.))
+                .gap(px(SPACE_GROUP))
                 .children((phase == Phase::Question).then(|| {
                     div()
                         .text_size(px(11.))
@@ -452,7 +453,7 @@ impl Root {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(px(SPACE_GROUP))
                     .child(separator(colors))
                     .child(if let Some(card) = answer.as_ref() {
                         card_view::rendered_text(
@@ -523,7 +524,7 @@ impl Root {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(24.))
+                .gap(px(SPACE_SECTION))
                 .child(fade_in(stage, ("stage", key), quick))
                 .child(if phase == Phase::Question {
                     div()
@@ -533,7 +534,7 @@ impl Root {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .gap(px(12.))
+                        .gap(px(SPACE_RELATED))
                         .rounded(px(18.))
                         .bg(colors.mauve)
                         .text_color(style.ink())
@@ -570,11 +571,11 @@ impl Root {
                 .flex()
                 .items_center()
                 .justify_between()
-                .px(px(32.))
+                .px(px(SPACE_GUTTER))
                 .child(
                     div()
                         .flex()
-                        .gap(px(4.))
+                        .gap(px(SPACE_INLINE))
                         .child(footer_action(
                             "Undo",
                             "Ctrl Z",
@@ -595,7 +596,7 @@ impl Root {
                 .child(
                     div()
                         .flex()
-                        .gap(px(4.))
+                        .gap(px(SPACE_INLINE))
                         .child(footer_action(
                             "Scheduler",
                             "T",
@@ -650,9 +651,9 @@ fn summary_tile(
     div()
         .flex()
         .flex_col()
-        .gap(px(4.))
+        .gap(px(SPACE_INLINE))
         .w(px(160.))
-        .p(px(14.))
+        .p(px(SPACE_RELATED))
         .rounded(px(16.))
         .border_1()
         .border_color(colors.surface1)
@@ -677,9 +678,9 @@ fn separator(colors: crate::theme::Palette) -> gpui::Div {
     div()
         .flex()
         .items_center()
-        .gap(px(12.))
+        .gap(px(SPACE_RELATED))
         .w_full()
-        .my(px(10.))
+        .my(px(SPACE_RELATED))
         .child(div().h(px(1.)).flex_1().bg(colors.surface1))
         .child(
             div()
@@ -754,7 +755,7 @@ fn rating_row(
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(4.))
+                .gap(px(SPACE_INLINE))
                 .rounded(px(18.))
                 .bg(alpha(hue, 0.14))
                 .border_1()
@@ -781,15 +782,15 @@ fn rating_row(
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(8.))
+                        .gap(px(SPACE_GROUP))
                         .text_size(px(16.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(label_color)
                         .child(rating_name(rating))
                         .child(
                             div()
-                                .px(px(6.))
-                                .py(px(2.))
+                                .px(px(SPACE_GROUP))
+                                .py(px(SPACE_INLINE))
                                 .rounded(px(6.))
                                 .bg(alpha(hue, 0.2))
                                 .text_size(px(11.))
@@ -829,9 +830,9 @@ fn footer_action(
         .id(SharedString::from(format!("footer-{label}")))
         .flex()
         .items_center()
-        .gap(px(8.))
+        .gap(px(SPACE_GROUP))
         .h(px(36.))
-        .px(px(12.))
+        .px(px(SPACE_RELATED))
         .rounded(px(10.))
         .text_size(px(13.))
         .text_color(ink)
@@ -871,7 +872,7 @@ fn footer_button(
         .items_center()
         .justify_center()
         .h(px(44.))
-        .px(px(20.))
+        .px(px(SPACE_SECTION))
         .rounded(px(14.))
         .bg(bg)
         .border_1()

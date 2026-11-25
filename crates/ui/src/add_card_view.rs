@@ -17,7 +17,7 @@ use crate::{
     theme::{
         ADD_CONTENT_WIDTH, ADD_FORM_WIDTH, ADD_GAP, NAV_WIDTH, PAGE_X,
         PREVIEW_WIDTH, Style, alpha,
-    },
+    SPACE_INLINE, SPACE_GROUP, SPACE_RELATED, SPACE_BLOCK, SPACE_SECTION, SPACE_GUTTER, },
 };
 
 /// Height of the occlusion drawing area.
@@ -90,7 +90,7 @@ impl Root {
             .flex_col()
             .overflow_scroll()
             .px(px(PAGE_X))
-            .pt(px(32.));
+            .pt(px(SPACE_GUTTER));
         let mut column = div()
             .flex()
             .flex_col()
@@ -114,17 +114,17 @@ impl Root {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(14.))
+                    .gap(px(SPACE_BLOCK))
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(4.))
+                            .gap(px(SPACE_INLINE))
                             .flex_1()
                             .min_w(px(220.))
                             .max_w(px(340.))
-                            .p(px(10.))
-                            .px(px(12.))
+                            .p(px(SPACE_RELATED))
+                            .px(px(SPACE_RELATED))
                             .rounded(px(14.))
                             .bg(colors.surface0)
                             .child(
@@ -144,7 +144,7 @@ impl Root {
                                     ))
                                     .flex()
                                     .items_center()
-                                    .gap(px(6.))
+                                    .gap(px(SPACE_GROUP))
                                     .text_size(px(14.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(self.add_deck_index().and_then(|index| decks.get(index)).map_or_else(
@@ -163,8 +163,8 @@ impl Root {
                             .flex()
                             .flex_none()
                             .items_center()
-                            .gap(px(2.))
-                            .p(px(4.))
+                            .gap(px(SPACE_INLINE))
+                            .p(px(SPACE_INLINE))
                             .rounded(px(12.))
                             .bg(colors.surface0)
                             .children(
@@ -177,7 +177,7 @@ impl Root {
                                                 "add-model-tab-{index}"
                                             )))
                                             .h(px(32.))
-                                            .px(px(12.))
+                                            .px(px(SPACE_RELATED))
                                             .flex()
                                             .items_center()
                                             .rounded(px(9.))
@@ -224,7 +224,7 @@ impl Root {
         let is_cloze = model
             .is_some_and(|model| model.kind == ranki_model::NoteKind::Cloze);
         let mut left =
-            div().flex().flex_col().w_full().gap(px(18.)).min_w(px(0.));
+            div().flex().flex_col().w_full().gap(px(SPACE_BLOCK)).min_w(px(0.));
         if occlusion_mode {
             let editor = self.render_occlusion_editor(colors, &errors, cx);
             left = left.child(editor);
@@ -249,8 +249,8 @@ impl Root {
             let mut field_box = div()
                 .flex()
                 .flex_col()
-                .px(px(16.))
-                .py(px(14.))
+                .px(px(SPACE_BLOCK))
+                .py(px(SPACE_RELATED))
                 .rounded(px(16.))
                 .border_1()
                 .border_color(border)
@@ -281,7 +281,7 @@ impl Root {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(6.))
+                    .gap(px(SPACE_GROUP))
                     .child(
                         div()
                             .text_size(px(13.))
@@ -301,10 +301,10 @@ impl Root {
             .flex()
             .items_center()
             .flex_wrap()
-            .gap(px(8.))
+            .gap(px(SPACE_GROUP))
             .min_h(px(46.))
-            .px(px(12.))
-            .py(px(8.))
+            .px(px(SPACE_RELATED))
+            .py(px(SPACE_GROUP))
             .rounded(px(12.))
             .border_1()
             .border_color(colors.surface1);
@@ -331,7 +331,7 @@ impl Root {
         let tags_group = div()
             .flex()
             .flex_col()
-            .gap(px(8.))
+            .gap(px(SPACE_GROUP))
             .child(
                 div()
                     .text_size(px(13.))
@@ -350,7 +350,7 @@ impl Root {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(6.))
+                            .gap(px(SPACE_GROUP))
                             .min_w(px(140.))
                             .child(icon("icon-tag", 14., colors.mauve))
                             .child(
@@ -362,8 +362,8 @@ impl Root {
         let mut preview = div()
             .flex()
             .flex_col()
-            .gap(px(14.))
-            .p(px(20.))
+            .gap(px(SPACE_BLOCK))
+            .p(px(SPACE_SECTION))
             .min_h(px(300.))
             .rounded(px(24.))
             .bg(colors.surface0);
@@ -379,7 +379,7 @@ impl Root {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(10.))
+                .gap(px(SPACE_GROUP))
                 .child(
                     div()
                         .text_size(px(52.))
@@ -408,8 +408,8 @@ impl Root {
                 .children(preview_example.map(|example| {
                     div()
                         .w_full()
-                        .px(px(14.))
-                        .py(px(10.))
+                        .px(px(SPACE_RELATED))
+                        .py(px(SPACE_RELATED))
                         .rounded(px(14.))
                         .bg(colors.base)
                         .text_size(px(14.))
@@ -458,7 +458,7 @@ impl Root {
                 .min_w(px(ADD_FORM_WIDTH * 0.5))
                 .flex()
                 .flex_col()
-                .gap(px(18.))
+                .gap(px(SPACE_BLOCK))
                 .child(left)
                 .child(tags_group);
             form = form
@@ -468,7 +468,7 @@ impl Root {
         } else {
             form = form
                 .flex_col()
-                .gap(px(18.))
+                .gap(px(SPACE_BLOCK))
                 .child(left)
                 .child(tags_group)
                 .child(preview);
@@ -477,12 +477,12 @@ impl Root {
 
         column = column.child(
             div()
-                .mt(px(20.))
-                .mb(px(22.))
+                .mt(px(SPACE_SECTION))
+                .mb(px(SPACE_SECTION))
                 .flex()
                 .items_center()
-                .gap(px(14.))
-                .pt(px(16.))
+                .gap(px(SPACE_BLOCK))
+                .pt(px(SPACE_BLOCK))
                 .border_t_1()
                 .border_color(colors.surface1)
                 .child(div().flex_1())
@@ -490,10 +490,10 @@ impl Root {
                     div()
                         .id("add-save")
                         .h(px(48.))
-                        .px(px(22.))
+                        .px(px(SPACE_SECTION))
                         .flex()
                         .items_center()
-                        .gap(px(8.))
+                        .gap(px(SPACE_GROUP))
                         .rounded(px(14.))
                         .bg(colors.mauve)
                         .text_color(style.ink())
@@ -537,9 +537,9 @@ impl Root {
                 .id(id)
                 .flex()
                 .items_center()
-                .gap(px(6.))
+                .gap(px(SPACE_GROUP))
                 .h(px(32.))
-                .px(px(12.))
+                .px(px(SPACE_RELATED))
                 .rounded(px(10.))
                 .border_1()
                 .border_color(colors.surface1)
@@ -711,7 +711,7 @@ impl Root {
             })
             .child(canvas);
 
-        let mut list = div().flex().flex_col().gap(px(4.));
+        let mut list = div().flex().flex_col().gap(px(SPACE_INLINE));
         if masks.is_empty() {
             list = list.child(
                 div()
@@ -728,9 +728,9 @@ impl Root {
                     .id(SharedString::from(format!("io-mask-{index}")))
                     .flex()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(px(SPACE_GROUP))
                     .h(px(32.))
-                    .px(px(10.))
+                    .px(px(SPACE_RELATED))
                     .rounded(px(9.))
                     .bg(if active {
                         alpha(colors.mauve, 0.16)
@@ -770,8 +770,8 @@ impl Root {
             .flex()
             .flex_col()
             .w_full()
-            .gap(px(12.))
-            .p(px(16.))
+            .gap(px(SPACE_RELATED))
+            .p(px(SPACE_BLOCK))
             .rounded(px(18.))
             .border_1()
             .border_color(colors.surface1)
@@ -780,7 +780,7 @@ impl Root {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(px(SPACE_GROUP))
                     .child(
                         div()
                             .text_size(px(11.))
@@ -797,7 +797,7 @@ impl Root {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(px(SPACE_GROUP))
                     .child({
                         let label = div()
                             .id("io-upload-image")
@@ -853,7 +853,7 @@ impl Root {
         let mut list = div()
             .flex()
             .flex_col()
-            .gap(px(4.))
+            .gap(px(SPACE_INLINE))
             .max_h(px(220.))
             .id("add-deck-list")
             .overflow_scroll();
@@ -879,7 +879,7 @@ impl Root {
                     .justify_between()
                     .h(px(38.))
                     .flex_none()
-                    .px(px(12.))
+                    .px(px(SPACE_RELATED))
                     .rounded(px(10.))
                     .bg(if selected {
                         alpha(colors.mauve, 0.18)
@@ -902,7 +902,7 @@ impl Root {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.))
+                            .gap(px(SPACE_GROUP))
                             .child(icon("icon-book", 16., colors.subtext))
                             .child(deck.name.replace("::", " › ")),
                     )
@@ -917,7 +917,7 @@ impl Root {
         if matches == 0 {
             list = list.child(
                 div()
-                    .p(px(12.))
+                    .p(px(SPACE_RELATED))
                     .text_size(px(13.))
                     .text_color(colors.overlay)
                     .child("No decks match"),
@@ -926,8 +926,8 @@ impl Root {
         div()
             .flex()
             .flex_col()
-            .gap(px(8.))
-            .p(px(12.))
+            .gap(px(SPACE_GROUP))
+            .p(px(SPACE_RELATED))
             .rounded(px(16.))
             .border_1()
             .border_color(colors.surface1)
@@ -936,9 +936,9 @@ impl Root {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(px(SPACE_GROUP))
                     .h(px(38.))
-                    .px(px(10.))
+                    .px(px(SPACE_RELATED))
                     .rounded(px(10.))
                     .bg(colors.base)
                     .child(icon("icon-search", 15., colors.subtext))
@@ -1125,7 +1125,7 @@ fn formatting_toolbar(
             .flex()
             .items_center()
             .h(px(30.))
-            .px(px(10.))
+            .px(px(SPACE_RELATED))
             .rounded(px(8.))
             .text_size(px(13.))
             .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -1135,13 +1135,13 @@ fn formatting_toolbar(
             .child(label)
     };
     let mut toolbar = div()
-        .mt(px(10.))
-        .pt(px(8.))
+        .mt(px(SPACE_RELATED))
+        .pt(px(SPACE_GROUP))
         .border_t_1()
         .border_color(colors.surface1)
         .flex()
         .items_center()
-        .gap(px(2.))
+        .gap(px(SPACE_INLINE))
         .child(button(
             "B",
             true,
@@ -1163,8 +1163,7 @@ fn formatting_toolbar(
             toolbar = toolbar.child(cloze_button(
                 format!("[…] Link c{number}"),
                 number,
-                field,
-                handle,
+                field,                handle,
             ));
         }
     }

@@ -16,7 +16,7 @@ use ranki_sync::{
 use crate::{
     app::{Root, status_label},
     components::{icon, small_button},
-    theme::Palette,
+    theme::{Palette, SPACE_BLOCK, SPACE_GROUP, SPACE_RELATED, SPACE_SECTION},
 };
 
 /// Reads the local sync state without changing it.
@@ -156,7 +156,7 @@ impl Root {
         let toggle = self.action_click(crate::app::UiAction::ToggleSync);
         let sign_in = self.action_click(crate::app::UiAction::SyncSignIn);
 
-        let mut fields = div().flex().flex_col().gap(px(12.));
+        let mut fields = div().flex().flex_col().gap(px(SPACE_RELATED));
         if enabled && !signed_in {
             fields = fields
                 .child(labeled_input(
@@ -173,7 +173,7 @@ impl Root {
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(12.))
+                        .gap(px(SPACE_RELATED))
                         .child(small_button(
                             if self.sync.busy {
                                 "Signing in"
@@ -196,8 +196,8 @@ impl Root {
             .id("settings-sync")
             .flex()
             .flex_col()
-            .gap(px(18.))
-            .p(px(24.))
+            .gap(px(SPACE_BLOCK))
+            .p(px(SPACE_SECTION))
             .rounded(px(24.))
             .bg(colors.mantle)
             .border_1()
@@ -206,7 +206,7 @@ impl Root {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(12.))
+                    .gap(px(SPACE_RELATED))
                     .child(icon("icon-clock", 18., colors.mauve))
                     .child(
                         div()
@@ -220,12 +220,12 @@ impl Root {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap(px(24.))
+                    .gap(px(SPACE_SECTION))
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(6.))
+                            .gap(px(SPACE_GROUP))
                             .child(
                                 div()
                                     .text_size(px(14.))
@@ -249,7 +249,7 @@ impl Root {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(px(SPACE_GROUP))
                     .text_size(px(12.))
                     .text_color(colors.subtext)
                     .child(icon("icon-check", 14., colors.green))
@@ -267,7 +267,7 @@ fn labeled_input(
     div()
         .flex()
         .flex_col()
-        .gap(px(6.))
+        .gap(px(SPACE_GROUP))
         .child(
             div()
                 .text_size(px(13.))
@@ -278,8 +278,8 @@ fn labeled_input(
         .child(
             div()
                 .flex()
-                .px(px(14.))
-                .py(px(10.))
+                .px(px(SPACE_RELATED))
+                .py(px(SPACE_RELATED))
                 .rounded(px(12.))
                 .border_1()
                 .border_color(colors.surface1)
