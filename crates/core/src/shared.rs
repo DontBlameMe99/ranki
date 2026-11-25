@@ -3,12 +3,17 @@ use ranki_model::next_id;
 use ranki_model::{
     Card, CardQueue, CardType, Rating, RevLog, RevLogKind, ReviewDecision,
 };
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 use crate::SECONDS_PER_DAY;
 use rand::RngExt as _;
 use rand::SeedableRng as _;
 use rand::rngs::StdRng;
 
+thread_local! {
+    static FUZZ_FACTORS: RefCell<HashMap<u64, f32>> = RefCell::new(HashMap::new());
+}
 const I32_MAX_F32: f32 = 2_147_483_647.0;
 const I32_MIN_F32: f32 = -2_147_483_648.0;
 
@@ -422,8 +427,14 @@ pub fn fuzz_interval(input: FuzzInput) -> i32 {
             .unwrap_or(i32::MAX);
     }
     let (lower, upper) = fuzz_bounds(raw, minimum, maximum);
-    let mut rng = StdRng::seed_from_u64(fuzz_seed(input.card_id, input.reps));
-    let factor: f32 = rng.random_range(0.0..1.0);
+    let seed = fuzz_seed(input.card_id, input.reps);
+    let factor = FUZZ_FACTORS.with(|slot| {
+        let mut cache = slot.borrow_mut();
+        *cache.entry(seed).or_insert_with(|| {
+            let mut rng = StdRng::seed_from_u64(seed);
+            rng.random_range(0.0..1.0)
+        })
+    });
     let span = as_f32_u32(upper.saturating_sub(lower).saturating_add(1));
     let picked = (as_f32_u32(lower) + factor * span).floor();
     i32::try_from(as_u32(picked).clamp(minimum, maximum)).unwrap_or(i32::MAX)
