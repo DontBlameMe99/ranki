@@ -1763,15 +1763,18 @@ impl Root {
         );
         let before_progress = self.progress_fraction();
         self.poll_external_change(cx);
-        if let Err(error) = self.store.apply_review(&decision) {
-            self.show_toast(
-                ToastKind::Error,
-                format!("Could not save review: {error}"),
-                cx,
-            );
-            cx.notify();
-            return;
-        }
+        let log_id = match self.store.apply_review(&decision) {
+            Ok(id) => id,
+            Err(error) => {
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not save review: {error}"),
+                    cx,
+                );
+                cx.notify();
+                return;
+            }
+        };
 
         self.record_local_write();
         self.review.answered = self.review.answered.saturating_add(1);
@@ -1792,7 +1795,7 @@ impl Root {
         }
         self.review.last_grade = Some(UndoEntry {
             card,
-            revlog_id: decision.revlog.id,
+            revlog_id: log_id,
             rating,
             spent: self.review.focused_elapsed,
             requeued,
@@ -3494,8 +3497,8 @@ mod tests {
         fn apply_review(
             &mut self,
             _: &ReviewDecision,
-        ) -> Result<(), StoreError> {
-            Ok(())
+        ) -> Result<Id, StoreError> {
+            Ok(0)
         }
 
         fn stats(
@@ -4322,6 +4325,7 @@ mod tests {
             fields: vec!["Text".into()],
             templates: vec![CardTemplate::default()],
             css: String::new(),
+            sort_field_index: 0,
             kind: NoteKind::Cloze,
             original_stock_kind: None,
             field_tags: vec![],

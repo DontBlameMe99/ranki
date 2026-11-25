@@ -34,9 +34,9 @@ use std::str;
 pub use ranki_model::StoreError;
 pub use ranki_model::stock_models;
 
-pub use anki::deck_common;
 pub use anki::decode_deck_name;
 pub use anki::encode_deck_name;
+pub use anki::normal_deck_kind;
 
 pub use records::models_from_tables_with_prefix;
 pub use records::models_to_json;
@@ -172,7 +172,7 @@ impl Collection {
             return Ok(model.clone());
         }
         let mut model = kind.definition();
-        model.id = fresh_model_id(&existing)?;
+        model.id = fresh_model_id(&self.conn, &existing)?;
         let col = records::read_col(&self.conn)?;
         let stamp = col_stamp(&col)?;
         let tables = models_in_tables(&self.conn, &col)?;
@@ -185,16 +185,15 @@ impl Collection {
         if let Some(json) = models.as_deref() {
             transaction
                 .execute(
-                    "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4, models = ?5 WHERE id = \
-                     1",
-                    params![stamp.modified, stamp.scm, stamp.usn, stamp.ls, json],
+"UPDATE col SET mod = ?1, scm = ?2, models = ?3 WHERE id = 1",
+params![stamp.modified, stamp.scm, json],
                 )
                 .map_err(backend)?;
         } else {
             transaction
                 .execute(
-                    "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
-                    params![stamp.modified, stamp.scm, stamp.usn, stamp.ls],
+                    "UPDATE col SET mod = ?1, scm = ?2 WHERE id = 1",
+                    params![stamp.modified, stamp.scm],
                 )
                 .map_err(backend)?;
             insert_model_tables(&transaction, &model, &stamp)?;
@@ -230,10 +229,17 @@ impl Collection {
             .conn
             .pragma_query_value(None, "journal_mode", |row| row.get(0))
             .map_err(backend)?;
-        if mode.eq_ignore_ascii_case("wal") {
-            self.conn
-                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-                .map_err(backend)?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            return Ok(());
+        }
+        let busy: i64 = self
+            .conn
+            .pragma_query_value(None, "wal_checkpoint(TRUNCATE)", |row| {
+                row.get(0)
+            })
+            .map_err(backend)?;
+        if busy != 0 {
+            return Err(invalid("checkpoint blocked by another writer"));
         }
         Ok(())
     }
@@ -386,7 +392,7 @@ impl Store for Collection {
         }
         let col = records::read_col(&self.conn)?;
         let stamp = col_stamp(&col)?;
-        let id = anki::next_id()?;
+        let id = fresh_id(&self.conn, "notes")?;
         let modern = uses_deck_table(&self.conn, &col)?;
         if modern {
             self.conn
@@ -398,15 +404,15 @@ impl Store for Collection {
                         anki::encode_deck_name(deck_name),
                         stamp.now_secs,
                         stamp.usn,
-                        anki::deck_common(stamp.usn, stamp.now_secs),
                         Vec::<u8>::new(),
+                        anki::normal_deck_kind(1),
                     ],
                 )
                 .map_err(backend)?;
             self.conn
                 .execute(
-                    "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
-                    params![stamp.modified, stamp.scm, stamp.usn, stamp.ls],
+                    "UPDATE col SET mod = ?1, scm = ?2 WHERE id = 1",
+                    params![stamp.modified, stamp.scm],
                 )
                 .map_err(backend)?;
         } else {
@@ -417,14 +423,14 @@ impl Store for Collection {
                 .ok_or_else(|| invalid("decks is not an object"))?;
             object.insert(
                 id.to_string(),
-                json!({"id": id, "name": deck_name, "usn": stamp.usn, "mod": stamp.now_secs, "conf": 1, "desc": "", "dyn": 0}),
+                json!({"id": id, "name": deck_name, "usn": stamp.usn, "mod": stamp.now_secs, "conf": 1, "desc": "", "dyn": 0, "collapsed": false, "browserCollapsed": false, "lrnToday": [0, 0], "revToday": [0, 0], "newToday": [0, 0], "timeToday": [0, 0], "extendNew": 0, "extendRev": 0}),
             );
             let decks_json = serde_json::to_string(&value)
                 .map_err(|error| invalid(error.to_string()))?;
             self.conn
                 .execute(
-                    "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4, decks = ?5 WHERE id = 1",
-                    params![stamp.modified, stamp.scm, stamp.usn, stamp.ls, decks_json],
+"UPDATE col SET mod = ?1, scm = ?2, decks = ?3 WHERE id = 1",
+                    params![stamp.modified, stamp.scm, decks_json],
                 )
                 .map_err(backend)?;
         }
@@ -636,11 +642,12 @@ impl Store for Collection {
         if !self.deck_subtree(note.deck_id)?.contains(&note.deck_id) {
             return Err(StoreError::NotFound(format!("deck {}", note.deck_id)));
         }
-        let id = anki::next_id()?;
+        let id = fresh_id(&self.conn, "notes")?;
         let guid = anki::guid(id)?;
         let modified = anki::now_secs()?;
         let first = note.fields.first().map_or("", String::as_str);
-        let sort_field = anki::sort_field(&note.fields, 0);
+        let sort_field =
+            anki::sort_field(&note.fields, usize::from(model.sort_field_index));
         let checksum = anki::checksum(first);
         let transaction = self.conn.transaction().map_err(backend)?;
         let usn = update_col(&transaction, false)?;
@@ -665,7 +672,7 @@ impl Store for Collection {
         let ordinals = model.card_ordinals(&note.fields);
         let mut cards: Vec<Id> = Vec::with_capacity(ordinals.len());
         for (offset, ordinal) in ordinals.into_iter().enumerate() {
-            let card_id = anki::next_id()?;
+            let card_id = fresh_id(&transaction, "cards")?;
             let due = next_position
                 .saturating_add(i64::try_from(offset).unwrap_or_default());
             transaction
@@ -690,7 +697,7 @@ impl Store for Collection {
     fn apply_review(
         &mut self,
         decision: &ReviewDecision,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Id, StoreError> {
         let transaction = self.conn.transaction().map_err(backend)?;
         let current: Option<(i64, i32)> = transaction
             .query_row(
@@ -705,9 +712,9 @@ impl Store for Collection {
             return Err(invalid("card changed since it was loaded"));
         }
         let usn = update_col(&transaction, true)?;
-        write_review(&transaction, usn, decision)?;
+        let log_id = write_review(&transaction, usn, decision)?;
         transaction.commit().map_err(backend)?;
-        Ok(())
+        Ok(log_id)
     }
 
     fn undo_review(
@@ -929,7 +936,6 @@ struct ColStamp {
     usn: i32,
     modified: i64,
     scm: i64,
-    ls: i64,
     now_secs: i64,
 }
 
@@ -939,13 +945,49 @@ struct Graves {
     decks: Vec<Id>,
 }
 
-fn fresh_model_id(existing: &[NoteModel]) -> Result<Id, StoreError> {
+fn fresh_id(conn: &Connection, table: &str) -> Result<Id, StoreError> {
+    let highest: Option<Id> = conn
+        .query_row(&format!("SELECT MAX(id) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .map_err(backend)?;
+    let mut id = anki::next_id()?;
+    if highest.is_some_and(|maximum| id <= maximum) {
+        id = highest.unwrap_or(id).saturating_add(1);
+    }
     loop {
-        let id = anki::next_id()?;
-        if !existing.iter().any(|entry| entry.id == id) {
+        let exists: bool = conn
+            .query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?1)"),
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        if !exists {
             return Ok(id);
         }
+        id = id.saturating_add(1);
     }
+}
+
+fn fresh_revlog_id(conn: &Connection, preferred: Id) -> Result<Id, StoreError> {
+    let highest: Option<Id> = conn
+        .query_row("SELECT MAX(id) FROM revlog", [], |row| row.get(0))
+        .map_err(backend)?;
+    Ok(highest.map_or(preferred, |maximum| {
+        preferred.max(maximum.saturating_add(1))
+    }))
+}
+
+fn fresh_model_id(
+    conn: &Connection,
+    existing: &[NoteModel],
+) -> Result<Id, StoreError> {
+    let mut id = fresh_id(conn, "notes")?;
+    while existing.iter().any(|entry| entry.id == id) {
+        id = id.saturating_add(1);
+    }
+    Ok(id)
 }
 
 /// Adds one model to `col.models` JSON and returns the new document.
@@ -1007,6 +1049,7 @@ fn insert_model_tables(
             stamp.usn,
             anki::notetype_config(
                 model.kind.code(),
+                model.sort_field_index,
                 model.original_stock_kind,
                 &model.css,
             ),
@@ -1206,22 +1249,15 @@ fn col_stamp(col: &records::ColData) -> Result<ColStamp, StoreError> {
     stamp_from(&Stamps {
         modified: col.modified,
         scm: col.scm,
-        last_sync: col.last_sync,
-        usn: col.usn,
     })
 }
 
 fn stamp_from(stamps: &Stamps) -> Result<ColStamp, StoreError> {
-    let usn = stamps
-        .usn
-        .checked_add(1)
-        .ok_or_else(|| invalid("usn overflow"))?;
     let now = anki::now_ms()?;
     Ok(ColStamp {
-        usn,
+        usn: -1,
         modified: next_stamp(stamps.modified, now),
         scm: next_stamp(stamps.scm, now),
-        ls: next_stamp(stamps.last_sync, now),
         now_secs: anki::now_secs()?,
     })
 }
@@ -1233,14 +1269,14 @@ fn write_col_metadata(
 ) -> Result<(), StoreError> {
     if let Some(decks) = decks_json {
         conn.execute(
-            "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4, decks = ?5 WHERE id = 1",
-            params![stamp.modified, stamp.scm, stamp.usn, stamp.ls, decks],
+            "UPDATE col SET mod = ?1, scm = ?2, decks = ?3 WHERE id = 1",
+            params![stamp.modified, stamp.scm, decks],
         )
         .map_err(backend)?;
     } else {
         conn.execute(
-            "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
-            params![stamp.modified, stamp.scm, stamp.usn, stamp.ls],
+            "UPDATE col SET mod = ?1, scm = ?2 WHERE id = 1",
+            params![stamp.modified, stamp.scm],
         )
         .map_err(backend)?;
     }
@@ -1398,12 +1434,11 @@ fn rename_in_deck_table(
     for (deck_id, deck_name) in changes {
         let updated = conn
             .execute(
-                "UPDATE decks SET name = ?1, mtime_secs = ?2, usn = ?3, common = ?4 WHERE id = ?5",
+                "UPDATE decks SET name = ?1, mtime_secs = ?2, usn = ?3 WHERE id = ?4",
                 params![
                     anki::encode_deck_name(deck_name),
                     stamp.now_secs,
                     stamp.usn,
-                    anki::deck_common(stamp.usn, stamp.now_secs),
                     deck_id,
                 ],
             )
@@ -1458,7 +1493,12 @@ fn write_graves(
     ] {
         for id in ids {
             conn.execute(
-                "INSERT OR REPLACE INTO graves (oid, type, usn) VALUES (?1, ?2, ?3)",
+                "DELETE FROM graves WHERE oid = ?1 AND type = ?2",
+                params![id, kind],
+            )
+            .map_err(backend)?;
+            conn.execute(
+                "INSERT INTO graves (oid, type, usn) VALUES (?1, ?2, ?3)",
                 params![id, kind, stamp.usn],
             )
             .map_err(backend)?;
@@ -1471,8 +1511,8 @@ fn update_col(conn: &Connection, bump_scm: bool) -> Result<i32, StoreError> {
     let stamp = stamp_from(&stamps)?;
     let scm = if bump_scm { stamp.scm } else { stamps.scm };
     conn.execute(
-        "UPDATE col SET mod = ?1, scm = ?2, usn = ?3, ls = ?4 WHERE id = 1",
-        params![stamp.modified, scm, stamp.usn, stamp.ls],
+        "UPDATE col SET mod = ?1, scm = ?2 WHERE id = 1",
+        params![stamp.modified, scm],
     )
     .map_err(backend)?;
     Ok(stamp.usn)
@@ -1482,26 +1522,17 @@ fn update_col(conn: &Connection, bump_scm: bool) -> Result<i32, StoreError> {
 struct Stamps {
     modified: i64,
     scm: i64,
-    last_sync: i64,
-    usn: i32,
 }
 
 /// Reads the stamps without decoding the note types, decks, and configuration
 /// JSON that the same row carries.
 fn read_stamps(conn: &Connection) -> Result<Stamps, StoreError> {
-    conn.query_row(
-        "SELECT mod, scm, ls, usn FROM col WHERE id = 1",
-        [],
-        |row| {
-            let usn = row.get::<_, i64>(3)?;
-            Ok(Stamps {
-                modified: row.get(0)?,
-                scm: row.get(1)?,
-                last_sync: row.get(2)?,
-                usn: i32::try_from(usn).unwrap_or(i32::MAX),
-            })
-        },
-    )
+    conn.query_row("SELECT mod, scm FROM col WHERE id = 1", [], |row| {
+        Ok(Stamps {
+            modified: row.get(0)?,
+            scm: row.get(1)?,
+        })
+    })
     .map_err(backend)
 }
 
@@ -1510,7 +1541,7 @@ fn write_review(
     transaction: &Transaction<'_>,
     usn: i32,
     decision: &ReviewDecision,
-) -> Result<(), StoreError> {
+) -> Result<Id, StoreError> {
     let card = &decision.card;
     let updated = transaction
         .execute(
@@ -1541,12 +1572,13 @@ fn write_review(
         return Err(StoreError::NotFound(format!("card {}", card.id)));
     }
     let log = &decision.revlog;
+    let log_id = fresh_revlog_id(transaction, log.id)?;
     transaction
         .execute(
             "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type) VALUES \
              (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                log.id,
+                log_id,
                 card.id,
                 usn,
                 log.ease.code(),
@@ -1558,7 +1590,7 @@ fn write_review(
             ],
         )
         .map_err(backend)?;
-    Ok(())
+    Ok(log_id)
 }
 
 /// Reads the next new-card position.

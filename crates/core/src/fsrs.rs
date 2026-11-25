@@ -5,10 +5,9 @@ use serde_json::{Map, Number, Value};
 
 use crate::shared::{
     FuzzInput, ReviewContext, ReviewOutcome, StepConfig, as_f32, as_i32,
-    due_from_days, elapsed_days, f32_from_f64, factor_or_default, finish,
-    fuzz_interval, is_schedulable, minimum_review_fuzz_interval,
-    positive_factor, preview_interval, step_outcome, unchanged,
-    unchanged_outcome,
+    due_from_days, elapsed_days, f32_from_f64, finish, fuzz_interval,
+    is_schedulable, minimum_review_fuzz_interval, positive_factor,
+    preview_interval, step_outcome, unchanged, unchanged_outcome,
 };
 
 /// Anki's default FSRS-6 parameters (21 weights, positive `w20` decay).
@@ -145,6 +144,19 @@ pub const fn clamp_desired_retention(value: f32) -> f32 {
     }
 }
 
+fn difficulty_factor(difficulty: f32) -> u32 {
+    if !difficulty.is_finite() || difficulty <= 0.0 {
+        return 0;
+    }
+    let scaled = difficulty.mul_add(100.0, 0.5).min(4_294_967_295.0);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "difficulty is clamped to a non-negative u32 range"
+    )]
+    let factor = scaled.trunc() as u32;
+    factor
+}
 fn forgetting_factor(decay: f32) -> f32 {
     (-0.9_f32.ln() / decay).exp() - 1.0
 }
@@ -357,7 +369,7 @@ impl FsrsScheduler {
                     now_secs: ctx.now_secs,
                 },
             ),
-            factor: factor_or_default(ctx.card.factor),
+            factor: difficulty_factor(memory.difficulty),
             graduation,
         }
     }

@@ -99,7 +99,7 @@ fn create_writes_anki_schema_and_default_json() {
         .map(|row| row.expect("row"))
         .collect();
     assert!(indexes.contains(&"ix_cards_sched".to_owned()));
-    assert!(indexes.contains(&"idx_graves_pending".to_owned()));
+    assert!(indexes.contains(&"ix_notes_csum".to_owned()));
     let (configuration, models, decks, dconf, tags): (
         String,
         String,
@@ -609,10 +609,11 @@ fn apply_review_updates_card_log_and_collection_metadata() {
     assert_eq!(log.card_id, card.id);
     assert_eq!(log.ease, Rating::Good);
     assert!(store.collection_modified().expect("modified") > before);
-    assert!(store.apply_review(&decision).is_err());
+    store.apply_review(&decision).expect("second review");
     assert_eq!(
-        store.revlog(9_000).expect("revlog").expect("entry").ease,
-        Rating::Good
+        store.review_history().expect("history").len(),
+        2,
+        "review ids are uniquified"
     );
 }
 
@@ -648,7 +649,7 @@ fn undo_review_restores_card_and_deletes_log() {
             .expect("undo")
     );
     let mut restored = store.card(before.id).expect("card").expect("exists");
-    assert!(restored.usn > before.usn, "undo stamps a new sync usn");
+    assert_eq!(restored.usn, -1, "local undo stays pending sync");
     restored.usn = before.usn;
     assert_eq!(restored, before);
     assert_eq!(
@@ -736,7 +737,7 @@ fn stale_review_writes_are_rejected() {
 }
 
 #[test]
-fn second_review_with_the_same_stamp_is_rejected() {
+fn repeated_review_gets_a_unique_log_id() {
     let (_directory, path) = fixture();
     let mut store = Collection::open(&path).expect("open");
     store
@@ -757,8 +758,8 @@ fn second_review_with_the_same_stamp_is_rejected() {
     );
     let second = first.clone();
     store.apply_review(&first).expect("first write");
-    assert!(store.apply_review(&second).is_err());
-    assert_eq!(store.review_history().expect("history").len(), 1);
+    store.apply_review(&second).expect("second write");
+    assert_eq!(store.review_history().expect("history").len(), 2);
 }
 
 #[test]

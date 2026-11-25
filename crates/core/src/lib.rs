@@ -41,9 +41,3 @@ pub fn from_settings(settings: &Settings) -> FsrsScheduler {
 
 /// Length of a day in the Unix time scale used by Anki's day numbers.
 const SECONDS_PER_DAY: i64 = 86_400;
-
-/// Anki stores learning steps as `1000 + remaining steps` in `card.left`.
-const LEFT_STEP_MARKER: u32 = 1_000;
-
-/// Anki's default ease factor before a card has been graded.
-const DEFAULT_FACTOR: u32 = 2_500;

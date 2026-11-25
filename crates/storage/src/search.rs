@@ -163,10 +163,10 @@ fn id_condition(
 fn state_condition(value: &str) -> Result<String, StoreError> {
     let condition = match value.to_ascii_lowercase().as_str() {
         "new" => "c.queue = 0",
-        "learn" | "learning" | "relearn" => "c.queue IN (1, 3)",
+        "learn" | "learning" | "relearn" => "c.queue IN (1, 3, 4)",
         "review" => "c.queue = 2",
         "suspended" => "c.queue = -1",
-        "buried" => "c.queue = -2",
+        "buried" => "c.queue IN (-2, -3)",
         _ => {
             return Err(StoreError::InvalidData(format!(
                 "unsupported is: filter: {value}"

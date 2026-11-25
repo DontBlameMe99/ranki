@@ -1196,6 +1196,7 @@ mod tests {
             fields: vec!["Front".into()],
             templates: vec![ranki_model::CardTemplate::default()],
             css: String::new(),
+            sort_field_index: 0,
             kind: ranki_model::NoteKind::Normal,
             original_stock_kind: None,
             field_tags: vec![],

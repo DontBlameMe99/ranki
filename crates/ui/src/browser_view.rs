@@ -118,7 +118,7 @@ pub const fn queue_label(queue: CardQueue) -> &'static str {
         CardQueue::Learning | CardQueue::DayLearning => "Learning",
         CardQueue::Review => "Review",
         CardQueue::Suspended => "Suspended",
-        CardQueue::Buried => "Buried",
+        CardQueue::Buried | CardQueue::ManuallyBuried => "Buried",
         CardQueue::Preview => "Preview",
     }
 }
@@ -128,9 +128,10 @@ pub const fn queue_label(queue: CardQueue) -> &'static str {
 pub fn due_label(card: &Card) -> String {
     match card.queue {
         CardQueue::Review => interval_label(card.interval),
-        CardQueue::Suspended | CardQueue::Buried | CardQueue::Preview => {
-            String::from("-")
-        }
+        CardQueue::Suspended
+        | CardQueue::Buried
+        | CardQueue::ManuallyBuried
+        | CardQueue::Preview => String::from("-"),
         CardQueue::New | CardQueue::Learning | CardQueue::DayLearning => {
             String::from("Today")
         }

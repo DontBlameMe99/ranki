@@ -126,14 +126,8 @@ fn configured_params(config: &Config) -> FsrsParams {
         return FsrsParams::default();
     }
     let mut values = config.scheduler.params.clone();
-    match values.len() {
-        19 => values.push(config.scheduler.decay),
-        21 => {
-            if let Some(slot) = values.get_mut(20) {
-                *slot = config.scheduler.decay;
-            }
-        }
-        _ => {}
+    if let Some(slot) = values.get_mut(20) {
+        *slot = config.scheduler.decay;
     }
     FsrsParams::from_slice(&values).unwrap_or_default()
 }

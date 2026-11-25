@@ -14,6 +14,7 @@ use rusqlite::Connection;
 use rusqlite::MAIN_DB;
 use rusqlite::backup::Progress;
 use serde::Serialize;
+use serde_json::Value;
 use tempfile::NamedTempFile;
 use zip::CompressionMethod;
 use zip::ZipArchive;
@@ -413,8 +414,99 @@ fn snapshot_collection(collection: &Path) -> Result<Vec<u8>, FormatError> {
         .backup(MAIN_DB, snapshot.path(), None::<fn(Progress)>)
         .map_err(db_error("cannot snapshot collection"))?;
     drop(source);
+    let snapshot_db = Connection::open(snapshot.path())
+        .map_err(db_error("cannot open collection snapshot"))?;
+    ranki_storage::register_collations(&snapshot_db).map_err(|error| {
+        FormatError::with_source("cannot register collection collations", error)
+    })?;
+    for table in [
+        "notes",
+        "cards",
+        "revlog",
+        "graves",
+        "config",
+        "notetypes",
+        "templates",
+        "decks",
+        "deck_config",
+        "tags",
+        "col",
+    ] {
+        let exists: bool = snapshot_db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' \
+                 AND name = ?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(db_error("cannot inspect collection snapshot"))?;
+        if exists {
+            snapshot_db
+                .execute(
+                    &format!("UPDATE {table} SET usn = 0 WHERE usn < 0"),
+                    [],
+                )
+                .map_err(db_error("cannot normalize pending sync ids"))?;
+        }
+    }
+    for table in ["cards", "revlog"] {
+        snapshot_db
+            .execute(&format!("UPDATE {table} SET ivl = 0 WHERE ivl < 0"), [])
+            .map_err(db_error("cannot normalize learning intervals"))?;
+    }
+    for key in ["conf", "models", "decks", "dconf", "tags"] {
+        let raw: Option<String> = snapshot_db
+            .query_row(
+                &format!("SELECT {key} FROM col WHERE id = 1"),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db_error("cannot read collection metadata"))?;
+        if let Some(value) = raw {
+            let serialized = normalize_metadata(&value)?;
+            snapshot_db
+                .execute(
+                    &format!("UPDATE col SET {key} = ?1 WHERE id = 1"),
+                    [serialized],
+                )
+                .map_err(db_error("cannot normalize pending sync ids"))?;
+        }
+    }
+    drop(snapshot_db);
     fs::read(snapshot.path())
         .map_err(io_error("cannot read collection snapshot"))
+}
+fn normalize_metadata(raw: &str) -> Result<String, FormatError> {
+    let Ok(parsed) = serde_json::from_str::<Value>(raw) else {
+        return Ok(raw.to_owned());
+    };
+    serde_json::to_string(&normalize_usn(parsed))
+        .map_err(json_error("cannot encode collection metadata"))
+}
+
+fn normalize_usn(value: Value) -> Value {
+    match value {
+        Value::Object(mut map) => {
+            if map
+                .get("usn")
+                .is_some_and(|entry| entry.as_i64() == Some(-1))
+            {
+                let _ = map.insert("usn".to_owned(), Value::from(0));
+            }
+            Value::Object(
+                map.into_iter()
+                    .map(|(key, entry)| (key, normalize_usn(entry)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(normalize_usn).collect())
+        }
+        other @ (Value::Null
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)) => other,
+    }
 }
 
 fn media_mapping(media_files: &[MediaFile]) -> BTreeMap<String, String> {

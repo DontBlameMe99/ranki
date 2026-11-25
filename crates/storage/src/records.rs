@@ -31,8 +31,6 @@ use serde_json::json;
 pub struct ColData {
     pub modified: i64,
     pub scm: i64,
-    pub last_sync: i64,
-    pub usn: i32,
     pub conf: String,
     pub models: String,
     pub decks: String,
@@ -40,18 +38,15 @@ pub struct ColData {
 
 pub fn read_col(conn: &Connection) -> Result<ColData, StoreError> {
     conn.query_row(
-        "SELECT mod, scm, usn, conf, models, decks, dconf, tags, ls FROM col WHERE id = 1",
+        "SELECT mod, scm, conf, models, decks FROM col WHERE id = 1",
         [],
         |row| {
-            let usn = row.get::<_, i64>(2)?;
             Ok(ColData {
                 modified: row.get(0)?,
                 scm: row.get(1)?,
-                last_sync: row.get(8)?,
-                usn: i32::try_from(usn).unwrap_or(i32::MAX),
-                conf: text(row.get(3)?),
-                models: text(row.get(4)?),
-                decks: text(row.get(5)?),
+                conf: text(row.get(2)?),
+                models: text(row.get(3)?),
+                decks: text(row.get(4)?),
             })
         },
     )
@@ -240,6 +235,11 @@ pub fn models_from_json(json: &str) -> Result<Vec<NoteModel>, StoreError> {
                 .and_then(Json::as_str)
                 .unwrap_or_default()
                 .into(),
+            sort_field_index: value
+                .get("sortf")
+                .and_then(Json::as_u64)
+                .and_then(|index| u16::try_from(index).ok())
+                .unwrap_or_default(),
             kind,
             original_stock_kind: value
                 .get("originalStockKind")
@@ -308,12 +308,13 @@ fn raw_blob(config: Value) -> Option<Vec<u8>> {
     }
 }
 
-fn notetype_config(raw: Option<&Vec<u8>>) -> (u64, Option<u64>, String) {
+fn notetype_config(raw: Option<&Vec<u8>>) -> (u64, u64, Option<u64>, String) {
     let Some(bytes) = raw else {
-        return (0, None, String::new());
+        return (0, 0, None, String::new());
     };
     (
         blob(bytes, 1).unwrap_or_default(),
+        blob(bytes, 2).unwrap_or_default(),
         blob(bytes, 9),
         anki::protobuf_string(bytes, 3).unwrap_or_default(),
     )
@@ -347,19 +348,21 @@ pub fn models_from_tables_with_prefix(
             .query_map([], |row| {
                 let config: Value = row.get(2)?;
                 let raw = raw_blob(config);
-                let (kind, stock_kind, css) = notetype_config(raw.as_ref());
+                let (kind, sort_field_index, stock_kind, css) =
+                    notetype_config(raw.as_ref());
                 Ok((
                     row.get::<_, i64>(0)?,
                     text(row.get::<_, Value>(1)?),
                     css,
                     kind,
+                    sort_field_index,
                     stock_kind,
                     raw,
                 ))
             })
             .map_err(crate::backend)?;
         for row in rows {
-            let (id, name, css, kind, stock_kind, raw) =
+            let (id, name, css, kind, sort_field_index, stock_kind, raw) =
                 row.map_err(crate::backend)?;
             models.insert(
                 id,
@@ -369,6 +372,8 @@ pub fn models_from_tables_with_prefix(
                     fields: Vec::new(),
                     templates: Vec::new(),
                     css,
+                    sort_field_index: u16::try_from(sort_field_index)
+                        .unwrap_or_default(),
                     kind: NoteKind::from_code(
                         i32::try_from(kind).unwrap_or_default(),
                     ),
@@ -520,7 +525,7 @@ pub fn models_to_json(models: &[NoteModel]) -> Json {
             "type": model.kind.code(),
             "mod": 0,
             "usn": 0,
-            "sortf": 0,
+            "sortf": model.sort_field_index,
             "did": 1,
             "flds": fields,
             "tmpls": templates,

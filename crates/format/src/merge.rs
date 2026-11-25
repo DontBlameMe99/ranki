@@ -512,8 +512,8 @@ fn insert_deck_row(
                 ranki_storage::encode_deck_name(name),
                 modified,
                 usn,
-                ranki_storage::deck_common(usn, modified),
                 Vec::<u8>::new(),
+                ranki_storage::normal_deck_kind(1),
             ],
         )
         .map(|_| ())

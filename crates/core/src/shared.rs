@@ -4,12 +4,12 @@ use ranki_model::{
     Card, CardQueue, CardType, Rating, RevLog, RevLogKind, ReviewDecision,
 };
 
-use crate::{DEFAULT_FACTOR, LEFT_STEP_MARKER, SECONDS_PER_DAY};
+use crate::SECONDS_PER_DAY;
 
 const I32_MAX_F32: f32 = 2_147_483_647.0;
 const I32_MIN_F32: f32 = -2_147_483_648.0;
 
-const MAX_STEPS: u32 = u32::MAX - LEFT_STEP_MARKER;
+const MAX_STEPS: u32 = u32::MAX;
 
 pub struct ReviewContext<'card> {
     pub card: &'card Card,
@@ -65,7 +65,11 @@ pub const fn day_number(now_secs: i64, collection_start_secs: i64) -> i64 {
 }
 
 pub fn elapsed_days(card: &Card, now_secs: i64) -> u32 {
-    let elapsed = now_secs.saturating_sub(card.modified);
+    let last = serde_json::from_str::<serde_json::Value>(&card.data)
+        .ok()
+        .and_then(|value| value.get("lrt").and_then(serde_json::Value::as_i64))
+        .unwrap_or(card.modified);
+    let elapsed = now_secs.saturating_sub(last);
     u32::try_from(elapsed.div_euclid(SECONDS_PER_DAY)).unwrap_or(u32::MAX)
 }
 
@@ -79,20 +83,13 @@ pub fn due_from_days(
 }
 
 pub fn due_from_seconds(now_secs: i64, seconds: u32) -> i64 {
-    now_secs
-        .saturating_mul(1_000)
-        .saturating_add(i64::from(seconds).saturating_mul(1_000))
+    now_secs.saturating_add(i64::from(seconds))
 }
 
 /// Converts Anki's packed `left` value into a step count.
 pub fn remaining_steps(left: u32, total: usize) -> usize {
     let cap = u32::try_from(total).unwrap_or(u32::MAX);
-    let packed = if left >= LEFT_STEP_MARKER {
-        left.saturating_sub(LEFT_STEP_MARKER)
-    } else {
-        left
-    };
-    usize::try_from(packed.min(cap)).unwrap_or(total)
+    usize::try_from(left.min(cap)).unwrap_or(total)
 }
 
 /// Step presets are minutes, while Anki stores step delays in seconds.
@@ -190,8 +187,6 @@ pub fn step_outcome(
                 Rating::Good => remaining.saturating_sub(1),
                 Rating::Easy => 0,
             };
-            let interval =
-                i32::try_from(seconds).unwrap_or(i32::MAX).saturating_neg();
             ReviewOutcome {
                 card_type: if config.relearning {
                     CardType::Relearning
@@ -200,11 +195,9 @@ pub fn step_outcome(
                 },
                 queue: CardQueue::Learning,
                 due: due_from_seconds(ctx.now_secs, seconds),
-                interval,
+                interval: 0,
                 lapses: 0,
-                left: LEFT_STEP_MARKER.saturating_add(
-                    u32::try_from(steps_left).unwrap_or(MAX_STEPS),
-                ),
+                left: u32::try_from(steps_left).unwrap_or(MAX_STEPS),
                 factor: config.factor,
                 data: config.data,
                 kind,
@@ -269,7 +262,11 @@ pub fn finish(
     card.queue = outcome.queue;
     card.due = outcome.due;
     card.interval = outcome.interval;
-    card.factor = outcome.factor;
+    card.factor = if outcome.step_seconds.is_some() {
+        0
+    } else {
+        outcome.factor
+    };
     card.reps = card.reps.saturating_add(1);
     card.lapses = card.lapses.saturating_add(outcome.lapses);
     card.left = outcome.left;
@@ -284,7 +281,7 @@ pub fn finish(
         last_interval: outcome
             .last_interval
             .unwrap_or_else(|| ctx.card.interval.max(0)),
-        factor: outcome.factor,
+        factor: card.factor,
         time_ms: 0,
         kind: outcome.kind,
     };
@@ -316,10 +313,6 @@ pub fn unchanged(ctx: &ReviewContext<'_>) -> ReviewDecision {
         expected_modified: ctx.card.modified,
         expected_usn: ctx.card.usn,
     }
-}
-
-pub const fn factor_or_default(factor: u32) -> u32 {
-    if factor == 0 { DEFAULT_FACTOR } else { factor }
 }
 
 pub fn positive_factor(value: f32, fallback: f32) -> f32 {

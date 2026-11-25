@@ -169,6 +169,18 @@ fn default_conf() -> Value {
         "nextPos": 1,
         "sortBackwards": false,
         "sortType": "noteFld",
+        "fsrs": true,
+        "schedVer": 2,
+        "creationOffset": 0,
+        "lastFsrsOptimize": 0,
+        "loadBalancerEnabled": true,
+        "collapseTime": 1200,
+        "timeLim": 0,
+        "estTimes": true,
+        "dueCounts": true,
+        "newSpread": 0,
+        "dayLearnFirst": false,
+        "addToCur": true
     })
 }
 
@@ -189,10 +201,13 @@ fn default_models() -> Value {
             "bafmt": "",
             "did": null,
             "ord": 0,
+            "bfont": "Arial",
+            "bsize": 0,
+            "id": 1000
         }],
         "flds": [
-            {"name": "Front", "ord": 0, "sticky": false, "rtl": false},
-            {"name": "Back", "ord": 1, "sticky": false, "rtl": false},
+            {"name": "Front", "ord": 0, "sticky": false, "rtl": false, "font": "Arial", "size": 20, "id": 1000},
+            {"name": "Back", "ord": 1, "sticky": false, "rtl": false, "font": "Arial", "size": 20, "id": 1001},
         ],
         "css": ".card { font-family: arial; font-size: 20px; text-align: center; }",
         "latexPre": "",
@@ -209,7 +224,6 @@ fn default_decks() -> Value {
     let deck = json!({
         "id": 1,
         "name": "Default",
-        "type": 0,
         "mod": 0,
         "usn": 0,
         "conf": 1,
@@ -217,11 +231,23 @@ fn default_decks() -> Value {
         "dyn": 0,
         "collapsed": false,
         "browserCollapsed": false,
+        "lrnToday": [0, 0],
+        "revToday": [0, 0],
+        "newToday": [0, 0],
+        "timeToday": [0, 0],
+        "extendNew": 0,
+        "extendRev": 0,
     });
     let mut decks = serde_json::Map::new();
     decks.insert("1".to_owned(), deck);
     Value::Object(decks)
 }
+
+const FSRS_PARAMS6: [f64; 21] = [
+    0.212, 1.2931, 2.3065, 8.2956, 6.4133, 0.8334, 3.0194, 0.001, 1.8722,
+    0.1666, 0.796, 1.4835, 0.0614, 0.2629, 1.6483, 0.6014, 1.8729, 0.5425,
+    0.0912, 0.0658, 0.1542,
+];
 
 fn default_dconf() -> Value {
     let config = json!({
@@ -229,8 +255,57 @@ fn default_dconf() -> Value {
         "name": "Default",
         "mod": 0,
         "usn": 0,
+        "maxTaken": 60,
+        "autoplay": true,
+        "timer": 0,
+        "replayq": true,
+        "new": {
+            "bury": false,
+            "delays": [1.0, 10.0],
+            "initialFactor": 2500,
+            "ints": [1, 4, 0],
+            "order": 1,
+            "perDay": 20
+        },
+        "rev": {
+            "bury": false,
+            "ease4": 1.3,
+            "hardFactor": 1.2,
+            "ivlFct": 1.0,
+            "maxIvl": 36500,
+            "perDay": 200
+        },
+        "lapse": {
+            "delays": [10.0],
+            "leechAction": 1,
+            "leechFails": 8,
+            "minInt": 1,
+            "mult": 0.0
+        },
+        "dyn": false,
+        "newMix": 0,
+        "newPerDayMinimum": 0,
+        "interdayLearningMix": 0,
+        "reviewOrder": 0,
+        "newSortOrder": 0,
+        "newGatherPriority": 0,
+        "buryInterdayLearning": false,
+        "stopTimerOnAnswer": false,
+        "secondsToShowQuestion": 0.0,
+        "secondsToShowAnswer": 0.0,
+        "questionAction": 0,
+        "answerAction": 0,
+        "waitForAudio": true,
+        "easyDaysPercentages": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        "fsrsWeights": [],
+        "fsrsParams5": [],
+        "fsrsParams6": FSRS_PARAMS6,
+        "desiredRetention": 0.9,
+        "sm2Retention": 0.9,
+        "weightSearch": "",
+        "ignoreRevlogsBeforeDate": ""
     });
     let mut configs = serde_json::Map::new();
-    configs.insert("1".to_owned(), config);
+    let _ = configs.insert("1".to_owned(), config);
     Value::Object(configs)
 }
