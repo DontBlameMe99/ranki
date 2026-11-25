@@ -376,7 +376,8 @@ impl Root {
                     this.select_browse_row(id, cx);
                 }));
             if active {
-                line = line.border_l_2().border_color(colors.mauve);
+                line =
+                    line.border_l_2().border_color(colors.mauve).border_t_0();
             }
             line = line
                 .child(
