@@ -412,6 +412,14 @@ impl Focusable for Root {
     }
 }
 
+/// Uses the stored card when available so a requeued card carries its saved
+/// revision into the next grade.
+fn refreshed_card(
+    current: &Card,
+    load: impl FnOnce(Id) -> Option<Card>,
+) -> Card {
+    load(current.id).unwrap_or_else(|| current.clone())
+}
 impl Root {
     #[must_use]
     pub fn new(
@@ -1659,9 +1667,11 @@ impl Root {
         if self.view != View::Review {
             return;
         }
-        let Some(card) = self.review.current.clone() else {
+        let Some(current) = self.review.current.clone() else {
             return;
         };
+        let card =
+            refreshed_card(&current, |id| self.store.card(id).ok().flatten());
         if self.review.phase != Phase::Answer {
             self.reveal(cx);
             return;
@@ -3354,8 +3364,8 @@ mod tests {
         date_label, deck_meta, due_total, duration_label, empty_copy,
         empty_kind, filter_decks, focused_delta, forecast_bar_height,
         forecast_total, model_index, models_with_stock, next_due_deck,
-        next_view, queue_counts, session_progress, sum_leaf_counts,
-        validate_draft, validate_occlusion,
+        next_view, queue_counts, refreshed_card, session_progress,
+        sum_leaf_counts, validate_draft, validate_occlusion,
     };
     use gpui::{point, px, size};
 
@@ -3532,6 +3542,34 @@ mod tests {
         let scheduler = super::from_settings(&Options::default());
         assert_eq!(scheduler.params(), &ranki_core::FsrsParams::default());
         assert_eq!(scheduler.preset().desired_retention, 0.9);
+    }
+
+    #[test]
+    fn grading_uses_the_stored_card_revision() {
+        let current = Card {
+            id: 7,
+            note_id: 1,
+            deck_id: 1,
+            ordinal: 0,
+            modified: 100,
+            usn: -1,
+            card_type: CardType::Learning,
+            queue: CardQueue::Learning,
+            due: 101_000,
+            interval: -60,
+            factor: 2_500,
+            reps: 1,
+            lapses: 0,
+            left: 1_001,
+            original_due: 0,
+            original_deck_id: 0,
+            flags: 0,
+            data: String::new(),
+        };
+        let mut saved = current.clone();
+        saved.usn = 4;
+        assert_eq!(refreshed_card(&current, |_| Some(saved.clone())).usn, 4);
+        assert_eq!(refreshed_card(&current, |_| None), current);
     }
 
     #[test]
