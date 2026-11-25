@@ -245,7 +245,7 @@ fn revlog_matches_contract() {
     assert_ne!(decision.revlog.id, 0);
     assert_eq!(decision.revlog.card_id, card.id);
     assert_eq!(decision.revlog.usn, -1);
-    assert_eq!(decision.revlog.time_ms, 0);
+    assert_eq!(decision.revlog.time_ms, 1_000);
     assert_eq!(decision.revlog.ease, Rating::Good);
     assert_eq!(decision.revlog.kind, RevLogKind::Review);
 }

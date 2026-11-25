@@ -4373,7 +4373,7 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "lru-slab",
- "rand 0.10.4",
+ "rand 0.10.1",
  "rand_pcg",
  "ring",
  "rustc-hash 2.1.3",
@@ -4444,9 +4444,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.4"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f6fa277c67e6ea590466f04c3fe82cb509f0864fe470643e5570de9514a9b11"
+checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
@@ -4555,6 +4555,7 @@ name = "ranki-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "rand 0.10.1",
  "ranki-model",
  "serde_json",
  "tempfile",

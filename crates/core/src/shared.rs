@@ -5,6 +5,9 @@ use ranki_model::{
 };
 
 use crate::SECONDS_PER_DAY;
+use rand::RngExt as _;
+use rand::SeedableRng as _;
+use rand::rngs::StdRng;
 
 const I32_MAX_F32: f32 = 2_147_483_647.0;
 const I32_MIN_F32: f32 = -2_147_483_648.0;
@@ -273,7 +276,7 @@ pub fn finish(
     card.factor = if outcome.step_seconds.is_some() {
         0
     } else {
-        outcome.factor
+        2_500
     };
     card.reps = card.reps.saturating_add(1);
     card.lapses = card.lapses.saturating_add(outcome.lapses);
@@ -289,8 +292,8 @@ pub fn finish(
         last_interval: outcome
             .last_interval
             .unwrap_or_else(|| ctx.card.interval.max(0)),
-        factor: card.factor,
-        time_ms: 0,
+        factor: outcome.factor,
+        time_ms: 1_000,
         kind: outcome.kind,
     };
     ReviewDecision {
@@ -355,17 +358,8 @@ pub const fn f32_from_f64(value: f64) -> f32 {
     value as f32
 }
 
-const fn mix64(value: u64) -> u64 {
-    let mut state = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    state ^ (state >> 31)
-}
-
-fn hash_interval(card_id: i64, reps: u32) -> u64 {
-    let id = u64::from_be_bytes(card_id.to_be_bytes());
-    let seed = id ^ u64::from(reps).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    mix64(seed)
+fn fuzz_seed(card_id: i64, reps: u32) -> u64 {
+    u64::from_be_bytes(card_id.to_be_bytes()).wrapping_add(u64::from(reps))
 }
 
 fn as_u32(value: f32) -> u32 {
@@ -428,10 +422,8 @@ pub fn fuzz_interval(input: FuzzInput) -> i32 {
             .unwrap_or(i32::MAX);
     }
     let (lower, upper) = fuzz_bounds(raw, minimum, maximum);
-    let seed = hash_interval(input.card_id, input.reps)
-        .checked_rem(1_000_000)
-        .unwrap_or(0);
-    let factor = as_f32_u32(u32::try_from(seed).unwrap_or(0)) / 1_000_000.0;
+    let mut rng = StdRng::seed_from_u64(fuzz_seed(input.card_id, input.reps));
+    let factor: f32 = rng.random_range(0.0..1.0);
     let span = as_f32_u32(upper.saturating_sub(lower).saturating_add(1));
     let picked = (as_f32_u32(lower) + factor * span).floor();
     i32::try_from(as_u32(picked).clamp(minimum, maximum)).unwrap_or(i32::MAX)

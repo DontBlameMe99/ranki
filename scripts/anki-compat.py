@@ -149,6 +149,8 @@ def import_ranki(package, path):
 
 def anki_import(col, package):
     from anki.collection import ImportAnkiPackageRequest, ImportAnkiPackageOptions
+    col.set_config("fsrs", True)
+    col.set_config("loadBalancerEnabled", False)
     col.import_anki_package(ImportAnkiPackageRequest(
         package_path=str(package),
         options=ImportAnkiPackageOptions(
@@ -340,7 +342,10 @@ def compare_package(package, root, label, reviews=6):
     before_ranki = snapshot(ranki_path)
     findings = diff(before_anki, before_ranki, "after import")
 
-    ratings = [1 + byte % 4 for byte in os.urandom(reviews)]
+    forced = os.environ.get("ANKI_COMPAT_RATINGS")
+    ratings = [int(value) for value in forced.split(",")] if forced else [
+        1 + byte % 4 for byte in os.urandom(reviews)
+    ]
     reviewed = []
     try:
         reviewed = review_anki(anki_path, ratings)

@@ -676,8 +676,17 @@ impl Store for Collection {
                 .execute(
                     "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, \
                      reps, lapses, left, odue, odid, flags, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6, \
-                     0, 0, ?7, 0, 0, 0, 0, 0, 0, 0, 0, '')",
-                    params![card_id, id, note.deck_id, ordinal, modified, usn, due],
+                     0, 0, ?7, 0, 0, 0, 0, 0, 0, 0, 0, ?8)",
+                    params![
+                        card_id,
+                        id,
+                        note.deck_id,
+                        ordinal,
+                        modified,
+                        usn,
+                        due,
+                        format!("{{\"pos\":{due}}}"),
+                    ],
                 )
                 .map_err(backend)?;
             cards.push(card_id);
