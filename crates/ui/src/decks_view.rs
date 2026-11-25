@@ -185,6 +185,7 @@ impl Root {
             let mut table = div()
                 .flex()
                 .flex_col()
+                .flex_shrink_0()
                 .rounded(px(20.))
                 .bg(colors.mantle)
                 .border_1()
