@@ -1470,9 +1470,8 @@ mod tests {
             assert_eq!(caret, open.len() + 4 + close.len(), "{label}");
         }
         let image = crate::occlusion::image_field("diagram.png");
-        let (text, caret) =
-            crate::text_field::wrap_selection("", 0..0, ("", &image));
+        let (text, caret) = crate::text_field::insert_at("front", 0..5, &image);
         assert_eq!(text, "<img src=\"diagram.png\">");
-        assert_eq!(caret, image.len());
+        assert_eq!(caret, text.len());
     }
 }

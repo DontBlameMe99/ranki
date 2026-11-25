@@ -1235,7 +1235,9 @@ impl Root {
                 Err(error) => Err(error.to_string()),
             };
             let _ = this.update(cx, |root, cx| match result {
-                Ok(Some(name)) => root.insert_field_image(field, name, cx),
+                Ok(Some(name)) => {
+                    Self::insert_field_image(field, name, cx);
+                }
                 Ok(None) => {}
                 Err(error) => root.show_toast(
                     ToastKind::Error,
@@ -1248,14 +1250,13 @@ impl Root {
     }
 
     pub(crate) fn insert_field_image(
-        &mut self,
         field: Entity<TextField>,
         name: String,
         cx: &mut Context<Self>,
     ) {
         let markup = occlusion::image_field(&name);
         field.update(cx, |field, cx| {
-            field.wrap_markup(("", &markup), cx);
+            field.insert_text(&markup, cx);
         });
         cx.notify();
     }

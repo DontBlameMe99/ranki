@@ -90,6 +90,24 @@ pub fn wrap_selection(
     };
     (text, cursor)
 }
+/// Inserts `text` in place of `range` and returns the new text plus the caret
+/// offset after the inserted text.
+#[must_use]
+pub fn insert_at(
+    content: &str,
+    range: Range<usize>,
+    text: &str,
+) -> (String, usize) {
+    let start = range.start.min(content.len());
+    let end = range.end.min(content.len()).max(start);
+    let mut output =
+        String::with_capacity(content.len().saturating_add(text.len()));
+    output.push_str(content.get(..start).unwrap_or(""));
+    output.push_str(text);
+    output.push_str(content.get(end..).unwrap_or(""));
+    let cursor = start.saturating_add(text.len());
+    (output, cursor)
+}
 
 /// Byte offset of a UTF-16 offset inside `text`.
 fn utf16_offset_in(text: &str, offset: usize) -> usize {
@@ -184,6 +202,16 @@ impl TextField {
             wrap_selection(&self.content, self.selected_range.clone(), tags);
         self.content = text.into();
         self.selected_range = cursor..cursor;
+        self.notify_edit(cx);
+        cx.notify();
+    }
+    /// Inserts text at the caret, replacing the selection.
+    pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let (content, cursor) =
+            insert_at(&self.content, self.selected_range.clone(), text);
+        self.content = content.into();
+        self.selected_range = cursor..cursor;
+        self.marked_range = None;
         self.notify_edit(cx);
         cx.notify();
     }
