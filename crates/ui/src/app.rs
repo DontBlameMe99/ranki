@@ -23,8 +23,7 @@ use crate::{
     browser_view::BrowseState,
     card_view::{self, RenderedCard},
     occlusion::{
-        self, MaskShape, NormalizedRect, OcclusionMask, default_mask,
-        image_occlusion_fields,
+        self, MaskShape, NormalizedRect, OcclusionMask, image_occlusion_fields,
     },
     statistics_view::{Statistics, build_statistics},
     text_field::{EditHook, TextField},
@@ -180,7 +179,6 @@ pub struct OcclusionState {
     /// Natural image size, used to align masks inside a letterboxed canvas.
     pub image_size: Option<(f32, f32)>,
     pub masks: Vec<OcclusionMask>,
-    pub selected: Option<usize>,
     /// Drag in progress, in image-relative coordinates.
     pub drag: Option<(f32, f32, f32, f32)>,
     /// Screen rectangle of the drawing area, from the last prepaint.
@@ -239,13 +237,12 @@ impl OcclusionState {
             .map(|(index, _)| index)
     }
 
-    /// Removes one mask and keeps the selection valid.
+    /// Removes one mask.
     fn remove_mask(&mut self, index: usize) -> bool {
         if index >= self.masks.len() {
             return false;
         }
         let _ = self.masks.remove(index);
-        self.selected = self.masks.len().checked_sub(1);
         true
     }
 
@@ -260,7 +257,6 @@ impl OcclusionState {
         self.image = None;
         self.image_size = None;
         self.masks.clear();
-        self.selected = None;
         self.drag = None;
     }
 
@@ -277,7 +273,6 @@ impl OcclusionState {
                 shape: MaskShape::Rect,
                 rect,
             });
-            self.selected = Some(self.masks.len().saturating_sub(1));
         }
         self.drag = None;
     }
@@ -1318,7 +1313,6 @@ impl Root {
             && self.add.occlusion.image.as_deref() != Some(name.as_str())
         {
             self.add.occlusion.masks.clear();
-            self.add.occlusion.selected = None;
         }
         let size = image::image_dimensions(self.options.media_dir.join(&name))
             .ok()
@@ -1342,41 +1336,8 @@ impl Root {
         cx: &mut Context<Self>,
     ) {
         self.add.occlusion.masks.push(mask);
-        self.add.occlusion.selected =
-            Some(self.add.occlusion.masks.len().saturating_sub(1));
         let _ = self.add.errors.remove("masks");
         cx.notify();
-    }
-    pub(crate) fn add_default_mask(&mut self, cx: &mut Context<Self>) {
-        if self.add.occlusion.image.is_none() {
-            return;
-        }
-        let mask = default_mask(self.add.occlusion.masks.len());
-        self.add_occlusion_mask(mask, cx);
-    }
-
-    pub(crate) fn select_occlusion_mask(
-        &mut self,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) {
-        if index < self.add.occlusion.masks.len() {
-            self.add.occlusion.selected = Some(index);
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn remove_selected_mask(&mut self, cx: &mut Context<Self>) {
-        let Some(index) = self.add.occlusion.selected else {
-            return;
-        };
-        self.remove_mask(index, cx);
-    }
-
-    fn remove_mask(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.add.occlusion.remove_mask(index) {
-            cx.notify();
-        }
     }
 
     /// Removes the mask under a right-click on the canvas.
@@ -1395,13 +1356,6 @@ impl Root {
             let _ = self.add.errors.remove("masks");
             cx.notify();
         }
-    }
-
-    pub(crate) fn clear_occlusion_masks(&mut self, cx: &mut Context<Self>) {
-        self.add.occlusion.masks.clear();
-        self.add.occlusion.selected = None;
-        self.add.occlusion.drag = None;
-        cx.notify();
     }
 
     /// Records the drawing area so pointer positions can be normalized.
@@ -4543,7 +4497,6 @@ mod tests {
         assert_eq!((rect.width, rect.height), (0.25, 0.5));
         state.finish_drag();
         assert_eq!(state.masks.len(), 1);
-        assert_eq!(state.selected, Some(0));
         assert_eq!(state.drag, None);
     }
 
@@ -4600,12 +4553,10 @@ mod tests {
         assert_eq!(state.mask_at((0.9, 0.9)), None);
         assert!(state.remove_mask_at((0.35, 0.35)));
         assert_eq!(state.masks.len(), 1);
-        assert_eq!(state.selected, Some(0));
         assert!(!state.remove_mask_at((0.9, 0.9)));
         state.clear_image();
         assert_eq!(state.image, None);
         assert_eq!(state.masks.len(), 0);
-        assert_eq!(state.selected, None);
     }
 
     #[test]
@@ -4677,7 +4628,6 @@ mod tests {
             root.select_model(occlusion, cx);
             root.add.occlusion.image = Some(String::from("diagram.png"));
             root.add.occlusion.masks = vec![crate::occlusion::default_mask(0)];
-            root.add.occlusion.selected = Some(0);
             cx.notify();
         });
         assert!(
@@ -4690,12 +4640,10 @@ mod tests {
             (
                 root.add.occlusion.image.clone(),
                 root.add.occlusion.masks.len(),
-                root.add.occlusion.selected,
             )
         });
         assert_eq!(state.0, None);
         assert_eq!(state.1, 0);
-        assert_eq!(state.2, None);
     }
 
     #[test]

@@ -561,7 +561,7 @@ impl Root {
         screen.child(div().flex().w_full().justify_center().child(column))
     }
 
-    /// Image-occlusion editor: upload control, drawing area, and mask list.
+    /// Image-occlusion editor: upload control and drawing area.
     #[expect(
         clippy::too_many_arguments,
         reason = "one editor needs the palette, its errors, and the context"
@@ -574,7 +574,6 @@ impl Root {
     ) -> gpui::Div {
         let image = self.add.occlusion.image.clone();
         let masks = self.add.occlusion.masks.clone();
-        let selected = self.add.occlusion.selected;
         let dragging = self.add.occlusion.drag_rect();
         let media_dir = self.options.media_dir.clone();
 
@@ -618,49 +617,6 @@ impl Root {
                 .on_click(on_click);
             }
             element
-        };
-
-        let add_mask = {
-            let handler: ClickHandler =
-                Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.add_default_mask(cx);
-                }));
-            button(
-                "io-add-mask",
-                "Add rectangle",
-                "icon-plus",
-                true,
-                colors,
-                handler,
-            )
-        };
-        let delete_mask = {
-            let handler: ClickHandler =
-                Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.remove_selected_mask(cx);
-                }));
-            button(
-                "io-delete-mask",
-                "Delete mask",
-                "icon-trash",
-                selected.is_some_and(|index| index < masks.len()),
-                colors,
-                handler,
-            )
-        };
-        let clear_masks = {
-            let handler: ClickHandler =
-                Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.clear_occlusion_masks(cx);
-                }));
-            button(
-                "io-clear-masks",
-                "Clear all",
-                "icon-x",
-                !masks.is_empty(),
-                colors,
-                handler,
-            )
         };
 
         let remove_image = {
@@ -738,12 +694,8 @@ impl Root {
             .h(relative(fitted.height))
             .id("io-overlay");
         for (index, mask) in masks.iter().enumerate() {
-            overlay = overlay.child(mask_box(
-                mask,
-                index.saturating_add(1),
-                selected == Some(index),
-                colors,
-            ));
+            overlay =
+                overlay.child(mask_box(mask, index.saturating_add(1), colors));
         }
         if let Some(rect) = dragging {
             overlay = overlay.child(
@@ -802,71 +754,6 @@ impl Root {
             })
             .child(canvas);
 
-        let mut list = div().flex().flex_col().gap(px(SPACE_INLINE));
-        if masks.is_empty() {
-            list = list.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(colors.overlay)
-                    .child("No masks yet"),
-            );
-        }
-        for (index, mask) in masks.iter().enumerate() {
-            let active = selected == Some(index);
-            let ordinal = index.saturating_add(1);
-            let (hover, press) = if active {
-                (alpha(colors.mauve, 0.26), alpha(colors.mauve, 0.38))
-            } else {
-                (colors.surface0, colors.surface1)
-            };
-            list = list.child(
-                Interaction::new(
-                    alpha(colors.text, 0.0),
-                    hover,
-                    press,
-                    colors.mauve,
-                )
-                .apply(
-                    div()
-                        .id(SharedString::from(format!("io-mask-{index}")))
-                        .flex()
-                        .items_center()
-                        .gap(px(SPACE_GROUP))
-                        .h(px(32.))
-                        .px(px(SPACE_RELATED))
-                        .rounded(px(9.))
-                        .bg(if active {
-                            alpha(colors.mauve, 0.16)
-                        } else {
-                            colors.base
-                        })
-                        .text_size(px(13.))
-                        .text_color(if active {
-                            colors.mauve
-                        } else {
-                            colors.subtext
-                        })
-                        .cursor_pointer(),
-                )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.select_occlusion_mask(index, cx);
-                }))
-                .child(format!("c{ordinal}"))
-                .child(mask.shape.label())
-                .child(
-                    div().text_size(px(12.)).text_color(colors.overlay).child(
-                        format!(
-                            "{}, {} · {} × {}",
-                            occlusion::ratio(mask.rect.left),
-                            occlusion::ratio(mask.rect.top),
-                            occlusion::ratio(mask.rect.width),
-                            occlusion::ratio(mask.rect.height),
-                        ),
-                    ),
-                ),
-            );
-        }
-
         let mut editor = div()
             .flex()
             .flex_col()
@@ -890,9 +777,6 @@ impl Root {
                             .child("OCCLUSION EDITOR"),
                     )
                     .child(div().flex_1())
-                    .child(add_mask)
-                    .child(delete_mask)
-                    .child(clear_masks)
                     .child(remove_image),
             )
             .child(div().flex().items_center().gap(px(SPACE_GROUP)).child({
@@ -919,8 +803,7 @@ impl Root {
                     label
                 }
             }))
-            .child(canvas)
-            .child(list);
+            .child(canvas);
         if let Some(error) = errors.get("occlusion") {
             editor = editor.child(validation(error, colors));
         }
@@ -1065,14 +948,9 @@ impl Root {
 }
 
 /// One drawn mask, translucent red with its cloze ordinal.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the mask, its ordinal, selection, and palette are one box"
-)]
 fn mask_box(
     mask: &OcclusionMask,
     ordinal: usize,
-    selected: bool,
     colors: crate::theme::Palette,
 ) -> gpui::Div {
     let mut shape = div()
@@ -1084,9 +962,9 @@ fn mask_box(
         .flex()
         .items_center()
         .justify_center()
-        .bg(alpha(colors.red, if selected { 0.45 } else { 0.28 }))
+        .bg(alpha(colors.red, 0.28))
         .border_1()
-        .border_color(if selected { colors.mauve } else { colors.red })
+        .border_color(colors.red)
         .text_size(px(11.))
         .text_color(colors.crust)
         .child(format!("c{ordinal}"));
