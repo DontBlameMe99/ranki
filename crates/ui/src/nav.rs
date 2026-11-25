@@ -319,6 +319,7 @@ impl Root {
                     .child(
                         div()
                             .id("deck-actions-menu")
+                            .debug_selector(|| "deck-actions-menu".to_owned())
                             .on_mouse_down_out(cx.listener(
                                 move |this,
                                       event: &gpui::MouseDownEvent,
