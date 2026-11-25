@@ -375,6 +375,7 @@ pub struct Root {
     pub(crate) browse: BrowseState,
     pub(crate) create_field: Entity<TextField>,
     pub(crate) create_modal: bool,
+    pub(crate) create_error: Option<String>,
     pub(crate) rename_field: Entity<TextField>,
     pub(crate) deck_edit: Option<DeckEdit>,
     pub(crate) deck_menu: Option<DeckMenu>,
@@ -454,7 +455,12 @@ impl Root {
         let browse_search = cx.new(|cx| TextField::new(cx, "Search cards"));
         let browse_hook = Self::browse_edit_hook(cx);
         browse_search.update(cx, |field, _| field.set_edit_hook(browse_hook));
-        let create_field = cx.new(|cx| make_field(cx, "Deck name"));
+        let create_hook = Self::create_field_hook(cx);
+        let create_field = cx.new(|cx| {
+            let mut field = make_field(cx, "Deck name");
+            field.set_edit_hook(create_hook);
+            field
+        });
         let deck_filter = cx.new(|cx| make_field(cx, "Search decks"));
         let media_filter = cx.new(|cx| make_field(cx, "Filter images"));
         let rename_field = cx.new(|cx| make_field(cx, "New name"));
@@ -504,6 +510,7 @@ impl Root {
             },
             create_field,
             create_modal: false,
+            create_error: None,
             rename_field,
             deck_edit: None,
             deck_menu: None,
@@ -596,6 +603,20 @@ impl Root {
             && env::var("RANKI_UI_DEV_CREATE").is_ok_and(|value| value == "1")
         {
             root.create_modal = true;
+            window.focus(root.create_field.read(cx).focus_handle());
+        }
+        if root.view == View::Decks
+            && env::var("RANKI_UI_DEV_CREATE_ERROR")
+                .is_ok_and(|value| value == "1")
+        {
+            root.create_modal = true;
+            root.create_field.update(cx, |field, cx| {
+                field.seed("Visual Deck", cx);
+            });
+            root.set_create_error(
+                "Could not create deck: invalid data: deck already exists: Visual Deck",
+                cx,
+            );
             window.focus(root.create_field.read(cx).focus_handle());
         }
         if env::var("RANKI_UI_DEV_MENU").is_ok_and(|value| value == "1") {
@@ -749,6 +770,21 @@ impl Root {
             let weak = weak.clone();
             app.defer(move |app| {
                 let _ = weak.update(app, |_, cx| cx.notify());
+            });
+        })
+    }
+
+    /// A create-deck error stays until the name changes.
+    fn create_field_hook(cx: &mut Context<Self>) -> EditHook {
+        let weak = cx.entity().downgrade();
+        Arc::new(move |app| {
+            let weak = weak.clone();
+            app.defer(move |app| {
+                let _ = weak.update(app, |root, cx| {
+                    if root.create_error.take().is_some() {
+                        cx.notify();
+                    }
+                });
             });
         })
     }
@@ -1050,6 +1086,18 @@ impl Root {
 
     pub(crate) fn clear_toast(&mut self) {
         self.toast = None;
+    }
+
+    /// Errors from the create-deck dialog belong next to its input, not in a
+    /// toast behind the modal.
+    pub(crate) fn set_create_error(
+        &mut self,
+        message: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_error = Some(message.into());
+        self.clear_toast();
+        cx.notify();
     }
 
     pub(crate) fn live_toast(&self) -> Option<&Toast> {
@@ -1866,6 +1914,7 @@ impl Root {
         cx: &mut Context<Self>,
     ) {
         self.create_field.update(cx, TextField::clear);
+        self.create_error = None;
         self.create_modal = true;
         window.focus(self.create_field.read(cx).focus_handle());
         cx.notify();
@@ -1878,8 +1927,7 @@ impl Root {
     ) {
         let name = self.create_field.read(cx).text().trim().to_owned();
         if name.is_empty() {
-            self.show_toast(ToastKind::Error, "Deck name cannot be empty", cx);
-            cx.notify();
+            self.set_create_error("Deck name cannot be empty", cx);
             return;
         }
         match self.store.create_deck(&name) {
@@ -1889,14 +1937,14 @@ impl Root {
                 }
                 self.create_field
                     .update(cx, super::text_field::TextField::clear);
+                self.create_error = None;
                 self.create_modal = false;
                 self.clear_toast();
                 self.reload(cx);
                 window.focus(&self.focus);
             }
             Err(error) => {
-                self.show_toast(
-                    ToastKind::Error,
+                self.set_create_error(
                     format!("Could not create deck: {error}"),
                     cx,
                 );
@@ -1910,6 +1958,7 @@ impl Root {
         cx: &mut Context<Self>,
     ) {
         self.create_field.update(cx, TextField::clear);
+        self.create_error = None;
         self.create_modal = false;
         window.focus(&self.focus);
         cx.notify();
@@ -3394,6 +3443,11 @@ mod tests {
         }
 
         fn create_deck(&mut self, name: &str) -> Result<Deck, StoreError> {
+            if name == "taken" {
+                return Err(StoreError::InvalidData(String::from(
+                    "deck already exists: taken",
+                )));
+            }
             Ok(Deck {
                 id: 2,
                 name: name.to_owned(),
@@ -3494,6 +3548,57 @@ mod tests {
             !cx.update(|_, app| root.read(app).create_modal),
             "clicking outside the modal must close it"
         );
+    }
+    #[gpui::test]
+    fn create_deck_error_lives_by_the_input_until_the_name_changes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(ModalStore),
+                    options: Options::default(),
+                    save_settings: std::sync::Arc::new(|_| Ok(())),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            root.update(app, |root, cx| {
+                root.open_create_modal(window, cx);
+                root.create_field.update(cx, |field, cx| {
+                    field.set_text("taken", cx);
+                });
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            root.update(app, |root, cx| root.create_deck(window, cx));
+        });
+        cx.run_until_parked();
+
+        let error = cx.update(|_, app| root.read(app).create_error.clone());
+        assert_eq!(
+            error.as_deref(),
+            Some(
+                "Could not create deck: invalid data: deck already exists: taken"
+            )
+        );
+        assert!(cx.update(|_, app| root.read(app).toast.is_none()));
+
+        cx.update(|_, app| {
+            root.update(app, |root, cx| {
+                root.create_field.update(cx, |field, cx| {
+                    field.set_text("taken again", cx);
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| root.read(app).create_error.is_none()));
     }
     #[gpui::test]
     fn deck_picker_floats_above_the_form(cx: &mut gpui::TestAppContext) {
