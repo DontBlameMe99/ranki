@@ -3,7 +3,6 @@ use ranki_model::{
 };
 use serde_json::{Map, Number, Value};
 
-use crate::Scheduler;
 use crate::shared::{
     FuzzInput, ReviewContext, ReviewOutcome, StepConfig, as_f32, as_i32,
     due_from_days, elapsed_days, f32_from_f64, factor_or_default, finish,
@@ -104,6 +103,19 @@ impl FsrsParams {
     #[must_use]
     pub const fn decay(&self) -> f32 {
         self.decay
+    }
+
+    /// Overrides the decay used by the interval formula and `w20`.
+    #[must_use]
+    pub fn with_decay(mut self, decay: f32) -> Self {
+        let Some(slot) = self.weights.get_mut(FSRS6_PARAMS_LEN - 1) else {
+            return self;
+        };
+        if decay.is_finite() && decay > 0.0 {
+            self.decay = decay;
+            *slot = decay;
+        }
+        self
     }
 
     fn from_weights(weights: [f32; FSRS6_PARAMS_LEN]) -> Self {
@@ -436,8 +448,16 @@ impl Default for FsrsScheduler {
     }
 }
 
-impl Scheduler for FsrsScheduler {
-    fn schedule(
+impl FsrsScheduler {
+    /// Schedules `card` after `rating` at `now_secs` Unix seconds.
+    ///
+    /// Review dues are days since `collection_start_secs`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the scheduling signature is shared by every caller"
+    )]
+    #[must_use]
+    pub fn schedule(
         &self,
         card: &Card,
         rating: Rating,
@@ -456,7 +476,15 @@ impl Scheduler for FsrsScheduler {
         finish(&ctx, self.plan(&ctx))
     }
 
-    fn preview(
+    /// Returns the interval a rating would produce without writing a log.
+    ///
+    /// Negative intervals are learning delays in seconds.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the preview signature mirrors schedule"
+    )]
+    #[must_use]
+    pub fn preview(
         &self,
         card: &Card,
         rating: Rating,
@@ -470,10 +498,6 @@ impl Scheduler for FsrsScheduler {
             collection_start_secs,
         };
         preview_interval(&self.plan(&ctx))
-    }
-
-    fn name(&self) -> &'static str {
-        "fsrs"
     }
 }
 

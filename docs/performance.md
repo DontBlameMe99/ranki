@@ -17,8 +17,8 @@ requests against the best merged measurement. The check is named
   and the deck-row model are inside it. The `gui` cargo feature gates the pair.
 - Storage: collection open, common and missing searches over 2,000 notes, due
   cards, statistics, and a persisted review.
-- Scheduling: FSRS and SM-2 decisions. Sinks keep the optimizer from removing
-  the work.
+- Scheduling: FSRS decisions. Sinks keep the optimizer from removing the
+  work.
 - Packages: `.apkg` export and import of the seeded collection.
 
 Every workload asserts that it produced the expected result. A broken fixture

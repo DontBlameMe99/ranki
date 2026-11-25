@@ -8,7 +8,6 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use ranki_core::FsrsScheduler;
-use ranki_core::Scheduler;
 use ranki_model::CardQueue;
 use ranki_model::CardType;
 use ranki_model::NewNote;

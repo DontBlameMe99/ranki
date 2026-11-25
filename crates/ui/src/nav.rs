@@ -518,11 +518,6 @@ impl Root {
                     format!("{name} and every card below it will be deleted."),
                     "Remove deck",
                 ),
-                Confirmation::SwitchScheduler { kind } => (
-                    "Change scheduler?",
-                    format!("Use {} for this session only.", kind.label()),
-                    "Change scheduler",
-                ),
                 Confirmation::Reload => (
                     "Reload collection?",
                     String::from(
@@ -624,7 +619,7 @@ impl Root {
                     .child(help_row("S", "Study again", colors))
                     .child(help_row("Esc", "End session", colors))
                     .child(help_row("A / D", "Add card / Decks", colors))
-                    .child(help_row("T", "Statistics / Scheduler", colors))
+                    .child(help_row("T", "Statistics", colors))
                     .child(help_row("?", "This sheet", colors))
                     .child(
                         Interaction::surface(colors)
