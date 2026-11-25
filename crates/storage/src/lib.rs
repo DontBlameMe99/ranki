@@ -711,9 +711,9 @@ impl Store for Collection {
     fn stats(
         &self,
         deck_id: Option<Id>,
-        _now_secs: i64,
+        now_secs: i64,
     ) -> Result<DeckStats, StoreError> {
-        let filter = self.deck_filter(deck_id, 1)?;
+        let filter = self.deck_filter(deck_id, 3)?;
         if filter.missing {
             return Ok(DeckStats::default());
         }
@@ -722,14 +722,21 @@ impl Store for Collection {
         } else {
             format!("WHERE {}", filter.clause)
         };
+        let now_ms = now_secs
+            .checked_mul(1000)
+            .ok_or_else(|| invalid("timestamp overflow"))?;
+        let today = anki::day_number(now_secs, self.collection_created()?)?;
         let sql = format!(
             "SELECT SUM(CASE WHEN c.queue = 0 THEN 1 ELSE 0 END), \
-             SUM(CASE WHEN c.queue IN (1, 3) THEN 1 ELSE 0 END), \
-             SUM(CASE WHEN c.queue = 2 THEN 1 ELSE 0 END), COUNT(*) FROM cards c {where_clause}"
+             SUM(CASE WHEN (c.queue = 1 AND c.due <= ?1) OR (c.queue = 3 AND c.due <= ?2) THEN 1 ELSE 0 END), \
+             SUM(CASE WHEN c.queue = 2 AND c.due <= ?2 THEN 1 ELSE 0 END), COUNT(*) FROM cards c {where_clause}"
         );
+        let mut parameters =
+            vec![SqlValue::Integer(now_ms), SqlValue::Integer(today)];
+        parameters.extend(filter.params);
         let mut statement = self.conn.prepare(&sql).map_err(backend)?;
         let counts: Counts = statement
-            .query_row(params_from_iter(filter.params), |row| {
+            .query_row(params_from_iter(parameters), |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })
             .map_err(backend)?;
@@ -780,9 +787,13 @@ impl Store for Collection {
         Ok(counts)
     }
 
-    fn deck_stats(&self) -> Result<DeckTotals, StoreError> {
+    fn deck_stats(&self, now_secs: i64) -> Result<DeckTotals, StoreError> {
         let decks = self.deck_list()?;
-        let counts = deck_card_counts(&self.conn)?;
+        let now_ms = now_secs
+            .checked_mul(1000)
+            .ok_or_else(|| invalid("timestamp overflow"))?;
+        let today = anki::day_number(now_secs, self.collection_created()?)?;
+        let counts = deck_card_counts(&self.conn, now_ms, today)?;
         let ids_by_name = decks
             .iter()
             .map(|deck| (deck.name.as_str(), deck.id))
@@ -1003,20 +1014,22 @@ fn deck_list_from(conn: &Connection) -> Result<Vec<Deck>, StoreError> {
     Ok(decks)
 }
 
-/// Counts cards per deck id in one grouped query.
+/// Counts cards due at `now_secs` per deck id in one grouped query.
 fn deck_card_counts(
     conn: &Connection,
+    now_ms: i64,
+    today: i64,
 ) -> Result<HashMap<Id, DeckStats>, StoreError> {
     let mut statement = conn
         .prepare(
             "SELECT c.did, SUM(CASE WHEN c.queue = 0 THEN 1 ELSE 0 END), \
-             SUM(CASE WHEN c.queue IN (1, 3) THEN 1 ELSE 0 END), \
-             SUM(CASE WHEN c.queue = 2 THEN 1 ELSE 0 END), COUNT(*) FROM cards c GROUP BY \
+             SUM(CASE WHEN (c.queue = 1 AND c.due <= ?1) OR (c.queue = 3 AND c.due <= ?2) THEN 1 ELSE 0 END), \
+             SUM(CASE WHEN c.queue = 2 AND c.due <= ?2 THEN 1 ELSE 0 END), COUNT(*) FROM cards c GROUP BY \
              c.did",
         )
         .map_err(backend)?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map(params![now_ms, today], |row| {
             Ok((
                 row.get::<_, Id>(0)?,
                 (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?),

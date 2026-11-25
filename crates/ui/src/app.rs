@@ -745,7 +745,7 @@ impl Root {
     /// Recomputes per-deck counts without rebuilding the add-card fields.
     fn refresh_stats(&mut self) {
         let now = Self::now();
-        self.stats = match self.store.deck_stats() {
+        self.stats = match self.store.deck_stats(now) {
             Ok(stats) => {
                 let lookup = stats.into_iter().collect::<HashMap<_, _>>();
                 self.decks
@@ -1759,6 +1759,7 @@ impl Root {
                 cx.notify();
             }
             UiAction::NextDeck => {
+                self.refresh_stats();
                 let next =
                     next_due_deck(&self.decks, &self.stats, self.selected);
                 if let Some(index) = next {
