@@ -36,14 +36,14 @@
     },
     "connect/roundtrip/version": {
       "budget_ms": 100.0,
-      "median_ms": 0.098165,
+      "median_ms": 0.075626,
       "method": 1,
       "repeat": 1,
       "samples": 10,
-      "sha": "5482c826f02a233325c7e67e842b8152b0b31e64",
-      "updated_at": "2026-11-25T22:26:47.688916+00:00",
+      "sha": "d4dcad206c5506493b2b33ba779d1af6c2b09c99",
+      "updated_at": "2026-11-25T23:19:58.191392+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.099565
+      "worst_median_ms": 0.09358599999999999
     },
     "connect/startup": {
       "budget_ms": 1000.0,
@@ -157,14 +157,14 @@
     },
     "process/cli/search": {
       "budget_ms": 500.0,
-      "median_ms": 2.1268540000000002,
+      "median_ms": 2.059267,
       "method": 1,
       "repeat": 1,
       "samples": 7,
-      "sha": "e1f1a72588c64a7c372680e1628c3aad697970b7",
-      "updated_at": "2026-11-25T18:13:27.565312+00:00",
+      "sha": "d4dcad206c5506493b2b33ba779d1af6c2b09c99",
+      "updated_at": "2026-11-25T23:19:58.191392+00:00",
       "warmup": 2,
-      "worst_median_ms": 2.208101
+      "worst_median_ms": 2.111217
     },
     "storage/collection/open": {
       "budget_ms": 50.0,
@@ -233,7 +233,7 @@
       "worst_median_ms": 0.123931
     }
   },
-  "sha": "5482c826f02a233325c7e67e842b8152b0b31e64",
+  "sha": "d4dcad206c5506493b2b33ba779d1af6c2b09c99",
   "version": 1,
   "workload_hash": "41c505710405ce82"
 }
