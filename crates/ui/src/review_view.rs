@@ -36,6 +36,7 @@ impl Root {
             &self.review.pending,
         );
         let more_due = self.review.more_due;
+        let session_complete = self.session_complete();
         let viewport_height = f32::from(window.viewport_size().height);
         let stage_height = (viewport_height
             - TOPBAR_HEIGHT
@@ -281,7 +282,7 @@ impl Root {
                         .into_any_element(),
                 )
                 .into_any_element()
-        } else if current.is_none() && answered > 0 {
+        } else if session_complete {
             let practice = self.action_click(UiAction::StudyAgain);
             let back = self.action_click(UiAction::EndSession);
             let summary =
@@ -331,18 +332,12 @@ impl Root {
                                     colors,
                                 )),
                         )
-                        .child(
+                        .children(more_due.then(|| {
                             div()
                                 .text_size(px(14.))
                                 .text_color(colors.subtext)
-                                .child(if more_due {
-                                    String::from("More cards are due now.")
-                                } else {
-                                    String::from(
-                                        "Nothing else is due right now.",
-                                    )
-                                }),
-                        )
+                                .child("More cards are due now.")
+                        }))
                         .child(
                             div()
                                 .flex()
@@ -350,7 +345,7 @@ impl Root {
                                 .child(footer_button(
                                     "Back to decks",
                                     colors,
-                                    false,
+                                    !more_due,
                                     back,
                                 ))
                                 .children(more_due.then(|| {
