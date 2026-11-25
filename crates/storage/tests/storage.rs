@@ -585,7 +585,7 @@ fn apply_review_updates_card_log_and_collection_metadata() {
     changed.card_type = CardType::Review;
     changed.due = 42;
     changed.interval = 4;
-    let mut decision = ReviewDecision {
+    let decision = ReviewDecision {
         card: changed,
         expected_modified: card.modified,
         expected_usn: card.usn,
@@ -601,7 +601,7 @@ fn apply_review_updates_card_log_and_collection_metadata() {
             kind: RevLogKind::Review,
         },
     };
-    store.apply_review(&mut decision).expect("apply");
+    store.apply_review(&decision).expect("apply");
     let saved = store.card(card.id).expect("card").expect("exists");
     assert_eq!(saved.queue, CardQueue::Review);
     assert_eq!(saved.due, 42);
@@ -609,15 +609,7 @@ fn apply_review_updates_card_log_and_collection_metadata() {
     assert_eq!(log.card_id, card.id);
     assert_eq!(log.ease, Rating::Good);
     assert!(store.collection_modified().expect("modified") > before);
-    assert!(store.apply_review(&mut decision).is_err());
-    assert_eq!(decision.card.usn, saved.usn);
-    let mut repeat = decision.clone();
-    repeat.expected_modified = decision.card.modified;
-    repeat.expected_usn = decision.card.usn;
-    repeat.revlog.id = 9_001;
-    store
-        .apply_review(&mut repeat)
-        .expect("review stored card again");
+    assert!(store.apply_review(&decision).is_err());
     assert_eq!(
         store.revlog(9_000).expect("revlog").expect("entry").ease,
         Rating::Good
@@ -637,13 +629,13 @@ fn undo_review_restores_card_and_deletes_log() {
         .expect("due")
         .pop()
         .expect("due card");
-    let mut decision = FsrsScheduler::default().schedule(
+    let decision = FsrsScheduler::default().schedule(
         &before,
         Rating::Good,
         now,
         store.collection_created().expect("created"),
     );
-    store.apply_review(&mut decision).expect("apply");
+    store.apply_review(&decision).expect("apply");
     assert_ne!(
         store.card(before.id).expect("card").expect("exists"),
         before
@@ -690,26 +682,26 @@ fn grade_undo_grade_uses_the_restored_revision() {
         .pop()
         .expect("card");
     let scheduler = FsrsScheduler::default();
-    let mut decision = scheduler.schedule(
+    let decision = scheduler.schedule(
         &before,
         Rating::Good,
         now,
         store.collection_created().expect("created"),
     );
-    store.apply_review(&mut decision).expect("grade");
+    store.apply_review(&decision).expect("grade");
     assert!(
         store
             .undo_review(&before, decision.revlog.id)
             .expect("undo")
     );
     let restored = store.card(before.id).expect("card").expect("exists");
-    let mut retry = scheduler.schedule(
+    let retry = scheduler.schedule(
         &restored,
         Rating::Good,
         now,
         store.collection_created().expect("created"),
     );
-    store.apply_review(&mut retry).expect("grade after undo");
+    store.apply_review(&retry).expect("grade after undo");
     assert_eq!(store.review_history().expect("history").len(), 1);
 }
 
@@ -726,7 +718,7 @@ fn stale_review_writes_are_rejected() {
         .expect("due")
         .pop()
         .expect("card");
-    let mut decision = FsrsScheduler::default().schedule(
+    let decision = FsrsScheduler::default().schedule(
         &card,
         Rating::Good,
         now,
@@ -736,7 +728,7 @@ fn stale_review_writes_are_rejected() {
     conn.execute("UPDATE cards SET mod = mod + 10 WHERE id = ?1", [card.id])
         .expect("external write");
     drop(conn);
-    assert!(store.apply_review(&mut decision).is_err());
+    assert!(store.apply_review(&decision).is_err());
     assert_eq!(
         store.review_history().expect("history"),
         [] as [ranki_model::RevLog; 0]
@@ -757,15 +749,15 @@ fn second_review_with_the_same_stamp_is_rejected() {
         .pop()
         .expect("card");
     let scheduler = FsrsScheduler::default();
-    let mut first = scheduler.schedule(
+    let first = scheduler.schedule(
         &card,
         Rating::Good,
         now,
         store.collection_created().expect("created"),
     );
-    let mut second = first.clone();
-    store.apply_review(&mut first).expect("first write");
-    assert!(store.apply_review(&mut second).is_err());
+    let second = first.clone();
+    store.apply_review(&first).expect("first write");
+    assert!(store.apply_review(&second).is_err());
     assert_eq!(store.review_history().expect("history").len(), 1);
 }
 
@@ -787,13 +779,13 @@ fn review_of_an_older_card_is_accepted() {
         .expect("due")
         .pop()
         .expect("card");
-    let mut decision = FsrsScheduler::default().schedule(
+    let decision = FsrsScheduler::default().schedule(
         &card,
         Rating::Good,
         now,
         store.collection_created().expect("created"),
     );
-    store.apply_review(&mut decision).expect("apply older card");
+    store.apply_review(&decision).expect("apply older card");
     assert_eq!(store.review_history().expect("history").len(), 1);
 }
 
@@ -1136,7 +1128,7 @@ fn remove_deck_deletes_subtree_cards_notes_revlog_and_writes_graves() {
     let card = store.card(card_id).expect("card").expect("exists");
     let note_id = card.note_id;
     let log_id = 9_002_i64;
-    let mut decision = ReviewDecision {
+    let decision = ReviewDecision {
         card: card.clone(),
         expected_modified: card.modified,
         expected_usn: card.usn,
@@ -1152,7 +1144,7 @@ fn remove_deck_deletes_subtree_cards_notes_revlog_and_writes_graves() {
             kind: RevLogKind::Review,
         },
     };
-    store.apply_review(&mut decision).expect("review");
+    store.apply_review(&decision).expect("review");
 
     store.remove_deck(parent.id).expect("remove");
 
@@ -1236,7 +1228,7 @@ fn remove_deck_keeps_notes_that_still_have_cards() {
 
     let mut moved = store.card(cards[1]).expect("card").expect("exists");
     moved.deck_id = other.id;
-    let mut decision = ReviewDecision {
+    let decision = ReviewDecision {
         card: moved.clone(),
         expected_modified: moved.modified,
         expected_usn: moved.usn,
@@ -1252,7 +1244,7 @@ fn remove_deck_keeps_notes_that_still_have_cards() {
             kind: RevLogKind::Manual,
         },
     };
-    store.apply_review(&mut decision).expect("move");
+    store.apply_review(&decision).expect("move");
     store.remove_deck(source.id).expect("remove");
 
     assert!(store.card(cards[0]).expect("card").is_none());

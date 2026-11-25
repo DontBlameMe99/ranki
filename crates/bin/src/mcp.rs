@@ -812,7 +812,7 @@ impl RankiMcp {
         );
         decision.revlog.time_ms =
             u32::try_from(input.elapsed_ms).unwrap_or(u32::MAX);
-        store.apply_review(&mut decision)?;
+        store.apply_review(&decision)?;
         Ok(Json(ReviewResult {
             card: card_view(&decision.card),
             revlog: revlog_view(&decision.revlog),

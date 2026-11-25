@@ -938,9 +938,9 @@ pub(crate) fn answer_card<S: Store>(
         CliError::Message(format!("card not found: {card_id}"))
     })?;
     let collection_start_secs = store.collection_created()?;
-    let mut decision =
+    let decision =
         scheduler.schedule(&card, rating, now, collection_start_secs);
-    store.apply_review(&mut decision)?;
+    store.apply_review(&decision)?;
     Ok(decision)
 }
 
@@ -959,13 +959,12 @@ pub(crate) fn save_card<S: Store>(store: &mut S, card: Card) -> CliResult<()> {
         time_ms: 0,
         kind: RevLogKind::Manual,
     };
-    let mut decision = ReviewDecision {
+    store.apply_review(&ReviewDecision {
         card,
         revlog: log,
         expected_modified,
         expected_usn,
-    };
-    store.apply_review(&mut decision)?;
+    })?;
     Ok(())
 }
 

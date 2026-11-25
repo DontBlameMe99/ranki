@@ -531,13 +531,11 @@ pub trait Store {
 
     /// Persists a scheduled review and its log entry atomically.
     ///
-    /// On success, `decision.card.usn` is set to the revision written to disk.
-    ///
     /// # Errors
     /// Returns [`StoreError`] if the card does not exist or the write fails.
     fn apply_review(
         &mut self,
-        decision: &mut ReviewDecision,
+        decision: &ReviewDecision,
     ) -> Result<(), StoreError>;
 
     /// Reverses one persisted review: deletes the review log and restores the
