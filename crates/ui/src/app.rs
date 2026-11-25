@@ -1674,7 +1674,7 @@ impl Root {
         {
             return;
         }
-        let decision: ReviewDecision = self.scheduler.schedule(
+        let mut decision: ReviewDecision = self.scheduler.schedule(
             &card,
             rating,
             Self::now(),
@@ -1682,7 +1682,7 @@ impl Root {
         );
         let before_progress = self.progress_fraction();
         self.poll_external_change(cx);
-        if let Err(error) = self.store.apply_review(&decision) {
+        if let Err(error) = self.store.apply_review(&mut decision) {
             self.show_toast(
                 ToastKind::Error,
                 format!("Could not save review: {error}"),
@@ -3409,7 +3409,7 @@ mod tests {
 
         fn apply_review(
             &mut self,
-            _: &ReviewDecision,
+            _: &mut ReviewDecision,
         ) -> Result<(), StoreError> {
             Ok(())
         }

@@ -728,8 +728,8 @@ pub fn run() -> BenchResult<Report> {
             let card = store
                 .card(fixture_card.id)?
                 .ok_or_else(|| message("review card is missing"))?;
-            let decision = fsrs.schedule(&card, Rating::Good, now, created);
-            store.apply_review(&decision)?;
+            let mut decision = fsrs.schedule(&card, Rating::Good, now, created);
+            store.apply_review(&mut decision)?;
             index = index.saturating_add(1);
             Ok(())
         },

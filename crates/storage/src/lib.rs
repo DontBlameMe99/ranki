@@ -689,7 +689,7 @@ impl Store for Collection {
 
     fn apply_review(
         &mut self,
-        decision: &ReviewDecision,
+        decision: &mut ReviewDecision,
     ) -> Result<(), StoreError> {
         let transaction = self.conn.transaction().map_err(backend)?;
         let current: Option<(i64, i32)> = transaction
@@ -707,6 +707,7 @@ impl Store for Collection {
         let usn = update_col(&transaction, true)?;
         write_review(&transaction, usn, decision)?;
         transaction.commit().map_err(backend)?;
+        decision.card.usn = usn;
         Ok(())
     }
 
@@ -1667,14 +1668,13 @@ mod tests {
             time_ms: 100,
             kind: RevLogKind::Review,
         };
-        collection
-            .apply_review(&ReviewDecision {
-                card: card.clone(),
-                expected_modified: card.modified,
-                expected_usn: card.usn,
-                revlog: log.clone(),
-            })
-            .unwrap();
+        let mut decision = ReviewDecision {
+            card: card.clone(),
+            expected_modified: card.modified,
+            expected_usn: card.usn,
+            revlog: log.clone(),
+        };
+        collection.apply_review(&mut decision).unwrap();
         let history = collection.review_history().unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, log.id);
