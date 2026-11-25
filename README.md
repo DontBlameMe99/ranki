@@ -87,9 +87,11 @@ desired_retention = 0.9
 
 All commands accept the global `--collection PATH` and `--media-dir PATH`
 options. Without `--collection`, Ranki opens
-`~/.local/share/Anki2/main/collection.anki2`. Media lives in a `collection.media`
-directory next to the collection. A missing collection is created by commands
-that need it.
+`~/.local/share/ranki/collection.anki2`. Anki keeps its own collection open
+exclusively, so point Ranki at an Anki profile with `--collection PATH`,
+`RANKI_COLLECTION`, or `general.collection` in the config. Media lives in a
+`collection.media` directory next to the collection. A missing collection is
+created by commands that need it.
 
 ## Commands
 
