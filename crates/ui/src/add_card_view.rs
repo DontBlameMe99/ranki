@@ -641,20 +641,6 @@ impl Root {
             element
         };
 
-        let upload_image = {
-            let handler: ClickHandler =
-                Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.upload_occlusion_image(cx);
-                }));
-            button(
-                "io-upload-image",
-                "Upload image",
-                "icon-upload",
-                true,
-                colors,
-                handler,
-            )
-        };
         let add_mask = {
             let handler: ClickHandler =
                 Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -712,6 +698,9 @@ impl Root {
                 colors.surface1
             })
             .bg(colors.mantle);
+        if image.is_none() {
+            canvas = canvas.cursor_pointer();
+        }
         if let Some(name) = &image {
             canvas = canvas.child(
                 img(media_dir.join(name))
@@ -758,7 +747,17 @@ impl Root {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.occlusion_press(pointer(event.position), cx);
+                    if this.add.occlusion.image.is_none() {
+                        this.upload_occlusion_image(cx);
+                    } else {
+                        this.occlusion_press(pointer(event.position), cx);
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.upload_occlusion_image(cx);
                 }),
             )
             .on_mouse_move(cx.listener(
@@ -878,20 +877,37 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(upload_image)
-                    .child(
-                        div()
+                    .child({
+                        let label = div()
+                            .id("io-upload-image")
                             .flex_1()
                             .text_size(px(12.))
                             .text_color(if image.is_some() {
                                 colors.subtext
                             } else {
-                                colors.overlay
+                                colors.mauve
                             })
-                            .child(image.unwrap_or_else(|| {
-                                String::from("No image selected")
-                            })),
-                    ),
+                            .child(image.clone().unwrap_or_else(|| {
+                                String::from("Upload an image")
+                            }));
+                        if image.is_none() {
+                            label.cursor_pointer().on_click(cx.listener(
+                                |this, _: &ClickEvent, _, cx| {
+                                    this.upload_occlusion_image(cx);
+                                },
+                            ))
+                        } else {
+                            label
+                        }
+                    })
+                    .child(if image.is_some() {
+                        div()
+                            .text_size(px(11.))
+                            .text_color(colors.overlay)
+                            .child("Right-click image to change")
+                    } else {
+                        div()
+                    }),
             )
             .child(canvas)
             .child(list);
