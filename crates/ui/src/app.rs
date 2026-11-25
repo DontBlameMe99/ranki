@@ -322,7 +322,6 @@ pub struct Root {
     pub(crate) collection_modified: i64,
     pub(crate) collection_start: i64,
     pub(crate) sync: SyncUiState,
-    pub(crate) last_sync: Option<i64>,
     pub(crate) save_settings: SettingsSaver,
     pub(crate) images: Entity<card_view::LruImageCache>,
     pub(crate) font_family: &'static str,
@@ -502,7 +501,6 @@ impl Root {
                 signed_in,
                 busy: false,
             },
-            last_sync: sync_state.as_ref().and_then(|state| state.last_success),
             save_settings,
             images: card_view::LruImageCache::new(cx),
             last_change_check: Instant::now(),
@@ -3027,27 +3025,6 @@ pub fn next_due_deck(
     })
 }
 
-/// Human age for the footer badge.
-#[must_use]
-pub fn relative_age(modified: i64, now: i64) -> String {
-    let seconds = now.saturating_sub(modified).max(0);
-    match seconds {
-        0..=59 => String::from("just now"),
-        60..=3599 => format!("{} min ago", seconds / 60),
-        3600..=86_399 => format!("{} h ago", seconds / 3600),
-        _ => format!("{} days ago", seconds / 86_400),
-    }
-}
-
-/// Footer sync badge: local state, or the age of the last sync.
-#[must_use]
-pub fn status_label(last_sync: Option<i64>, now: i64) -> String {
-    last_sync.map_or_else(
-        || String::from("Local \u{b7} not synced"),
-        |stamp| format!("Synced \u{b7} {}", relative_age(stamp, now)),
-    )
-}
-
 /// Installed note types plus every stock type the collection is missing.
 ///
 /// Missing stock types keep placeholder id 0, so the add-card screen can show
@@ -3334,8 +3311,8 @@ mod tests {
         collect_tags, date_label, deck_meta, due_total, duration_label,
         empty_copy, empty_kind, filter_decks, focused_delta,
         forecast_bar_height, forecast_total, model_index, models_with_stock,
-        next_due_deck, next_view, queue_counts, relative_age, session_progress,
-        status_label, sum_leaf_counts, validate_draft, validate_occlusion,
+        next_due_deck, next_view, queue_counts, session_progress,
+        sum_leaf_counts, validate_draft, validate_occlusion,
     };
     use gpui::{point, px};
 
@@ -3894,14 +3871,6 @@ mod tests {
     }
 
     #[test]
-    fn footer_age_is_human_and_truthful() {
-        assert_eq!(relative_age(100, 130), "just now");
-        assert_eq!(relative_age(100, 220), "2 min ago");
-        assert_eq!(relative_age(100, 7_300), "2 h ago");
-        assert_eq!(relative_age(100, 172_900), "2 days ago");
-    }
-
-    #[test]
     fn date_label_uses_the_real_calendar() {
         assert_eq!(date_label(0), "Thursday, 1 January");
         assert_eq!(date_label(1_800_000_000), "Friday, 15 January");
@@ -3962,12 +3931,6 @@ mod tests {
         assert_eq!(forecast_bar_height(2, 0), 6.0);
         assert_eq!(forecast_bar_height(1, 4), 28.5);
         assert_eq!(forecast_bar_height(4, 4), 60.0);
-    }
-
-    #[test]
-    fn footer_status_reports_local_until_a_sync_stamp_exists() {
-        assert_eq!(status_label(None, 1_000), "Local \u{b7} not synced");
-        assert_eq!(status_label(Some(1_000), 1_120), "Synced \u{b7} 2 min ago");
     }
 
     #[test]

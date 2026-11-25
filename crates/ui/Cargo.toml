@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 ranki-model.workspace = true
 ranki-core.workspace = true
+ranki-storage.workspace = true
 ranki-sync.workspace = true
 gpui.workspace = true
 futures = "0.3"
@@ -16,7 +17,6 @@ serde_json.workspace = true
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
-ranki-storage.workspace = true
 
 [lints]
 workspace = true
