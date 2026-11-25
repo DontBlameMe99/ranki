@@ -306,7 +306,7 @@ pub struct Root {
     pub(crate) deck_search: Entity<TextField>,
     pub(crate) browse: BrowseState,
     pub(crate) create_field: Entity<TextField>,
-    pub(crate) create_open: bool,
+    pub(crate) create_modal: bool,
     pub(crate) rename_field: Entity<TextField>,
     pub(crate) deck_edit: Option<DeckEdit>,
     pub(crate) deck_menu: Option<DeckMenu>,
@@ -470,7 +470,7 @@ impl Root {
                 loading: false,
             },
             create_field,
-            create_open: false,
+            create_modal: false,
             rename_field,
             deck_edit: None,
             deck_menu: None,
@@ -550,7 +550,7 @@ impl Root {
         if root.view == View::Decks
             && env::var("RANKI_UI_DEV_CREATE").is_ok_and(|value| value == "1")
         {
-            root.create_open = true;
+            root.create_modal = true;
             window.focus(root.create_field.read(cx).focus_handle());
         }
         if env::var("RANKI_UI_DEV_MENU").is_ok_and(|value| value == "1") {
@@ -1785,7 +1785,22 @@ impl Root {
         cx.notify();
     }
 
-    pub(crate) fn create_deck(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_create_modal(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_field.update(cx, TextField::clear);
+        self.create_modal = true;
+        window.focus(self.create_field.read(cx).focus_handle());
+        cx.notify();
+    }
+
+    pub(crate) fn create_deck(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let name = self.create_field.read(cx).text().trim().to_owned();
         if name.is_empty() {
             self.show_toast(ToastKind::Error, "Deck name cannot be empty", cx);
@@ -1797,11 +1812,12 @@ impl Root {
                 for (index, _) in deck.name.match_indices("::") {
                     let _ = self.expanded.insert(deck.name[..index].to_owned());
                 }
-                self.create_open = false;
                 self.create_field
                     .update(cx, super::text_field::TextField::clear);
+                self.create_modal = false;
                 self.clear_toast();
                 self.reload(cx);
+                window.focus(&self.focus);
             }
             Err(error) => {
                 self.show_toast(
@@ -1818,8 +1834,8 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.create_open = false;
         self.create_field.update(cx, TextField::clear);
+        self.create_modal = false;
         window.focus(&self.focus);
         cx.notify();
     }
@@ -2015,9 +2031,15 @@ impl Root {
                     self.add.deck_picker = false;
                     window.focus(&self.focus);
                     cx.notify();
-                } else if self.confirmation.is_some() || self.help_open {
+                } else if self.confirmation.is_some()
+                    || self.help_open
+                    || self.create_modal
+                {
                     self.confirmation = None;
                     self.help_open = false;
+                    if self.create_modal {
+                        self.cancel_create(window, cx);
+                    }
                     cx.notify();
                 }
             }
@@ -2067,16 +2089,10 @@ impl Root {
                 }
                 self.set_theme(choice, cx);
             }
-            UiAction::CreateDeck => {
-                self.create_open = true;
-                self.view = View::Decks;
-                window.focus(self.create_field.read(cx).focus_handle());
-                cx.notify();
-            }
+            UiAction::CreateDeck => self.open_create_modal(window, cx),
             UiAction::SubmitDeck => {
-                if self.create_field.read(cx).focus_handle().is_focused(window)
-                {
-                    self.create_deck(cx);
+                if self.create_modal {
+                    self.create_deck(window, cx);
                 }
             }
             UiAction::SaveNote => self.save_note(cx),
@@ -2090,10 +2106,20 @@ impl Root {
                 cx.notify();
             }
             UiAction::ToggleScheduler => self.toggle_scheduler(cx),
-            UiAction::Confirm => self.confirm(cx),
+            UiAction::Confirm => {
+                if self.create_modal {
+                    self.create_deck(window, cx);
+                } else {
+                    self.confirm(cx);
+                }
+            }
             UiAction::CancelDialog => {
                 self.confirmation = None;
-                cx.notify();
+                if self.create_modal {
+                    self.cancel_create(window, cx);
+                } else {
+                    cx.notify();
+                }
             }
             UiAction::NextDeck => {
                 self.refresh_stats();
@@ -3300,8 +3326,8 @@ mod tests {
     use std::time::Duration;
 
     use ranki_model::{
-        Card, CardQueue, CardTemplate, CardType, Deck, Id, NoteKind, NoteModel,
-        SchedulerKind,
+        Card, CardQueue, CardTemplate, CardType, Deck, Id, NewNote, Note,
+        NoteKind, NoteModel, ReviewDecision, SchedulerKind, StoreError,
     };
 
     use crate::Options;
@@ -3314,6 +3340,121 @@ mod tests {
         next_due_deck, next_view, queue_counts, relative_age, session_progress,
         status_label, sum_leaf_counts, validate_draft, validate_occlusion,
     };
+    use gpui::{point, px};
+
+    struct ModalStore;
+
+    impl ranki_model::Store for ModalStore {
+        fn decks(&self) -> Result<Vec<Deck>, StoreError> {
+            Ok(vec![Deck {
+                id: 1,
+                name: String::from("Default"),
+                description: String::new(),
+            }])
+        }
+
+        fn create_deck(&mut self, name: &str) -> Result<Deck, StoreError> {
+            Ok(Deck {
+                id: 2,
+                name: name.to_owned(),
+                description: String::new(),
+            })
+        }
+
+        fn models(&self) -> Result<Vec<NoteModel>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn find_cards(&self, _: &str) -> Result<Vec<Id>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn due_cards(
+            &self,
+            _: Option<Id>,
+            _: usize,
+            _: i64,
+        ) -> Result<Vec<Card>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn card(&self, _: Id) -> Result<Option<Card>, StoreError> {
+            Ok(None)
+        }
+
+        fn note(&self, _: Id) -> Result<Option<Note>, StoreError> {
+            Ok(None)
+        }
+
+        fn add_note(&mut self, _: &NewNote) -> Result<Vec<Id>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn apply_review(
+            &mut self,
+            _: &ReviewDecision,
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        fn stats(
+            &self,
+            _: Option<Id>,
+            _: i64,
+        ) -> Result<ranki_model::DeckStats, StoreError> {
+            Ok(ranki_model::DeckStats::default())
+        }
+
+        fn collection_modified(&self) -> Result<i64, StoreError> {
+            Ok(0)
+        }
+
+        fn collection_created(&self) -> Result<i64, StoreError> {
+            Ok(0)
+        }
+    }
+
+    #[gpui::test]
+    fn create_deck_modal_closes_only_on_outside_click(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(ModalStore),
+                    options: Options::default(),
+                    save_settings: std::sync::Arc::new(|_| Ok(())),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(super::CreateDeck);
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| root.read(app).create_modal));
+
+        let center = cx.update(|window, _| {
+            let size = window.viewport_size();
+            point(
+                px(f32::from(size.width) / 2.),
+                px(f32::from(size.height) / 2.),
+            )
+        });
+        cx.simulate_click(center, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.update(|_, app| root.read(app).create_modal),
+            "clicking inside the modal must keep it open"
+        );
+
+        cx.simulate_click(point(px(4.), px(4.)), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            !cx.update(|_, app| root.read(app).create_modal),
+            "clicking outside the modal must close it"
+        );
+    }
     #[test]
     fn session_progress_never_fills_an_empty_queue() {
         assert_eq!(session_progress(0, 0), 0.0);
@@ -3994,7 +4135,7 @@ mod tests {
         });
         cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
         cx.update_entity(&root, |root, cx| {
-            root.create_open = true;
+            root.create_modal = true;
             root.create_field.update(cx, |field, cx| {
                 field.set_text("Click Deck", cx);
             });
@@ -4013,7 +4154,7 @@ mod tests {
             let _ = window.draw(cx);
         });
         let button = cx
-            .debug_bounds("small-Create")
+            .debug_bounds("create-deck-primary")
             .expect("create button bounds");
         cx.simulate_mouse_move(button.center(), None, gpui::Modifiers::none());
         cx.simulate_mouse_down(

@@ -412,6 +412,105 @@ impl Root {
                     .into_any_element(),
             );
         }
+        if self.create_modal {
+            let cancel = cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.cancel_create(window, cx);
+            });
+            let style = Style::new(colors, self.theme());
+            layers.push(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(crate::theme::alpha(colors.crust, 0.7))
+                    .occlude()
+                    .id("create-deck-backdrop")
+                    .on_click(cx.listener(
+                        |this, _: &ClickEvent, window, cx| {
+                            this.cancel_create(window, cx);
+                        },
+                    ))
+                    .key_context("ranki_dialog")
+                    .track_focus(&self.dialog_focus)
+                    .on_action(cx.listener(
+                        |this, _: &crate::app::ConfirmDialog, window, cx| {
+                            this.dispatch(UiAction::Confirm, window, cx);
+                        },
+                    ))
+                    .on_action(cx.listener(
+                        |this, _: &crate::app::CancelDialog, window, cx| {
+                            this.dispatch(UiAction::CancelDialog, window, cx);
+                        },
+                    ))
+                    .child(
+                        div()
+                            .id("create-deck-modal")
+                            .w(px(420.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(16.))
+                            .p(px(24.))
+                            .rounded(px(24.))
+                            .bg(colors.mantle)
+                            .border_1()
+                            .border_color(colors.surface0)
+                            .occlude()
+                            .on_click(|_, _, cx| cx.stop_propagation())
+                            .child(
+                                div()
+                                    .text_size(px(20.))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child("Create deck"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .text_color(colors.subtext)
+                                    .child("Name the new deck."),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .h(px(44.))
+                                    .px(px(14.))
+                                    .rounded(px(12.))
+                                    .bg(colors.surface0)
+                                    .border_1()
+                                    .border_color(colors.mauve)
+                                    .text_size(px(14.))
+                                    .text_color(colors.text)
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .child(self.create_field.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .gap(px(10.))
+                                    .child(secondary_button(
+                                        "Cancel",
+                                        colors,
+                                        Box::new(cancel),
+                                    ))
+                                    .child(primary(
+                                        "create-deck-primary",
+                                        "Create",
+                                        style,
+                                        UiAction::SubmitDeck,
+                                        cx,
+                                    )),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
         if let Some(confirmation) = self.confirmation.clone() {
             let (title, detail, accept) = match confirmation {
                 Confirmation::RemoveDeck { name, .. } => (
@@ -485,8 +584,10 @@ impl Root {
                                         "Cancel", colors, cancel,
                                     ))
                                     .child(primary(
+                                        "confirm-primary",
                                         accept,
                                         Style::new(colors, self.theme()),
+                                        UiAction::Confirm,
                                         cx,
                                     )),
                             ),
@@ -554,14 +655,17 @@ impl Root {
 }
 
 fn primary(
+    id: &'static str,
     label: &'static str,
     style: Style,
+    action: UiAction,
     cx: &Context<Root>,
 ) -> impl IntoElement {
     Interaction::accent(style)
         .apply(
             div()
-                .id("confirm-primary")
+                .id(id)
+                .debug_selector(move || id.to_owned())
                 .h(px(40.))
                 .px(px(SPACE_BLOCK))
                 .rounded(px(12.))
@@ -572,8 +676,8 @@ fn primary(
                 .items_center()
                 .cursor_pointer(),
         )
-        .on_click(cx.listener(|_, _: &ClickEvent, window, cx| {
-            crate::app::dispatch_app_action(window, cx, UiAction::Confirm);
+        .on_click(cx.listener(move |_, _: &ClickEvent, window, cx| {
+            crate::app::dispatch_app_action(window, cx, action.clone());
         }))
         .child(label)
 }
