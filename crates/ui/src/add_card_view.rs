@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use crate::{
-    app::{AddedNote, Root, UiAction, note_type_name, resolve_model},
+    app::{Root, UiAction, note_type_name, resolve_model},
     card_view::{self, Side},
     components::{ClickHandler, icon, keycap, removable_chip},
     occlusion::{self, OcclusionMask},
@@ -36,9 +36,7 @@ impl Root {
         let fields = self.add.fields.clone();
         let tags_field = self.add.tags.clone();
         let tag_chips = self.add.tag_chips.clone();
-        let added = self.add.added.clone();
         let errors = self.add.errors.clone();
-        let preview_side = self.add.preview_side;
         let model = resolve_model(&models, self.add.model_index);
         let occlusion_mode =
             model.is_some_and(ranki_model::NoteModel::is_image_occlusion);
@@ -53,13 +51,15 @@ impl Root {
         let has_content = has_preview_content(&field_values);
         let preview_text = model.map_or_else(
             || String::from("Choose a note type"),
-            |model| card_view::preview_card(model, &field_values, preview_side),
+            |model| {
+                card_view::preview_card(model, &field_values, Side::Question)
+            },
         );
         let preview_answer = model.map_or_else(String::new, |model| {
             card_view::preview_card(model, &field_values, Side::Answer)
         });
         let rendered_preview = model.map(|model| {
-            card_view::preview_rendered(model, &field_values, preview_side)
+            card_view::preview_rendered(model, &field_values, Side::Question)
         });
         let preview_reading = model.and_then(|model| {
             field_value(model, &field_values, &["Reading", "Kana"])
@@ -79,35 +79,6 @@ impl Root {
                 })
         });
         let save = self.action_click(UiAction::SaveNote);
-        let preview_tab = |label: &'static str,
-                           side: Side,
-                           selected: bool,
-                           cx: &mut Context<Self>| {
-            div()
-                .id("add-preview-tab")
-                .h(px(28.))
-                .px(px(12.))
-                .flex()
-                .items_center()
-                .rounded(px(9.))
-                .bg(if selected {
-                    alpha(colors.mauve, 0.22)
-                } else {
-                    alpha(colors.surface0, 0.0)
-                })
-                .text_size(px(13.))
-                .text_color(if selected {
-                    colors.mauve
-                } else {
-                    colors.subtext
-                })
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.add.preview_side = side;
-                    cx.notify();
-                }))
-                .child(label.to_owned())
-        };
         let content_width =
             f32::from(window.viewport_size().width) - NAV_WIDTH - PAGE_X * 2.0;
         let side_by_side = content_width >= 900.;
@@ -401,37 +372,7 @@ impl Root {
         } else {
             preview = preview.w_full();
         }
-        let mut preview_header =
-            div().flex().items_center().justify_between().child(
-                div()
-                    .text_size(px(11.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(colors.subtext)
-                    .child("LIVE PREVIEW"),
-            );
-        if has_content {
-            preview_header = preview_header.child(
-                div()
-                    .flex()
-                    .gap(px(2.))
-                    .p(px(4.))
-                    .rounded(px(12.))
-                    .bg(colors.surface0)
-                    .child(preview_tab(
-                        "Front",
-                        Side::Question,
-                        preview_side == Side::Question,
-                        cx,
-                    ))
-                    .child(preview_tab(
-                        "Back",
-                        Side::Answer,
-                        preview_side == Side::Answer,
-                        cx,
-                    )),
-            );
-        }
-        let mut preview = preview.child(preview_header).child(if has_content {
+        let mut preview = preview.child(if has_content {
             div()
                 .flex_1()
                 .flex()
@@ -504,55 +445,35 @@ impl Root {
                 image = image.child(card_view::occlusion_layer(
                     &rendered.masks,
                     colors,
-                    preview_side == Side::Answer,
+                    false,
                 ));
             }
             preview = preview.child(image);
         }
 
-        let history = added_history(&added, colors);
-
         let mut form = div().flex().w_full().gap(px(ADD_GAP));
-        if occlusion_mode {
-            form = form
+        if side_by_side && !occlusion_mode {
+            let editor = div()
+                .flex_1()
+                .min_w(px(ADD_FORM_WIDTH * 0.5))
+                .flex()
                 .flex_col()
                 .gap(px(18.))
                 .child(left)
-                .child(tags_group)
-                .child(history)
-                .child(preview);
-            column = column.child(form);
-        } else if side_by_side {
+                .child(tags_group);
             form = form
                 .items_start()
-                .child(
-                    div().flex_1().min_w(px(ADD_FORM_WIDTH * 0.5)).child(left),
-                )
+                .child(editor)
                 .child(div().w(px(PREVIEW_WIDTH)).flex_none().child(preview));
-            let tags_and_history = div()
-                .mt(px(18.))
-                .flex()
-                .w_full()
-                .items_start()
-                .gap(px(ADD_GAP))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(ADD_FORM_WIDTH * 0.5))
-                        .child(tags_group),
-                )
-                .child(div().w(px(PREVIEW_WIDTH)).flex_none().child(history));
-            column = column.child(form).child(tags_and_history);
         } else {
             form = form
                 .flex_col()
                 .gap(px(18.))
                 .child(left)
                 .child(tags_group)
-                .child(preview)
-                .child(history);
-            column = column.child(form);
+                .child(preview);
         }
+        column = column.child(form);
 
         column = column.child(
             div()
@@ -1239,83 +1160,6 @@ fn formatting_toolbar(
     )
 }
 
-fn added_history(
-    added: &[AddedNote],
-    colors: crate::theme::Palette,
-) -> impl IntoElement {
-    let mut card = div()
-        .flex()
-        .flex_col()
-        .rounded(px(16.))
-        .bg(colors.mantle)
-        .border_1()
-        .border_color(colors.surface0)
-        .min_h(px(46.))
-        .overflow_hidden();
-    if added.is_empty() {
-        card = card.child(
-            div()
-                .px(px(14.))
-                .py(px(11.))
-                .text_size(px(13.))
-                .text_color(colors.overlay)
-                .child("No cards added yet"),
-        );
-    } else {
-        for note in added.iter().rev() {
-            card = card.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .px(px(14.))
-                    .py(px(11.))
-                    .child(icon("icon-check", 16., colors.green))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_w(px(0.))
-                            .child(
-                                div()
-                                    .text_size(px(15.))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .font_family(crate::theme::font_for_text(
-                                        &note.headline,
-                                    ))
-                                    .child(note.headline.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .text_color(colors.subtext)
-                                    .child(note.detail.clone()),
-                            ),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(colors.overlay)
-                            .child(note.time.clone()),
-                    ),
-            );
-        }
-    }
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(8.))
-        .child(
-            div()
-                .text_size(px(13.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(colors.subtext)
-                .child("Added this session"),
-        )
-        .child(card)
-}
-
 fn field_value(
     model: &ranki_model::NoteModel,
     values: &[String],
@@ -1387,14 +1231,8 @@ fn validation(message: &str, colors: crate::theme::Palette) -> gpui::Div {
 mod tests {
     use crate::{
         app::{UiAction, models_with_stock},
-        card_view::Side,
         theme::MOCHA,
     };
-
-    #[test]
-    fn preview_side_toggles_without_a_store_call() {
-        assert_ne!(Side::Question, Side::Answer);
-    }
 
     #[test]
     fn validation_uses_the_shared_helper() {
