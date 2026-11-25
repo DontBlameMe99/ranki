@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::{
     app::{Root, UiAction},
-    card_view::{self, CardRequest},
+    card_view::{self, CardRequest, MediaRef, RenderedCard},
     components::{chip, icon, secondary_button},
     text_field::{EditHook, TextField},
     theme::{PAGE_X, PAGE_Y, Style, interval_label},
@@ -26,6 +26,8 @@ pub struct BrowserRow {
     pub note: Note,
     pub front: String,
     pub back: String,
+    pub front_media: Vec<MediaRef>,
+    pub back_media: Vec<MediaRef>,
     pub deck: String,
     pub model: String,
 }
@@ -61,22 +63,36 @@ pub fn browser_row(
         model,
         note,
         CardRequest::question(card.ordinal),
-    )
-    .text;
+    );
     let back = card_view::render_card(
         model,
         note,
         CardRequest::answer_only(card.ordinal),
-    )
-    .text;
+    );
     Some(BrowserRow {
         card: card.clone(),
         note: note.clone(),
-        front,
-        back,
+        front: card_label(&front),
+        front_media: front.media,
+        back: card_label(&back),
+        back_media: back.media,
         deck,
         model: model.name.clone(),
     })
+}
+
+/// Uses media names when a rendered side has no plain text, as with flag images.
+fn card_label(rendered: &RenderedCard) -> String {
+    if rendered.text.trim().is_empty() {
+        rendered
+            .media
+            .iter()
+            .map(|media| media.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        rendered.text.clone()
+    }
 }
 
 /// Flattens rendered card text into a single bounded table cell.
@@ -400,7 +416,7 @@ impl Root {
                 .child(table)
                 .child(self.render_browse_detail(selected, style)),
         );
-        content
+        gpui::image_cache(self.images.clone()).child(content)
     }
     fn render_browse_empty(
         &self,
@@ -506,6 +522,11 @@ impl Root {
                     .child("QUESTION"),
             )
             .child(div().text_size(px(15.)).child(row.front.clone()))
+            .children(card_view::media_column(
+                &row.front_media,
+                &self.options.media_dir,
+                colors,
+            ))
             .child(div().h(px(1.)).bg(colors.surface0))
             .child(
                 div()
@@ -514,7 +535,12 @@ impl Root {
                     .text_color(colors.subtext)
                     .child("ANSWER"),
             )
-            .child(div().text_size(px(15.)).child(row.back.clone()));
+            .child(div().text_size(px(15.)).child(row.back.clone()))
+            .children(card_view::media_column(
+                &row.back_media,
+                &self.options.media_dir,
+                colors,
+            ));
         if !row.note.tags.is_empty() {
             detail =
                 detail.child(div().flex().flex_wrap().gap(px(6.)).children(
@@ -729,5 +755,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(row.front, "The [...] is Paris.");
+    }
+
+    #[test]
+    fn browser_rows_keep_image_media_for_preview() {
+        let deck = Deck {
+            id: DEFAULT_DECK_ID,
+            name: "Default".to_owned(),
+            description: String::new(),
+        };
+        let note = Note {
+            id: 5,
+            guid: String::new(),
+            model_id: DEFAULT_MODEL_ID,
+            modified: 0,
+            usn: 0,
+            tags: Vec::new(),
+            fields: vec![
+                "<img src=\"Abkhazia.png\" />".to_owned(),
+                "Abkhazia".to_owned(),
+            ],
+            sort_field: String::new(),
+            checksum: 0,
+            flags: 0,
+            data: String::new(),
+        };
+        let row = browser_row(
+            &card_with_id(5, CardQueue::New, 0),
+            &note,
+            std::slice::from_ref(&deck),
+            std::slice::from_ref(&model()),
+        )
+        .unwrap();
+        assert_eq!(row.front, "Abkhazia.png");
+        assert_eq!(row.front_media.len(), 1);
+        assert_eq!(
+            row.front_media.first().map(|media| media.name.as_str()),
+            Some("Abkhazia.png")
+        );
+        assert_eq!(row.back_media.len(), 0);
     }
 }
