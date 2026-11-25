@@ -21,7 +21,7 @@ use crate::{
 impl Root {
     pub(crate) fn render_review(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = self.colors();
@@ -29,20 +29,16 @@ impl Root {
         let theme = self.theme();
         let session =
             queue_counts(self.review.current.as_ref(), &self.review.queue);
-        // Ask the store the same question a restart asks, and only once the
-        // session has stopped, so reviewing never pays for an extra query.
-        let scope = if self.review.scope_all {
-            None
-        } else {
-            self.selected
-                .and_then(|index| self.decks.get(index))
-                .map(|deck| deck.id)
-        };
-        let more_due = self.review.current.is_none()
-            && self
-                .store
-                .due_cards(scope, 1, Self::now())
-                .is_ok_and(|cards| !cards.is_empty());
+        let more_due = self.review.more_due;
+        let viewport_height = f32::from(window.viewport_size().height);
+        let stage_height = (viewport_height
+            - TOPBAR_HEIGHT
+            - FOOTER_HEIGHT
+            - CONTROL_HEIGHT
+            - 48.0
+            - 18.0)
+            .clamp(220.0, STAGE_HEIGHT);
+        let image_height = (stage_height * 0.38).clamp(96.0, 180.0);
         let fraction = self.progress_fraction();
         let from = self.review.progress_from;
         let current = self.review.current.clone();
@@ -52,44 +48,15 @@ impl Root {
         let note = self.review.note.clone();
         let status = self.review.status.clone();
         let answered = self.review.answered;
+        let load_errors = self.review.load_errors;
+        let load_error = self.review.load_error.clone();
         let again = self.review.again_count;
         let studied = duration_label(self.session_elapsed());
         let can_undo = self.review.last_grade.is_some();
         let quick = self.motion_ms(MOTION_QUICK_MS);
         let progress_ms = self.motion_ms(MOTION_PROGRESS_MS);
         let active_queue = current.as_ref().map(|card| card.card_type);
-        let collection_start = self.collection_start;
-        let now = Self::now();
-        let previews = if let Some(card) = current.as_ref() {
-            [
-                self.scheduler.preview(
-                    card,
-                    ranki_model::Rating::Again,
-                    now,
-                    collection_start,
-                ),
-                self.scheduler.preview(
-                    card,
-                    ranki_model::Rating::Hard,
-                    now,
-                    collection_start,
-                ),
-                self.scheduler.preview(
-                    card,
-                    ranki_model::Rating::Good,
-                    now,
-                    collection_start,
-                ),
-                self.scheduler.preview(
-                    card,
-                    ranki_model::Rating::Easy,
-                    now,
-                    collection_start,
-                ),
-            ]
-        } else {
-            [0; 4]
-        };
+        let previews = self.review.previews;
         let deck_name = if self.review.scope_all {
             String::from("All decks")
         } else {
@@ -229,7 +196,66 @@ impl Root {
                 ),
         );
 
-        let body = if current.is_none() && answered > 0 {
+        let load_failure = load_error.or_else(|| {
+            (load_errors > 0).then(|| {
+                format!(
+                    "{load_errors} cards could not be loaded and were skipped."
+                )
+            })
+        });
+        let body = if current.is_none()
+            && let Some(message) = load_failure
+        {
+            let retry = self.action_click(UiAction::StudyAgain);
+            let back = self.action_click(UiAction::EndSession);
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .w(px(STAGE_WIDTH))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(14.))
+                        .p(px(32.))
+                        .rounded(px(STAGE_RADIUS))
+                        .bg(colors.surface0)
+                        .child(
+                            div()
+                                .text_size(px(28.))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .child("Could not load cards"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .text_color(colors.subtext)
+                                .child(message),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(10.))
+                                .child(footer_button(
+                                    "Back to decks",
+                                    colors,
+                                    false,
+                                    back,
+                                ))
+                                .child(footer_button(
+                                    "Try again",
+                                    colors,
+                                    true,
+                                    retry,
+                                )),
+                        )
+                        .into_any_element(),
+                )
+                .into_any_element()
+        } else if current.is_none() && answered > 0 {
             let practice = self.action_click(UiAction::StudyAgain);
             let back = self.action_click(UiAction::EndSession);
             let summary =
@@ -314,7 +340,6 @@ impl Root {
             summary.into_any_element()
         } else if current.is_none() {
             div()
-                .flex_1()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -353,7 +378,7 @@ impl Root {
         } else {
             let mut stage = div()
                 .w(px(STAGE_WIDTH))
-                .h(px(STAGE_HEIGHT))
+                .h(px(stage_height))
                 .flex_none()
                 .flex()
                 .flex_col()
@@ -365,8 +390,35 @@ impl Root {
                         tags.iter().map(|tag| chip(tag.clone(), colors)),
                     ),
                 ));
-            let mut center = div()
+            let question_size = question.as_ref().map_or(84.0, |card| {
+                card_text_size(
+                    card,
+                    stage_height,
+                    !card.media.is_empty() || !card.masks.is_empty(),
+                )
+            });
+            let question_size = if phase == Phase::Answer {
+                question_size.min(40.0)
+            } else {
+                question_size
+            };
+            let answer_size = answer.as_ref().map_or(32.0, |card| {
+                card_text_size(
+                    card,
+                    stage_height,
+                    !card.media.is_empty() || !card.masks.is_empty(),
+                )
+                .clamp(22.0, 32.0)
+            });
+            let center = div()
+                .id("review-stage-scroll")
                 .flex_1()
+                .min_h(px(0.))
+                .overflow_scroll();
+            let content_height =
+                (stage_height - 2.0 * STAGE_PADDING - 56.0).max(120.0);
+            let mut content = div()
+                .min_h(px(content_height))
                 .flex()
                 .flex_col()
                 .items_center()
@@ -380,7 +432,7 @@ impl Root {
                         .child("RECALL THE MEANING")
                 }))
                 .child(if let Some(card) = question.as_ref() {
-                    card_view::rendered_text(card, colors.text, 84.)
+                    card_view::rendered_text(card, colors.text, question_size)
                         .into_any_element()
                 } else {
                     div()
@@ -403,8 +455,12 @@ impl Root {
                     .gap(px(10.))
                     .child(separator(colors))
                     .child(if let Some(card) = answer.as_ref() {
-                        card_view::rendered_text(card, colors.mauve, 32.)
-                            .into_any_element()
+                        card_view::rendered_text(
+                            card,
+                            colors.mauve,
+                            answer_size,
+                        )
+                        .into_any_element()
                     } else {
                         div().into_any_element()
                     });
@@ -413,6 +469,7 @@ impl Root {
                         &card.media,
                         &self.options.media_dir,
                         colors,
+                        image_height,
                     )
                 {
                     answer_group = answer_group.child(media);
@@ -420,10 +477,13 @@ impl Root {
                 let key = current
                     .as_ref()
                     .map_or(0, |card| usize::try_from(card.id).unwrap_or(0));
-                center =
-                    center.child(fade_in(answer_group, ("answer", key), quick));
+                content = content.child(fade_in(
+                    answer_group,
+                    ("answer", key),
+                    quick,
+                ));
             }
-            stage = stage.child(center);
+            stage = stage.child(center.child(content));
             if let Some(card) = question.as_ref() {
                 let masks = (!card.masks.is_empty()).then(|| {
                     card_view::occlusion_layer(
@@ -436,6 +496,7 @@ impl Root {
                     &card.media,
                     &self.options.media_dir,
                     colors,
+                    image_height,
                 ) {
                     Some(media) => {
                         let mut image = div().relative().child(media);
@@ -554,6 +615,21 @@ impl Root {
                 ),
         )
     }
+}
+
+fn card_text_size(
+    card: &card_view::RenderedCard,
+    stage_height: f32,
+    media: bool,
+) -> f32 {
+    let characters = card.text.chars().count();
+    let lines = card.text.lines().count().max(1);
+    let estimated_lines = characters.div_ceil(40).max(lines);
+    let base = if media { 48.0 } else { 84.0 };
+    let available = stage_height * if media { 0.42 } else { 0.68 };
+    (available / (estimated_lines as f32 * 1.25))
+        .min(base)
+        .clamp(24.0, 84.0)
 }
 
 /// Headline for a finished session, sized by what actually happened.
@@ -828,6 +904,30 @@ mod tests {
     #[test]
     fn rating_palette_uses_peach_for_hard() {
         assert_eq!(rating_fill(2, Theme::Dark), crate::theme::MOCHA.peach);
+    }
+
+    #[test]
+    fn long_card_text_uses_a_smaller_reading_size() {
+        let short = crate::card_view::RenderedCard {
+            text: "Short question".into(),
+            ..Default::default()
+        };
+        let long = crate::card_view::RenderedCard {
+            text: "A long question ".repeat(40),
+            ..Default::default()
+        };
+        assert!(
+            super::card_text_size(&long, 322.0, false)
+                < super::card_text_size(&short, 322.0, false)
+        );
+    }
+
+    #[test]
+    fn short_viewports_leave_room_for_grading_controls() {
+        let stage =
+            (600.0_f32 - 72.0 - 64.0 - 76.0 - 48.0 - 18.0).clamp(220.0, 440.0);
+        assert!(stage <= 322.0);
+        assert!(stage + 72.0 + 64.0 + 76.0 + 48.0 + 18.0 <= 600.0);
     }
 
     #[test]

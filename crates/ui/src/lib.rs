@@ -78,7 +78,7 @@ pub fn run(
                     ..Default::default()
                 },
                 |window, cx| {
-                    cx.new(|cx| {
+                    let root = cx.new(|cx| {
                         let root = app::Root::new(
                             app::Launch {
                                 store,
@@ -90,7 +90,11 @@ pub fn run(
                         );
                         app::Root::observe_appearance(window, cx);
                         root
-                    })
+                    });
+                    root.update(cx, |_, cx| {
+                        app::Root::start_external_change_poll(cx);
+                    });
+                    root
                 },
             );
             if let Err(error) = window {

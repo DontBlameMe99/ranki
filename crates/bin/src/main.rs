@@ -988,6 +988,8 @@ pub(crate) fn answer_card<S: Store>(
 }
 
 pub(crate) fn save_card<S: Store>(store: &mut S, card: Card) -> CliResult<()> {
+    let expected_modified = card.modified;
+    let expected_usn = card.usn;
     let log_id = ranki_model::next_id(now_ms()?);
     let log = RevLog {
         id: log_id,
@@ -1000,7 +1002,12 @@ pub(crate) fn save_card<S: Store>(store: &mut S, card: Card) -> CliResult<()> {
         time_ms: 0,
         kind: RevLogKind::Manual,
     };
-    store.apply_review(&ReviewDecision { card, revlog: log })?;
+    store.apply_review(&ReviewDecision {
+        card,
+        revlog: log,
+        expected_modified,
+        expected_usn,
+    })?;
     Ok(())
 }
 

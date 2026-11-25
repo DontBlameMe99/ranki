@@ -333,6 +333,14 @@ impl Collection {
             missing: false,
         })
     }
+
+    fn ensure_due_index(&self) -> Result<(), StoreError> {
+        self.conn
+            .execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_ranki_cards_queue_due ON cards (queue, due, id)",
+            )
+            .map_err(backend)
+    }
 }
 
 impl Store for Collection {
@@ -503,51 +511,60 @@ impl Store for Collection {
         Ok(ids)
     }
 
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "bounded queue queries stay together in one read path"
+    )]
     fn due_cards(
         &self,
         deck_id: Option<Id>,
         limit: usize,
         now_secs: i64,
     ) -> Result<Vec<Card>, StoreError> {
+        self.ensure_due_index()?;
         let limit_value =
             i64::try_from(limit).map_err(|_| invalid("limit too large"))?;
         if limit_value == 0 {
             return Ok(Vec::new());
         }
-        let filter = self.deck_filter(deck_id, 4)?;
+        let filter = self.deck_filter(deck_id, 3)?;
         if filter.missing {
             return Ok(Vec::new());
         }
-        let where_clause = if filter.clause.is_empty() {
-            String::new()
-        } else {
-            format!("AND {}", filter.clause)
-        };
         let now_ms = now_secs
             .checked_mul(1000)
             .ok_or_else(|| invalid("timestamp overflow"))?;
         let today = anki::day_number(now_secs, self.collection_created()?)?;
-        let sql = format!(
-            "SELECT c.id, c.nid, c.did, c.ord, c.mod, c.usn, c.type, c.queue, c.due, c.ivl, \
-             c.factor, c.reps, c.lapses, c.left, c.odue, c.odid, c.flags, c.data FROM cards c \
-             WHERE c.queue IN (0, 1, 2, 3) {where_clause} AND (c.queue = 0 OR (c.queue = 1 AND \
-             c.due <= ?1) OR (c.queue IN (2, 3) AND c.due <= ?2)) ORDER BY CASE c.queue WHEN 1 \
-             THEN 0 WHEN 3 THEN 1 WHEN 2 THEN 2 ELSE 3 END, c.due, c.id LIMIT ?3"
-        );
-        let mut parameters: Vec<SqlValue> = vec![
-            SqlValue::Integer(now_ms),
-            SqlValue::Integer(today),
-            SqlValue::Integer(limit_value),
-        ];
-        parameters.extend(filter.params);
-        let mut statement = self.conn.prepare(&sql).map_err(backend)?;
-        let rows = statement
-            .query_map(params_from_iter(parameters), records::card_from_row)
-            .map_err(backend)?;
-        let mut cards = Vec::new();
-        for row in rows {
-            cards.push(row.map_err(backend)?);
+        let deck_clause = if filter.clause.is_empty() {
+            String::new()
+        } else {
+            format!("AND {}", filter.clause)
+        };
+        let mut cards = Vec::with_capacity(limit);
+        for (queue, due) in [(1, now_ms), (3, today), (2, today), (0, i64::MAX)]
+        {
+            let sql = format!(
+                "SELECT c.id, c.nid, c.did, c.ord, c.mod, c.usn, c.type, c.queue, c.due, c.ivl, \
+                 c.factor, c.reps, c.lapses, c.left, c.odue, c.odid, c.flags, c.data FROM cards c \
+                 WHERE c.queue = ?1 AND c.due <= ?2 {deck_clause} ORDER BY c.due, c.id LIMIT ?{}",
+                filter.params.len().saturating_add(3)
+            );
+            let mut parameters =
+                vec![SqlValue::Integer(queue), SqlValue::Integer(due)];
+            parameters.extend(filter.params.iter().cloned());
+            parameters.push(SqlValue::Integer(limit_value));
+            let mut statement = self.conn.prepare(&sql).map_err(backend)?;
+            let rows = statement
+                .query_map(params_from_iter(parameters), records::card_from_row)
+                .map_err(backend)?;
+            for row in rows {
+                cards.push(row.map_err(backend)?);
+            }
+            if cards.len() >= limit {
+                break;
+            }
         }
+        cards.truncate(limit);
         Ok(cards)
     }
 
@@ -645,6 +662,18 @@ impl Store for Collection {
         decision: &ReviewDecision,
     ) -> Result<(), StoreError> {
         let transaction = self.conn.transaction().map_err(backend)?;
+        let current: Option<(i64, i32)> = transaction
+            .query_row(
+                "SELECT mod, usn FROM cards WHERE id = ?1",
+                [decision.card.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(backend)?;
+        if current != Some((decision.expected_modified, decision.expected_usn))
+        {
+            return Err(invalid("card changed since it was loaded"));
+        }
         let usn = update_col(&transaction, true)?;
         write_review(&transaction, usn, decision)?;
         transaction.commit().map_err(backend)?;
@@ -659,7 +688,8 @@ impl Store for Collection {
         let transaction = self.conn.transaction().map_err(backend)?;
         let logged = transaction
             .query_row(
-                "SELECT 1 FROM revlog WHERE id = ?1 AND cid = ?2",
+                "SELECT 1 FROM revlog WHERE id = ?1 AND cid = ?2 AND id = \
+                 (SELECT MAX(id) FROM revlog WHERE cid = ?2)",
                 params![revlog_id, before.id],
                 |_| Ok(()),
             )
@@ -1609,7 +1639,9 @@ mod tests {
         };
         collection
             .apply_review(&ReviewDecision {
-                card,
+                card: card.clone(),
+                expected_modified: card.modified,
+                expected_usn: card.usn,
                 revlog: log.clone(),
             })
             .unwrap();

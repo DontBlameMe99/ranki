@@ -3,7 +3,7 @@
 use std::{ops::Range, sync::Arc};
 
 use gpui::{
-    App, Bounds, Context, Element, ElementInputHandler, Entity,
+    App, Bounds, ContentMask, Context, Element, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
@@ -58,6 +58,7 @@ pub struct TextField {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    scroll_x: f32,
     selecting: bool,
     edit_hook: Option<EditHook>,
     secure: bool,
@@ -128,6 +129,7 @@ impl TextField {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            scroll_x: 0.0,
             selecting: false,
             edit_hook: None,
             secure: false,
@@ -321,7 +323,7 @@ impl TextField {
             self.content.len()
         };
         let index = line
-            .closest_index_for_x(point.x - bounds.left())
+            .closest_index_for_x(point.x - bounds.left() + px(self.scroll_x))
             .min(display_len);
         self.content_index(index)
     }
@@ -526,7 +528,9 @@ impl EntityInputHandler for TextField {
         } else {
             self.content.len()
         };
-        let index = line.index_for_x(line_point.x)?.min(display_len);
+        let index = line
+            .index_for_x(line_point.x + px(self.scroll_x))?
+            .min(display_len);
         Some(self.offset_to_utf16(self.content_index(index)))
     }
 }
@@ -626,6 +630,7 @@ struct PrepaintState {
     line: ShapedLine,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    scroll_x: f32,
 }
 
 impl IntoElement for TextElement {
@@ -718,12 +723,17 @@ impl Element for TextElement {
         let line = window
             .text_system()
             .shape_line(display, font_size, &runs, None);
-        let cursor_x = line.x_for_index(self.selected.end.min(line.len()));
+        let cursor_offset = self.input.read(cx).cursor_offset();
         let focus = self.input.read(cx).focus_handle().clone();
+        let cursor_x = line.x_for_index(cursor_offset.min(line.len()));
+        let scroll_x = (f32::from(cursor_x) + 16.0
+            - f32::from(bounds.size.width))
+        .max(0.0);
+        let scroll = px(scroll_x);
         let cursor = focus.is_focused(window).then(|| {
             fill(
                 Bounds::new(
-                    point(bounds.left() + cursor_x, bounds.top()),
+                    point(bounds.left() + cursor_x - scroll, bounds.top()),
                     size(px(2.), bounds.size.height),
                 ),
                 style.color,
@@ -733,11 +743,13 @@ impl Element for TextElement {
             Some(fill(
                 Bounds::from_corners(
                     point(
-                        bounds.left() + line.x_for_index(self.selected.start),
+                        bounds.left() + line.x_for_index(self.selected.start)
+                            - scroll,
                         bounds.top(),
                     ),
                     point(
-                        bounds.left() + line.x_for_index(self.selected.end),
+                        bounds.left() + line.x_for_index(self.selected.end)
+                            - scroll,
                         bounds.bottom(),
                     ),
                 ),
@@ -750,6 +762,7 @@ impl Element for TextElement {
             line,
             cursor,
             selection,
+            scroll_x,
         }
     }
 
@@ -769,22 +782,26 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
-        }
-        if let Err(error) =
-            prepaint
-                .line
-                .paint(bounds.origin, window.line_height(), window, cx)
-        {
-            eprintln!("ranki: cannot paint text field: {error}");
-        }
-        if let Some(cursor) = prepaint.cursor.take() {
-            window.paint_quad(cursor);
-        }
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection);
+            }
+            if let Err(error) = prepaint.line.paint(
+                point(bounds.origin.x - px(prepaint.scroll_x), bounds.origin.y),
+                window.line_height(),
+                window,
+                cx,
+            ) {
+                eprintln!("ranki: cannot paint text field: {error}");
+            }
+            if let Some(cursor) = prepaint.cursor.take() {
+                window.paint_quad(cursor);
+            }
+        });
         self.input.update(cx, |input, _| {
             input.last_layout = Some(prepaint.line.clone());
             input.last_bounds = Some(bounds);
+            input.scroll_x = prepaint.scroll_x;
         });
     }
 }

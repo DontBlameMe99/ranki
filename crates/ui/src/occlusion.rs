@@ -176,6 +176,24 @@ pub fn is_image_name(name: &str) -> bool {
     })
 }
 
+/// Image files in `dir`, sorted by name. A missing directory lists nothing.
+#[must_use]
+pub fn media_images(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names = entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_file())
+                && is_image_name(&entry.file_name().to_string_lossy())
+        })
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
 /// Copies `source` into the collection media directory and returns its file
 /// name. An existing name gets a numeric suffix so uploads never overwrite media.
 ///

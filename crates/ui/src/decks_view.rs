@@ -24,6 +24,12 @@ impl Root {
             .iter()
             .map(|deck| deck.name.clone())
             .collect::<HashSet<_>>();
+        let mut expanded = expanded;
+        for deck in &self.decks {
+            for (index, _) in deck.name.match_indices("::") {
+                let _ = expanded.insert(deck.name[..index].to_owned());
+            }
+        }
         let rows = app::build_deck_rows(&self.decks, &self.stats, &expanded);
         app::filter_decks(&rows, &query)
     }

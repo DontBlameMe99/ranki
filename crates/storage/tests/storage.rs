@@ -55,6 +55,28 @@ fn note(fields: &[&str], tags: &[&str]) -> NewNote {
 }
 
 #[test]
+fn due_query_uses_the_queue_index_for_each_priority_branch() {
+    let (_directory, path) = fixture();
+    let store = Collection::open(&path).expect("open");
+    let _ = store.due_cards(None, 1, now_secs()).expect("due");
+    let conn = read_only(&path);
+    let plan: Vec<String> = conn
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT id FROM cards WHERE queue = ?1 AND due <= ?2 \
+             ORDER BY due, id LIMIT ?3",
+        )
+        .expect("prepare")
+        .query_map([1_i64, i64::MAX, 20_i64], |row| row.get(3))
+        .expect("query")
+        .map(|row| row.expect("row"))
+        .collect();
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("idx_ranki_cards_queue_due")),
+        "{plan:?}"
+    );
+}
+#[test]
 fn create_writes_anki_schema_and_default_json() {
     let (_directory, path) = fixture();
     let conn = read_only(&path);
@@ -520,6 +542,8 @@ fn apply_review_updates_card_log_and_collection_metadata() {
     changed.interval = 4;
     let decision = ReviewDecision {
         card: changed,
+        expected_modified: card.modified,
+        expected_usn: card.usn,
         revlog: RevLog {
             id: 9_000,
             card_id: card.id,
@@ -596,6 +620,199 @@ fn undo_review_restores_card_and_deletes_log() {
     assert_eq!(
         store.card(before.id).expect("card").expect("exists"),
         unchanged
+    );
+}
+
+#[test]
+fn grade_undo_grade_uses_the_restored_revision() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(&["again", "answer"], &[]))
+        .expect("add");
+    let now = now_secs();
+    let before = store
+        .due_cards(None, 1, now)
+        .expect("due")
+        .pop()
+        .expect("card");
+    let scheduler = FsrsScheduler::default();
+    let decision = scheduler.schedule(
+        &before,
+        Rating::Good,
+        now,
+        store.collection_created().expect("created"),
+    );
+    store.apply_review(&decision).expect("grade");
+    assert!(
+        store
+            .undo_review(&before, decision.revlog.id)
+            .expect("undo")
+    );
+    let restored = store.card(before.id).expect("card").expect("exists");
+    let retry = scheduler.schedule(
+        &restored,
+        Rating::Good,
+        now,
+        store.collection_created().expect("created"),
+    );
+    store.apply_review(&retry).expect("grade after undo");
+    assert_eq!(store.review_history().expect("history").len(), 1);
+}
+
+#[test]
+fn stale_review_writes_are_rejected() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(&["stale", "answer"], &[]))
+        .expect("add");
+    let now = now_secs();
+    let card = store
+        .due_cards(None, 1, now)
+        .expect("due")
+        .pop()
+        .expect("card");
+    let decision = FsrsScheduler::default().schedule(
+        &card,
+        Rating::Good,
+        now,
+        store.collection_created().expect("created"),
+    );
+    let conn = Connection::open(&path).expect("open");
+    conn.execute("UPDATE cards SET mod = mod + 10 WHERE id = ?1", [card.id])
+        .expect("external write");
+    drop(conn);
+    assert!(store.apply_review(&decision).is_err());
+    assert_eq!(
+        store.review_history().expect("history"),
+        [] as [ranki_model::RevLog; 0]
+    );
+}
+
+#[test]
+fn second_review_with_the_same_stamp_is_rejected() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(&["race", "answer"], &[]))
+        .expect("add");
+    let now = now_secs();
+    let card = store
+        .due_cards(None, 1, now)
+        .expect("due")
+        .pop()
+        .expect("card");
+    let scheduler = FsrsScheduler::default();
+    let first = scheduler.schedule(
+        &card,
+        Rating::Good,
+        now,
+        store.collection_created().expect("created"),
+    );
+    let second = first.clone();
+    store.apply_review(&first).expect("first write");
+    assert!(store.apply_review(&second).is_err());
+    assert_eq!(store.review_history().expect("history").len(), 1);
+}
+
+#[test]
+fn review_of_an_older_card_is_accepted() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(&["older", "answer"], &[]))
+        .expect("add");
+    let now = now_secs();
+    {
+        let conn = Connection::open(&path).expect("open");
+        conn.execute("UPDATE cards SET mod = ?1", [now.saturating_sub(3600)])
+            .expect("age card");
+    }
+    let card = store
+        .due_cards(None, 1, now)
+        .expect("due")
+        .pop()
+        .expect("card");
+    let decision = FsrsScheduler::default().schedule(
+        &card,
+        Rating::Good,
+        now,
+        store.collection_created().expect("created"),
+    );
+    store.apply_review(&decision).expect("apply older card");
+    assert_eq!(store.review_history().expect("history").len(), 1);
+}
+
+#[test]
+fn stats_excludes_future_day_learning_cards() {
+    let (_directory, path) = fixture();
+    let created = 1_685_412_000_i64;
+    let now = created.saturating_add(86_400);
+    {
+        let conn = Connection::open(&path).expect("open");
+        conn.execute("UPDATE col SET crt = ?1 WHERE id = 1", [created])
+            .expect("set crt");
+        for (id, due) in [(31_i64, 1_i64), (32, 2)] {
+            conn.execute(
+                "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, \
+                 reps, lapses, left, odue, odid, flags, data) VALUES (?1, 1, 1, 0, 0, 0, 2, 3, \
+                 ?2, 1, 0, 0, 0, 0, 0, 0, 0, '')",
+                [id, due],
+            )
+            .expect("insert");
+        }
+    }
+    let store = Collection::open(&path).expect("open");
+    let stats = store.stats(None, now).expect("stats");
+    assert_eq!(stats.total_cards, 2);
+    assert_eq!(stats.learning_cards, 1);
+}
+
+#[test]
+fn due_stats_count_only_cards_due_now() {
+    let (_directory, path) = fixture();
+    let created = 1_685_412_000_i64;
+    let now = created.saturating_add(86_400);
+    {
+        let conn = Connection::open(&path).expect("open");
+        conn.execute("UPDATE col SET crt = ?1 WHERE id = 1", [created])
+            .expect("set crt");
+        for (id, queue, due) in [
+            (21_i64, 0_i64, 0_i64),
+            (22, 1, now.saturating_mul(1_000)),
+            (23, 3, 1_i64),
+            (24, 2, 2_i64),
+            (25, 2, 1_i64),
+        ] {
+            conn.execute(
+                "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, \
+                 reps, lapses, left, odue, odid, flags, data) VALUES (?1, 1, 1, 0, 0, 0, ?2, ?3, \
+                 ?4, 1, 0, 0, 0, 0, 0, 0, 0, '')",
+                [id, 2_i64, queue, due],
+            )
+            .expect("insert");
+        }
+    }
+    let store = Collection::open(&path).expect("open");
+    let all = store.stats(None, now).expect("stats");
+    let due = store
+        .deck_stats(now)
+        .expect("deck stats")
+        .into_iter()
+        .find(|(id, _)| *id == 1)
+        .map(|(_, stats)| stats)
+        .unwrap_or_default();
+    assert_eq!(all.total_cards, 5);
+    assert_eq!(all.new_cards, 1);
+    assert_eq!(due.new_cards, 1);
+    assert_eq!(due.learning_cards, 2);
+    assert_eq!(due.review_cards, 1);
+    assert_eq!(
+        due.new_cards
+            .saturating_add(due.learning_cards)
+            .saturating_add(due.review_cards),
+        4
     );
 }
 
@@ -863,10 +1080,13 @@ fn remove_deck_deletes_subtree_cards_notes_revlog_and_writes_graves() {
     let mut entry = note(&["question", "answer"], &["tag"]);
     entry.deck_id = child.id;
     let card_id = store.add_note(&entry).expect("add")[0];
-    let note_id = store.card(card_id).expect("card").expect("exists").note_id;
+    let card = store.card(card_id).expect("card").expect("exists");
+    let note_id = card.note_id;
     let log_id = 9_002_i64;
     let decision = ReviewDecision {
-        card: store.card(card_id).expect("card").expect("exists"),
+        card: card.clone(),
+        expected_modified: card.modified,
+        expected_usn: card.usn,
         revlog: RevLog {
             id: log_id,
             card_id,
@@ -964,7 +1184,9 @@ fn remove_deck_keeps_notes_that_still_have_cards() {
     let mut moved = store.card(cards[1]).expect("card").expect("exists");
     moved.deck_id = other.id;
     let decision = ReviewDecision {
-        card: moved,
+        card: moved.clone(),
+        expected_modified: moved.modified,
+        expected_usn: moved.usn,
         revlog: RevLog {
             id: 9_003_i64,
             card_id: cards[1],
@@ -1128,6 +1350,8 @@ fn apply_reviews_writes_a_batch_atomically() {
         changed.interval = 4;
         decisions.push(ReviewDecision {
             card: changed,
+            expected_modified: card.modified,
+            expected_usn: card.usn,
             revlog: RevLog {
                 id: 20_000 + i64::from(index),
                 card_id: card.id,

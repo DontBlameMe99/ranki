@@ -47,6 +47,7 @@ actions!(
         GradeGood,
         GradeEasy,
         Retry,
+        Reload,
         Undo,
         StudyAgain,
         EndSession,
@@ -137,6 +138,7 @@ pub struct DeckMenu {
 pub enum Confirmation {
     RemoveDeck { id: Id, name: String },
     SwitchScheduler { kind: SchedulerKind },
+    Reload,
 }
 
 /// Tone of a toast. Errors keep the red role, everything else reports a
@@ -222,7 +224,7 @@ impl OcclusionState {
 
 /// Add-card form state.
 pub struct AddState {
-    pub deck_index: usize,
+    pub deck_id: Option<Id>,
     pub model_index: usize,
     pub fields: Vec<Entity<TextField>>,
     pub tags: Entity<TextField>,
@@ -230,6 +232,9 @@ pub struct AddState {
     pub preview_side: Side,
     pub errors: BTreeMap<String, String>,
     pub added: Vec<AddedNote>,
+    pub media_filter: Entity<TextField>,
+    pub deck_filter: Entity<TextField>,
+    pub deck_picker: bool,
     pub occlusion: OcclusionState,
 }
 
@@ -275,6 +280,10 @@ pub struct ReviewState {
     pub progress_from: f32,
     /// Last grade this session, cleared once it is undone or replaced.
     pub last_grade: Option<UndoEntry>,
+    pub previews: [i32; 4],
+    pub more_due: bool,
+    pub load_errors: usize,
+    pub load_error: Option<String>,
 }
 
 /// Root entity. The store boundary stays identical to the previous UI.
@@ -317,6 +326,7 @@ pub struct Root {
     pub(crate) save_settings: SettingsSaver,
     pub(crate) images: Entity<card_view::LruImageCache>,
     pub(crate) font_family: &'static str,
+    pub(crate) last_change_check: Instant,
 }
 
 /// Values the window needs before the root entity exists.
@@ -412,6 +422,8 @@ impl Root {
         let browse_hook = Self::browse_edit_hook(cx);
         browse_search.update(cx, |field, _| field.set_edit_hook(browse_hook));
         let create_field = cx.new(|cx| make_field(cx, "Deck name"));
+        let deck_filter = cx.new(|cx| make_field(cx, "Search decks"));
+        let media_filter = cx.new(|cx| make_field(cx, "Filter images"));
         let rename_field = cx.new(|cx| make_field(cx, "New name"));
         let tags = cx.new(|cx| make_field(cx, "Add a tag"));
         let tag_hook = Self::tag_hook(cx);
@@ -464,7 +476,7 @@ impl Root {
             confirmation: None,
             review: ReviewState::default(),
             add: AddState {
-                deck_index: 0,
+                deck_id: None,
                 model_index: 0,
                 fields: Vec::new(),
                 tags,
@@ -472,6 +484,9 @@ impl Root {
                 preview_side: Side::Question,
                 errors: BTreeMap::new(),
                 added: Vec::new(),
+                media_filter,
+                deck_filter,
+                deck_picker: false,
                 occlusion: OcclusionState::default(),
             },
             toast: None,
@@ -490,6 +505,7 @@ impl Root {
             last_sync: sync_state.as_ref().and_then(|state| state.last_success),
             save_settings,
             images: card_view::LruImageCache::new(cx),
+            last_change_check: Instant::now(),
             font_family: theme::ui_font_family(),
         };
         root.reload(cx);
@@ -728,7 +744,75 @@ impl Root {
             .unwrap_or(0)
     }
 
+    fn record_local_write(&mut self) {
+        if let Ok(stamp) = self.store.collection_modified() {
+            self.collection_modified = stamp;
+        }
+        self.last_change_check = Instant::now();
+    }
+
+    fn poll_external_change(&mut self, cx: &mut Context<Self>) {
+        if self.external_change
+            || self.last_change_check.elapsed() < Duration::from_secs(1)
+        {
+            return;
+        }
+        self.last_change_check = Instant::now();
+        if self
+            .store
+            .collection_modified()
+            .is_ok_and(|stamp| stamp != self.collection_modified)
+        {
+            self.external_change = true;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn start_external_change_poll(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                if this.update(cx, Self::poll_external_change).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn reload_collection(&mut self, cx: &mut Context<Self>) {
+        self.review = ReviewState::default();
+        self.view = View::Decks;
+        self.previous_view = View::Decks;
+        self.add.deck_picker = false;
+        self.reload(cx);
+    }
+
+    fn request_reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.review.current.is_some() || self.review.answered > 0 {
+            self.confirmation = Some(Confirmation::Reload);
+            window.focus(&self.dialog_focus);
+        } else {
+            self.reload_collection(cx);
+        }
+        cx.notify();
+    }
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
+        let selected_id = self
+            .selected
+            .and_then(|index| self.decks.get(index))
+            .map(|deck| deck.id);
+        let draft_fields = self
+            .add
+            .fields
+            .iter()
+            .map(|field| field.read(cx).text())
+            .collect::<Vec<_>>();
+        let previous_fields = self
+            .models
+            .get(self.add.model_index)
+            .map(|model| model.fields.clone())
+            .unwrap_or_default();
         match self.store.decks() {
             Ok(decks) => self.decks = decks,
             Err(error) => {
@@ -753,8 +837,8 @@ impl Root {
                 );
             }
         }
-        if let Some(name) = chosen
-            && let Some(index) = model_index(&self.models, &name)
+        if let Some(name) = chosen.as_ref()
+            && let Some(index) = model_index(&self.models, name)
         {
             self.add.model_index = index;
         }
@@ -773,15 +857,51 @@ impl Root {
         self.collection_modified =
             self.store.collection_modified().unwrap_or(0);
         self.external_change = false;
-        if self.selected.is_none_or(|index| index >= self.decks.len()) {
-            self.selected = (!self.decks.is_empty()).then_some(0);
+        if let Some(id) = selected_id {
+            self.selected = self.decks.iter().position(|deck| deck.id == id);
+        }
+        if self.selected.is_none() && !self.decks.is_empty() {
+            self.selected = Some(0);
+        }
+        if self.add.deck_id.is_some() && self.add_deck_index().is_none() {
+            self.add.deck_id = self
+                .selected
+                .and_then(|index| self.decks.get(index))
+                .map(|deck| deck.id);
+        }
+        if self.add.deck_id.is_none() && !self.decks.is_empty() {
+            self.add.deck_id = self
+                .selected
+                .and_then(|index| self.decks.get(index))
+                .map(|deck| deck.id);
         }
         self.reset_fields(cx);
+        let model_fields = self
+            .models
+            .get(self.add.model_index)
+            .map(|model| model.fields.clone())
+            .unwrap_or_default();
+        for (index, field) in self.add.fields.iter().enumerate() {
+            let Some(name) = model_fields.get(index) else {
+                continue;
+            };
+            let Some(old_index) = previous_fields
+                .iter()
+                .position(|old| old.eq_ignore_ascii_case(name))
+            else {
+                continue;
+            };
+            if let Some(value) = draft_fields.get(old_index) {
+                field.update(cx, |field, cx| field.seed(value.clone(), cx));
+            }
+        }
         cx.notify();
     }
 
-    /// Recomputes per-deck counts without rebuilding the add-card fields.
+    /// Recomputes due counts, the forecast, and deck rows.
     fn refresh_stats(&mut self) {
+        self.stats = vec![ranki_model::DeckStats::default(); self.decks.len()];
+        self.rebuild_deck_rows();
         let now = Self::now();
         self.stats = match self.store.deck_stats(now) {
             Ok(stats) => {
@@ -963,6 +1083,39 @@ impl Root {
         }
         cx.notify();
     }
+    pub(crate) fn add_deck_index(&self) -> Option<usize> {
+        self.add
+            .deck_id
+            .and_then(|id| self.decks.iter().position(|deck| deck.id == id))
+    }
+    pub(crate) fn select_add_deck(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if index >= self.decks.len() {
+            return;
+        }
+        self.add.deck_id = self.decks.get(index).map(|deck| deck.id);
+        self.add.deck_picker = false;
+        let _ = self.add.errors.remove("deck");
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_add_deck_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add.deck_picker = !self.add.deck_picker;
+        if self.add.deck_picker {
+            let filter = self.add.deck_filter.read(cx).focus_handle().clone();
+            window.focus(&filter);
+        } else {
+            window.focus(&self.focus);
+        }
+        cx.notify();
+    }
 
     /// Copies a chosen image into the media directory for the occlusion editor.
     pub(crate) fn upload_occlusion_image(&mut self, cx: &mut Context<Self>) {
@@ -1003,7 +1156,9 @@ impl Root {
         name: String,
         cx: &mut Context<Self>,
     ) {
-        if self.add.occlusion.image.as_deref() != Some(name.as_str()) {
+        if self.add.occlusion.image.is_some()
+            && self.add.occlusion.image.as_deref() != Some(name.as_str())
+        {
             self.add.occlusion.masks.clear();
             self.add.occlusion.selected = None;
         }
@@ -1023,8 +1178,10 @@ impl Root {
         let _ = self.add.errors.remove("masks");
         cx.notify();
     }
-
     pub(crate) fn add_default_mask(&mut self, cx: &mut Context<Self>) {
+        if self.add.occlusion.image.is_none() {
+            return;
+        }
         let mask = default_mask(self.add.occlusion.masks.len());
         self.add_occlusion_mask(mask, cx);
     }
@@ -1070,7 +1227,9 @@ impl Root {
         position: (f32, f32),
         cx: &mut Context<Self>,
     ) {
-        if let Some(pointer) = self.add.occlusion.pointer(position) {
+        if self.add.occlusion.image.is_some()
+            && let Some(pointer) = self.add.occlusion.pointer(position)
+        {
             let corner = (pointer.0, pointer.1, pointer.0, pointer.1);
             self.add.occlusion.drag = Some(corner);
             cx.notify();
@@ -1125,7 +1284,10 @@ impl Root {
     }
 
     /// Image Occlusion field values in the stock model order.
-    fn occlusion_fields(&self, cx: &mut Context<Self>) -> Vec<String> {
+    pub(crate) fn occlusion_fields(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Vec<String> {
         let field = |index: usize, cx: &mut Context<Self>| {
             self.add
                 .fields
@@ -1157,6 +1319,7 @@ impl Root {
             ) {
                 Ok(cards) => self.review.queue.extend(cards),
                 Err(error) => {
+                    self.review.load_error = Some(error.to_string());
                     self.show_toast(
                         ToastKind::Error,
                         format!("Could not load cards: {error}"),
@@ -1182,6 +1345,7 @@ impl Root {
         {
             Ok(cards) => self.review.queue.extend(cards),
             Err(error) => {
+                self.review.load_error = Some(error.to_string());
                 self.show_toast(
                     ToastKind::Error,
                     format!("Could not load cards: {error}"),
@@ -1223,6 +1387,8 @@ impl Root {
             &self.create_field,
             &self.rename_field,
             &self.add.tags,
+            &self.add.media_filter,
+            &self.add.deck_filter,
         ];
         for field in fields {
             field.update(cx, |field, _| field.set_placeholder_color(color));
@@ -1241,6 +1407,8 @@ impl Root {
             }
             let _ = self.review.seen.insert(card.id);
             if !self.load_card(&card, cx) {
+                self.review.load_errors =
+                    self.review.load_errors.saturating_add(1);
                 continue;
             }
             break;
@@ -1250,6 +1418,19 @@ impl Root {
             self.review.answer = None;
             self.review.note = None;
             self.review.progress_from = self.progress_fraction();
+            if self.review.load_error.is_none() {
+                let scope = if self.review.scope_all {
+                    None
+                } else {
+                    self.selected
+                        .and_then(|index| self.decks.get(index))
+                        .map(|deck| deck.id)
+                };
+                self.review.more_due = self
+                    .store
+                    .due_cards(scope, 1, Self::now())
+                    .is_ok_and(|cards| !cards.is_empty());
+            }
             self.refresh_stats();
         }
     }
@@ -1272,40 +1453,38 @@ impl Root {
         card: &Card,
         cx: &mut Context<Self>,
     ) -> Option<LoadedCard> {
-        let note = match self.store.note(card.note_id) {
-            Ok(note) => note,
-            Err(error) => {
-                self.show_toast(
-                    ToastKind::Error,
-                    format!("Could not load card: {error}"),
-                    cx,
-                );
-                return None;
-            }
+        let Some(note) = self.store.note(card.note_id).ok().flatten() else {
+            self.show_toast(
+                ToastKind::Error,
+                format!("Card {} has no readable note", card.id),
+                cx,
+            );
+            return None;
         };
-        let model = note.as_ref().and_then(|note| {
+        let Some(model) =
             self.models.iter().find(|model| model.id == note.model_id)
-        });
-        let (question, answer) = match (note.as_ref(), model) {
-            (Some(note), Some(model)) => (
-                Some(card_view::render_card(
-                    model,
-                    note,
-                    card_view::CardRequest::question(card.ordinal),
-                )),
-                Some(card_view::render_card(
-                    model,
-                    note,
-                    card_view::CardRequest::answer_only(card.ordinal),
-                )),
-            ),
-            _ => (None, None),
+        else {
+            self.show_toast(
+                ToastKind::Error,
+                format!("Card {} has no note type", card.id),
+                cx,
+            );
+            return None;
         };
-        let _ = cx;
+        let question = card_view::render_card(
+            model,
+            &note,
+            card_view::CardRequest::question(card.ordinal),
+        );
+        let answer = card_view::render_card(
+            model,
+            &note,
+            card_view::CardRequest::answer_only(card.ordinal),
+        );
         Some(LoadedCard {
-            note,
-            question,
-            answer,
+            note: Some(note),
+            question: Some(question),
+            answer: Some(answer),
         })
     }
 
@@ -1314,7 +1493,7 @@ impl Root {
         &mut self,
         card: &Card,
         loaded: LoadedCard,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
         self.review.phase = if self.dev_reveal {
             Phase::Answer
@@ -1327,16 +1506,55 @@ impl Root {
         self.review.answer = loaded.answer;
         self.review.last_tick = Some(Instant::now());
         self.review.last_grade_at = Some(Instant::now());
-        let _ = cx;
+        self.refresh_previews();
     }
 
     pub(crate) fn reveal(&mut self, cx: &mut Context<Self>) {
-        if self.review.current.is_some() && self.review.phase == Phase::Question
-        {
-            self.review.phase = Phase::Answer;
-            self.review.last_tick = Some(Instant::now());
-            cx.notify();
+        if self.view != View::Review {
+            return;
         }
+        match self.review.phase {
+            Phase::Question => {
+                self.review.phase = Phase::Answer;
+                self.review.last_tick = Some(Instant::now());
+                cx.notify();
+            }
+            Phase::Answer => self.grade(ranki_model::Rating::Good, cx),
+        }
+    }
+
+    pub(crate) fn toggle_reveal(&mut self, cx: &mut Context<Self>) {
+        if self.view != View::Review || self.review.current.is_none() {
+            return;
+        }
+        self.review.phase = match self.review.phase {
+            Phase::Question => Phase::Answer,
+            Phase::Answer => Phase::Question,
+        };
+        self.review.last_tick = Some(Instant::now());
+        cx.notify();
+    }
+
+    fn refresh_previews(&mut self) {
+        let Some(card) = self.review.current.as_ref() else {
+            return;
+        };
+        let now = Self::now();
+        let start = self.collection_start;
+        self.review.previews = [
+            self.scheduler.preview(
+                card,
+                ranki_model::Rating::Again,
+                now,
+                start,
+            ),
+            self.scheduler
+                .preview(card, ranki_model::Rating::Hard, now, start),
+            self.scheduler
+                .preview(card, ranki_model::Rating::Good, now, start),
+            self.scheduler
+                .preview(card, ranki_model::Rating::Easy, now, start),
+        ];
     }
 
     pub(crate) fn grade(&mut self, rating: Rating, cx: &mut Context<Self>) {
@@ -1365,6 +1583,7 @@ impl Root {
             self.collection_start,
         );
         let before_progress = self.progress_fraction();
+        self.poll_external_change(cx);
         if let Err(error) = self.store.apply_review(&decision) {
             self.show_toast(
                 ToastKind::Error,
@@ -1374,6 +1593,8 @@ impl Root {
             cx.notify();
             return;
         }
+
+        self.record_local_write();
         self.review.answered = self.review.answered.saturating_add(1);
         if rating == Rating::Again {
             self.review.again_count = self.review.again_count.saturating_add(1);
@@ -1421,9 +1642,7 @@ impl Root {
         let Some(entry) = self.review.last_grade.clone() else {
             return;
         };
-        let Some(loaded) = self.render_state(&entry.card, cx) else {
-            return;
-        };
+        self.poll_external_change(cx);
         match self.store.undo_review(&entry.card, entry.revlog_id) {
             Ok(false) => {
                 self.review.last_grade = None;
@@ -1452,7 +1671,22 @@ impl Root {
                     self.review.queue.push_front(current);
                 }
                 let _ = self.review.seen.remove(&entry.card.id);
-                self.apply_loaded(&entry.card, loaded, cx);
+                let Some(restored) =
+                    self.store.card(entry.card.id).ok().flatten()
+                else {
+                    self.show_toast(
+                        ToastKind::Error,
+                        "Could not reload the undone card",
+                        cx,
+                    );
+                    return;
+                };
+                let Some(loaded) = self.render_state(&restored, cx) else {
+                    return;
+                };
+                self.apply_loaded(&restored, loaded, cx);
+                self.review.last_grade_at = None;
+                self.record_local_write();
                 self.review.focused_elapsed = entry.spent;
                 self.review.studied =
                     self.review.studied.saturating_sub(entry.spent);
@@ -1494,8 +1728,9 @@ impl Root {
             Some(Confirmation::SwitchScheduler { kind }) => {
                 self.options.scheduler = kind;
                 self.scheduler = scheduler_from_options(&self.options);
-                self.clear_toast();
+                self.refresh_previews();
             }
+            Some(Confirmation::Reload) => self.reload_collection(cx),
             None => {}
         }
         cx.notify();
@@ -1569,7 +1804,13 @@ impl Root {
     }
 
     pub(crate) fn save_note(&mut self, cx: &mut Context<Self>) {
-        let Some(deck) = self.decks.get(self.add.deck_index).cloned() else {
+        if self.view != View::AddCard {
+            return;
+        }
+        let deck_index = self.add_deck_index();
+        let Some(deck) =
+            deck_index.and_then(|index| self.decks.get(index)).cloned()
+        else {
             self.add
                 .errors
                 .insert("deck".into(), "Choose a deck first".into());
@@ -1629,6 +1870,7 @@ impl Root {
             fields,
             tags,
         };
+        self.poll_external_change(cx);
         match self.store.add_note(&note) {
             Ok(ids) => {
                 self.add.added.push(AddedNote {
@@ -1649,8 +1891,8 @@ impl Root {
                 self.add.errors.clear();
                 self.add.occlusion.masks.clear();
                 self.add.occlusion.selected = None;
-                self.add.occlusion.image = None;
-                self.reload(cx);
+                self.refresh_stats();
+                self.record_local_write();
                 self.show_toast(
                     ToastKind::Success,
                     format!("Added {count} cards"),
@@ -1710,12 +1952,15 @@ impl Root {
             UiAction::Grade(Rating::Hard) => self.grade(Rating::Hard, cx),
             UiAction::Grade(Rating::Good) => self.grade(Rating::Good, cx),
             UiAction::Grade(Rating::Easy) => self.grade(Rating::Easy, cx),
-            UiAction::Retry => self.reveal(cx),
+            UiAction::Retry => self.toggle_reveal(cx),
+            UiAction::Reload => self.request_reload(window, cx),
             UiAction::Undo => self.undo_grade(cx),
             UiAction::StudyAgain => {
                 if self.view == View::Review
                     && self.review.current.is_none()
-                    && self.review.answered > 0
+                    && (self.review.answered > 0
+                        || self.review.load_errors > 0
+                        || self.review.load_error.is_some())
                 {
                     self.study_again(cx);
                 }
@@ -1723,6 +1968,10 @@ impl Root {
             UiAction::EndSession => {
                 if self.view == View::Review {
                     self.end_session(cx);
+                } else if self.view == View::AddCard && self.add.deck_picker {
+                    self.add.deck_picker = false;
+                    window.focus(&self.focus);
+                    cx.notify();
                 } else if self.confirmation.is_some() || self.help_open {
                     self.confirmation = None;
                     self.help_open = false;
@@ -1751,6 +2000,12 @@ impl Root {
             }
             UiAction::OpenAdd => {
                 if self.view != View::AddCard {
+                    if let Some(deck) =
+                        self.selected.and_then(|index| self.decks.get(index))
+                    {
+                        self.add.deck_id = Some(deck.id);
+                    }
+                    self.add.deck_picker = false;
                     self.previous_view = self.view;
                 }
                 self.view = next_view(self.view, View::AddCard);
@@ -1840,6 +2095,7 @@ pub enum UiAction {
     Reveal,
     Grade(Rating),
     Retry,
+    Reload,
     Undo,
     StudyAgain,
     EndSession,
@@ -1892,6 +2148,11 @@ impl From<&GradeEasy> for UiAction {
 impl From<&Retry> for UiAction {
     fn from(_: &Retry) -> Self {
         Self::Retry
+    }
+}
+impl From<&Reload> for UiAction {
+    fn from(_: &Reload) -> Self {
+        Self::Reload
     }
 }
 impl From<&Undo> for UiAction {
@@ -2026,6 +2287,7 @@ pub fn dispatch_app_action(
             window.dispatch_action(Box::new(GradeEasy), cx);
         }
         UiAction::Retry => window.dispatch_action(Box::new(Retry), cx),
+        UiAction::Reload => window.dispatch_action(Box::new(Reload), cx),
         UiAction::Undo => window.dispatch_action(Box::new(Undo), cx),
         UiAction::StudyAgain => {
             window.dispatch_action(Box::new(StudyAgain), cx);
@@ -2096,6 +2358,7 @@ impl Render for Root {
         cx: &mut Context<Self>,
     ) -> impl gpui::IntoElement {
         self.tick_focus(window);
+        self.poll_external_change(cx);
         let colors = self.colors();
         let view = self.view;
         let main = match view {
@@ -2133,6 +2396,9 @@ impl Render for Root {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
             .on_action(cx.listener(|this, action: &Retry, window, cx| {
+                this.dispatch(UiAction::from(action), window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &Reload, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
             .on_action(cx.listener(|this, action: &Undo, window, cx| {
@@ -2243,15 +2509,17 @@ fn add_deck_stats(total: &mut DeckStats, counts: DeckStats) {
 /// Sums only decks that are not prefixes of another deck.
 #[must_use]
 pub fn leaf_deck_totals(decks: &[Deck], stats: &[DeckStats]) -> DeckStats {
+    let names = decks
+        .iter()
+        .map(|deck| deck.name.as_str())
+        .collect::<HashSet<_>>();
     let mut total = DeckStats::default();
     for (index, deck) in decks.iter().enumerate() {
-        let is_parent = decks.iter().any(|other| {
-            other
-                .name
-                .strip_prefix(deck.name.as_str())
-                .is_some_and(|rest| rest.starts_with("::"))
-        });
-        if is_parent {
+        let is_nested = deck
+            .name
+            .match_indices("::")
+            .any(|(index, _)| names.contains(&deck.name[..index]));
+        if is_nested {
             continue;
         }
         let Some(stat) = stats.get(index) else {
@@ -2360,8 +2628,11 @@ pub fn build_deck_rows(
         let Some(node) = nodes.get(position) else {
             continue;
         };
-        let mut total = node.total;
-        add_deck_stats(&mut total, node.own);
+        let total = if node.deck.is_some() {
+            node.own
+        } else {
+            node.total
+        };
         let parent = node.parent;
         if let Some(node) = nodes.get_mut(position) {
             node.total = total;
@@ -2546,18 +2817,20 @@ pub fn resolve_model(models: &[NoteModel], index: usize) -> Option<&NoteModel> {
     models.get(index)
 }
 
-/// Stock names surfaced when a collection has no note types yet.
+/// Short label for a note-type tab.
 #[must_use]
-pub fn note_type_name(model: &NoteModel) -> &'static str {
+pub fn note_type_name(model: &NoteModel) -> String {
     let name = model.name.to_lowercase();
     if model.is_image_occlusion() || name.contains("occlusion") {
-        "Image Occlusion"
+        String::from("Image Occlusion")
     } else if name.contains("cloze") {
-        "Cloze"
+        String::from("Cloze")
     } else if name.contains("reversed") {
-        "Reversed"
+        String::from("Reversed")
+    } else if name.starts_with("basic") {
+        String::from("Basic")
     } else {
-        "Basic"
+        model.name.clone()
     }
 }
 
@@ -2596,6 +2869,12 @@ pub fn validate_draft(
         let _ = errors.insert(
             "fields".to_owned(),
             "Cloze notes need a {{c1::answer}} marker".to_owned(),
+        );
+    }
+    if model.card_ordinals(fields).is_empty() {
+        let _ = errors.insert(
+            "fields".to_owned(),
+            "This note type would not create any cards".to_owned(),
         );
     }
     errors
@@ -2682,12 +2961,12 @@ pub fn status_label(last_sync: Option<i64>, now: i64) -> String {
 #[must_use]
 pub fn models_with_stock(installed: Vec<NoteModel>) -> Vec<NoteModel> {
     let mut models = installed;
-    for stock in ranki_model::stock_models() {
+    for kind in ranki_model::StockModelKind::ALL {
         let known = models
             .iter()
-            .any(|model| model.name.eq_ignore_ascii_case(&stock.name));
+            .any(|model| ranki_model::StockModelKind::of(model) == Some(kind));
         if !known {
-            models.push(stock);
+            models.push(kind.definition());
         }
     }
     models
@@ -2919,6 +3198,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("3", GradeGood, Some(STUDY_CONTEXT)),
         KeyBinding::new("4", GradeEasy, Some(STUDY_CONTEXT)),
         KeyBinding::new("r", Retry, Some(STUDY_CONTEXT)),
+        KeyBinding::new("enter", Reveal, Some(STUDY_CONTEXT)),
+        KeyBinding::new("f5", Reload, Some("ranki")),
         KeyBinding::new("ctrl-z", Undo, Some(STUDY_CONTEXT)),
         KeyBinding::new("s", StudyAgain, Some(STUDY_CONTEXT)),
         KeyBinding::new("d", OpenDecks, Some(STUDY_CONTEXT)),
@@ -2966,9 +3247,8 @@ mod tests {
         collect_tags, date_label, deck_meta, due_total, duration_label,
         empty_copy, empty_kind, filter_decks, focused_delta,
         forecast_bar_height, forecast_total, model_index, models_with_stock,
-        next_due_deck, next_view, note_type_name, queue_counts, relative_age,
-        session_progress, status_label, sum_leaf_counts, validate_draft,
-        validate_occlusion,
+        next_due_deck, next_view, queue_counts, relative_age, session_progress,
+        status_label, sum_leaf_counts, validate_draft, validate_occlusion,
     };
     #[test]
     fn session_progress_never_fills_an_empty_queue() {
@@ -3071,7 +3351,7 @@ mod tests {
     #[test]
     fn deck_tree_builds_stable_indented_rows() {
         let decks = [
-            deck(1, "A", 1, 1, 1),
+            deck(1, "A", 1, 1, 4),
             deck(2, "A::B", 2, 0, 3),
             deck(3, "Z", 0, 0, 0),
         ];
@@ -3102,6 +3382,17 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].depth, 1);
         assert_eq!(rows[1].name, "B");
+    }
+    #[test]
+    fn review_keys_are_bound_where_they_are_advertised() {
+        let mut keymap = gpui::Keymap::default();
+        keymap.add_bindings(super::key_bindings());
+        let root = [gpui::KeyContext::parse("ranki").expect("ranki context")];
+        for (key, expected) in [("enter", 1), ("r", 1), ("f5", 1)] {
+            let stroke = gpui::Keystroke::parse(key).expect("keystroke");
+            let (bindings, _) = keymap.bindings_for_input(&[stroke], &root);
+            assert_eq!(bindings.len(), expected, "{key}");
+        }
     }
 
     #[test]
@@ -3196,6 +3487,56 @@ mod tests {
         assert!(!rows[0].virtual_group);
         assert_eq!(rows[1].path, "A::B");
     }
+    #[test]
+    fn leaf_totals_keep_cards_owned_by_a_parent_deck() {
+        let decks = [deck(1, "A", 1, 0, 1), deck(2, "A::B", 1, 0, 0)];
+        let stats = [
+            ranki_model::DeckStats {
+                new_cards: 2,
+                total_cards: 2,
+                ..Default::default()
+            },
+            ranki_model::DeckStats {
+                new_cards: 1,
+                total_cards: 1,
+                ..Default::default()
+            },
+        ];
+        let deck_list = decks
+            .iter()
+            .map(|(deck, _)| deck.clone())
+            .collect::<Vec<_>>();
+        let total = super::leaf_deck_totals(&deck_list, &stats);
+        assert_eq!(due_total(total), 2);
+        assert_eq!(total.total_cards, 2);
+    }
+
+    #[test]
+    fn explicit_parent_stats_are_not_added_to_children_twice() {
+        let decks = [deck(1, "A", 1, 0, 0), deck(2, "A::B", 1, 0, 0)];
+        let stats = [
+            ranki_model::DeckStats {
+                new_cards: 2,
+                total_cards: 2,
+                ..Default::default()
+            },
+            ranki_model::DeckStats {
+                new_cards: 1,
+                total_cards: 1,
+                ..Default::default()
+            },
+        ];
+        let rows = build_deck_rows(
+            &decks
+                .iter()
+                .map(|(deck, _)| deck.clone())
+                .collect::<Vec<_>>(),
+            &stats,
+            &std::collections::HashSet::default(),
+        );
+        assert_eq!(rows[0].stats.new_cards, 2);
+        assert_eq!(rows[0].stats.total_cards, 2);
+    }
 
     #[test]
     fn leaf_sum_does_not_double_count_parents() {
@@ -3244,29 +3585,6 @@ mod tests {
         assert_eq!(paths("x"), ["A", "A::X"]);
         assert_eq!(paths("nothing"), Vec::<String>::new());
         assert_eq!(paths("").len(), 5);
-    }
-
-    #[test]
-    fn note_type_names_cover_stock_types() {
-        let model = NoteModel {
-            id: 1,
-            name: "Basic (and reversed card)".into(),
-            fields: vec![],
-            templates: vec![CardTemplate::default()],
-            css: String::new(),
-            kind: NoteKind::Normal,
-            original_stock_kind: None,
-            field_tags: vec![],
-            template_ordinals: vec![0],
-            raw_config: None,
-        };
-        assert_eq!(note_type_name(&model), "Reversed");
-        let cloze = NoteModel {
-            name: "Cloze".into(),
-            kind: NoteKind::Cloze,
-            ..model
-        };
-        assert_eq!(note_type_name(&cloze), "Cloze");
     }
 
     #[test]
