@@ -135,14 +135,14 @@
     },
     "mcp/startup": {
       "budget_ms": 1000.0,
-      "median_ms": 1.9757099999999999,
+      "median_ms": 1.8662130000000001,
       "method": 1,
       "repeat": 1,
       "samples": 5,
-      "sha": "fb4ebbaf5993eeefd16d1db7960644d9dc6ecc4e",
-      "updated_at": "2026-11-25T21:04:09.900427+00:00",
+      "sha": "34bf53ff806d58ae83b994920fd666fdbd720d78",
+      "updated_at": "2026-11-25T22:00:18.405697+00:00",
       "warmup": 1,
-      "worst_median_ms": 2.059333
+      "worst_median_ms": 1.900362
     },
     "process/cli/decks": {
       "budget_ms": 500.0,
@@ -233,7 +233,7 @@
       "worst_median_ms": 0.12679600000000002
     }
   },
-  "sha": "bff91fb88132ad88f46a90d4841b28f8dd742bf0",
+  "sha": "34bf53ff806d58ae83b994920fd666fdbd720d78",
   "version": 1,
   "workload_hash": "41c505710405ce82"
 }
