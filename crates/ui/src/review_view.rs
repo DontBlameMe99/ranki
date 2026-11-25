@@ -354,6 +354,7 @@ impl Root {
             summary.into_any_element()
         } else if current.is_none() {
             div()
+                .flex_1()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -365,7 +366,7 @@ impl Root {
                         .justify_center()
                         .gap(px(SPACE_GROUP))
                         .w(px(STAGE_WIDTH))
-                        .h(px(240.))
+                        .p(px(SPACE_GUTTER))
                         .rounded(px(STAGE_RADIUS))
                         .bg(colors.surface0)
                         .child(
@@ -374,16 +375,10 @@ impl Root {
                                 .font_weight(gpui::FontWeight::BOLD)
                                 .child("All caught up"),
                         )
-                        .child(
-                            div()
-                                .text_size(px(14.))
-                                .text_color(colors.subtext)
-                                .child("No cards are due right now"),
-                        )
                         .child(footer_button(
                             "Back to decks",
                             colors,
-                            false,
+                            true,
                             self.action_click(UiAction::EndSession),
                         ))
                         .into_any_element(),

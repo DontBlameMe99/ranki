@@ -2589,7 +2589,15 @@ impl Root {
         match action {
             UiAction::Reveal => self.reveal(cx),
             UiAction::Space => {
-                if self.session_complete() {
+                if self.view == View::Review
+                    && self.review.current.is_none()
+                    && self.review.load_errors == 0
+                    && self.review.load_error.is_none()
+                    && self
+                        .review
+                        .last_grade_at
+                        .is_none_or(|last| last.elapsed() >= DEBOUNCE)
+                {
                     self.end_session(cx);
                 } else {
                     self.reveal(cx);
