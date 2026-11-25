@@ -824,6 +824,15 @@ impl Root {
                 anchor: point(viewport.width - px(79.), px(423.)),
             });
         }
+        if env::var("RANKI_UI_DEV_CONFIRM")
+            .is_ok_and(|value| value == "remove-deck")
+            && let Some(deck) = root.decks.first()
+        {
+            root.confirmation = Some(Confirmation::RemoveDeck {
+                id: deck.id,
+                name: deck.name.clone(),
+            });
+        }
         if env::var("RANKI_UI_DEV_DECK_PICKER").is_ok_and(|value| value == "1")
         {
             root.view = View::AddCard;

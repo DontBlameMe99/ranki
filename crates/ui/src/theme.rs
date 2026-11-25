@@ -133,10 +133,15 @@ pub fn blend(from: Rgba, to: Rgba, amount: f32) -> Rgba {
     }
 }
 
-/// Hover shade for an accent fill: mauve lifted toward white.
+/// Hover shade for an accent fill: mauve lifted toward white in Mocha and
+/// pulled toward the text in Latte, so the label keeps its contrast either way.
 #[must_use]
 pub fn accent_hover(theme: Theme) -> Rgba {
-    blend(palette(theme).mauve, c(0xffffff), 0.12)
+    let colors = palette(theme);
+    match theme {
+        Theme::Dark => blend(colors.mauve, c(0xffffff), 0.12),
+        Theme::Light => blend(colors.mauve, colors.text, 0.12),
+    }
 }
 
 /// Pressed shade for an accent fill: mauve pulled toward crust.
@@ -144,6 +149,18 @@ pub fn accent_hover(theme: Theme) -> Rgba {
 pub fn accent_press(theme: Theme) -> Rgba {
     let colors = palette(theme);
     blend(colors.mauve, colors.crust, 0.14)
+}
+
+/// Hover shade for a red fill: red lifted toward white.
+#[must_use]
+pub fn danger_hover(theme: Theme) -> Rgba {
+    blend(palette(theme).red, c(0xffffff), 0.12)
+}
+
+/// Pressed shade for a red fill: red pulled toward crust.
+#[must_use]
+pub fn danger_press(theme: Theme) -> Rgba {
+    blend(palette(theme).red, palette(theme).crust, 0.14)
 }
 
 /// Keycap ink on a `surface1` notch. Mockup `subtext` reaches 4.2:1 at 11px,
@@ -533,6 +550,28 @@ pub fn interval_label(interval: i32) -> String {
     }
 }
 
+/// WCAG 2.1 relative luminance ratio for two opaque roles.
+#[cfg(test)]
+pub fn contrast(a: gpui::Rgba, b: gpui::Rgba) -> f32 {
+    let lum = |color: gpui::Rgba| {
+        let channel = |value: f32| {
+            if value <= 0.040_45 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.212_6 * channel(color.r)
+            + 0.715_2 * channel(color.g)
+            + 0.072_2 * channel(color.b)
+    };
+    let (high, low) = {
+        let (a, b) = (lum(a), lum(b));
+        if a >= b { (a, b) } else { (b, a) }
+    };
+    (high + 0.05) / (low + 0.05)
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::rgb;
@@ -543,10 +582,11 @@ mod tests {
         PAGE_X, PAGE_Y, PROGRESS_HEIGHT, PROGRESS_WIDTH, RATING_GAP,
         SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE, SPACE_RELATED,
         SPACE_SECTION, STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS, STAGE_WIDTH,
-        Theme, accent_hover, accent_press, alpha, blend, font_candidates,
-        gtk_animations_disabled, interval_label, kde_animations_disabled,
-        keycap_ink, palette, parse_flag_bool, placeholder_color, rating_fill,
-        rating_label, reduced_motion, resolve_theme, xdg_config_dir,
+        Theme, accent_hover, accent_press, alpha, blend, contrast,
+        font_candidates, gtk_animations_disabled, interval_label,
+        kde_animations_disabled, keycap_ink, palette, parse_flag_bool,
+        placeholder_color, rating_fill, rating_label, reduced_motion,
+        resolve_theme, xdg_config_dir,
     };
     use crate::ThemeChoice;
 
@@ -660,27 +700,6 @@ mod tests {
         assert_eq!(interval_label(60), "2mo");
         assert_eq!(interval_label(365), "1y");
     }
-    /// WCAG 2.1 relative luminance ratio for two opaque roles.
-    fn contrast(a: gpui::Rgba, b: gpui::Rgba) -> f32 {
-        let lum = |color: gpui::Rgba| {
-            let channel = |value: f32| {
-                if value <= 0.040_45 {
-                    value / 12.92
-                } else {
-                    ((value + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.212_6 * channel(color.r)
-                + 0.715_2 * channel(color.g)
-                + 0.072_2 * channel(color.b)
-        };
-        let (high, low) = {
-            let (a, b) = (lum(a), lum(b));
-            if a >= b { (a, b) } else { (b, a) }
-        };
-        (high + 0.05) / (low + 0.05)
-    }
-
     #[test]
     fn placeholders_clear_4_5_to_1_on_both_input_roles() {
         for theme in [Theme::Dark, Theme::Light] {
