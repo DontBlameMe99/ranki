@@ -25,25 +25,25 @@
   "metrics": {
     "connect/roundtrip/find-cards": {
       "budget_ms": 100.0,
-      "median_ms": 0.56595,
+      "median_ms": 0.5226919999999999,
       "method": 1,
       "repeat": 1,
       "samples": 10,
-      "sha": "fb4ebbaf5993eeefd16d1db7960644d9dc6ecc4e",
-      "updated_at": "2026-11-25T21:04:09.900427+00:00",
+      "sha": "5482c826f02a233325c7e67e842b8152b0b31e64",
+      "updated_at": "2026-11-25T22:26:47.688916+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.5820620000000001
+      "worst_median_ms": 0.560778
     },
     "connect/roundtrip/version": {
       "budget_ms": 100.0,
-      "median_ms": 0.103052,
+      "median_ms": 0.098165,
       "method": 1,
       "repeat": 1,
       "samples": 10,
-      "sha": "e1f1a72588c64a7c372680e1628c3aad697970b7",
-      "updated_at": "2026-11-25T18:13:27.565312+00:00",
+      "sha": "5482c826f02a233325c7e67e842b8152b0b31e64",
+      "updated_at": "2026-11-25T22:26:47.688916+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.121689
+      "worst_median_ms": 0.099565
     },
     "connect/startup": {
       "budget_ms": 1000.0,
@@ -80,14 +80,14 @@
     },
     "format/import-apkg": {
       "budget_ms": 1000.0,
-      "median_ms": 13.563253000000001,
+      "median_ms": 12.684828,
       "method": 1,
       "repeat": 1,
       "samples": 5,
-      "sha": "e1f1a72588c64a7c372680e1628c3aad697970b7",
-      "updated_at": "2026-11-25T18:13:27.565312+00:00",
+      "sha": "5482c826f02a233325c7e67e842b8152b0b31e64",
+      "updated_at": "2026-11-25T22:26:47.688916+00:00",
       "warmup": 2,
-      "worst_median_ms": 13.95338
+      "worst_median_ms": 13.408824
     },
     "gui/frame/idle": {
       "budget_ms": 100.0,
@@ -223,17 +223,17 @@
     },
     "storage/stats": {
       "budget_ms": 20.0,
-      "median_ms": 0.12485099999999999,
+      "median_ms": 0.123198,
       "method": 1,
       "repeat": 5,
       "samples": 10,
-      "sha": "e1f1a72588c64a7c372680e1628c3aad697970b7",
-      "updated_at": "2026-11-25T18:13:27.565312+00:00",
+      "sha": "5482c826f02a233325c7e67e842b8152b0b31e64",
+      "updated_at": "2026-11-25T22:26:47.688916+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.12679600000000002
+      "worst_median_ms": 0.123931
     }
   },
-  "sha": "34bf53ff806d58ae83b994920fd666fdbd720d78",
+  "sha": "5482c826f02a233325c7e67e842b8152b0b31e64",
   "version": 1,
   "workload_hash": "41c505710405ce82"
 }
