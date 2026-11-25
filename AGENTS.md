@@ -37,5 +37,23 @@ printed screenshot paths, then remove the temporary directory.
 To drive the app interactively, run `scripts/visual-check.sh session`. Source the
 printed env file, then use `start_ranki gui`, `focus_ranki`, `key`, `shot`,
 `stop_ranki`, and `stop_visual`. `key space`, `key enter`, and `key 3` work;
-`type_text` sends literal text. Never use Umbriel or system-wide input tools on
-the user's desktop for Ranki.
+`type_text` sends literal text.
+
+## Input safety
+
+The hidden sway session has no pointer device. `WLR_LIBINPUT_NO_DEVICES=1` keeps
+the user's physical devices out, and the headless backend does not accept virtual
+pointer events. Clicks and scrolls cannot be delivered through that display.
+
+`ydotool` and `xdotool` do not use `WAYLAND_DISPLAY`. `ydotool` talks to the global
+daemon at `/run/ydotoold/socket`, whose uinput device is part of the user's real
+session. Running it through `hidden` still moves the user's mouse. Umbriel tools
+also act on the real compositor. `wlrctl` virtual pointers do not work on the
+headless backend, so do not substitute them.
+
+Never use Umbriel input or screenshot tools, `ydotool`, `xdotool`, or any system-wide
+input tool for Ranki. Use `key`, `type_text`, `shot`, and the `RANKI_UI_DEV_*` hooks.
+For behavior that needs a click, add or use a dev hook so the action runs inside the
+app, then screenshot it. The harness sets `YDOTOOL_SOCKET` to a private path and masks
+`ydotool` and `xdotool` in the sourced session so stray calls fail without reaching
+the desktop.

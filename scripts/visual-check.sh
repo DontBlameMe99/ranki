@@ -15,6 +15,19 @@ host_runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 runtime="$host_runtime/ranki-visual.$$"
 mkdir -p "$runtime" "$dir/config/ranki" "$dir/collection.media"
 chmod 700 "$runtime"
+mkdir -p "$dir/bin"
+cat > "$dir/bin/ydotool" <<'SHIM'
+#!/bin/sh
+echo "ydotool uses the global input daemon and would move the real mouse." >&2
+echo "Use the hidden sway harness helpers: key, type_text, RANKI_UI_DEV_*." >&2
+exit 127
+SHIM
+cat > "$dir/bin/xdotool" <<'SHIM'
+#!/bin/sh
+echo "xdotool targets the real X display, not the hidden sway session." >&2
+exit 127
+SHIM
+chmod +x "$dir/bin/ydotool" "$dir/bin/xdotool"
 
 repo="$PWD"
 nix develop --command cargo build -p ranki >/dev/null
@@ -88,7 +101,9 @@ if [[ -z "$display" || -z "$ipc" ]]; then
 fi
 
 hidden() {
-  env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$display" SWAYSOCK="$ipc" \
+  env -u DISPLAY \
+    XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$display" SWAYSOCK="$ipc" \
+    YDOTOOL_SOCKET="$runtime/ydotool.sock" \
     nix develop --command nix shell "${nix_packages[@]}" --command "$@"
 }
 
@@ -101,6 +116,9 @@ if [[ "$mode" == "session" ]]; then
     printf 'export VISUAL_CONFIG=%q\n' "$dir/config"
     printf 'export VISUAL_BIN=%q\n' "$bin"
     printf 'export VISUAL_SWAY_SOCK=%q\n' "$ipc"
+    printf 'export PATH=%q\n' "$dir/bin:$PATH"
+    printf 'export YDOTOOL_SOCKET=%q\n' "$runtime/ydotool.sock"
+    printf 'unset DISPLAY\n'
     printf 'export VISUAL_SWAY_PGID=%q\n' "$sway_pid"
     printf 'VISUAL_PACKAGES=(nixpkgs#sway nixpkgs#wtype nixpkgs#grim nixpkgs#mesa)\n'
     cat <<'EOF'
@@ -116,7 +134,8 @@ visual_terminate() {
 }
 
 hidden() {
-  env XDG_RUNTIME_DIR="$VISUAL_RUNTIME" WAYLAND_DISPLAY="$VISUAL_DISPLAY" SWAYSOCK="$VISUAL_SWAY_SOCK" \
+  env -u DISPLAY XDG_RUNTIME_DIR="$VISUAL_RUNTIME" WAYLAND_DISPLAY="$VISUAL_DISPLAY" \
+    SWAYSOCK="$VISUAL_SWAY_SOCK" YDOTOOL_SOCKET="$VISUAL_RUNTIME/ydotool.sock" \
     nix develop "$VISUAL_REPO" --command nix shell "${VISUAL_PACKAGES[@]}" --command "$@"
 }
 
