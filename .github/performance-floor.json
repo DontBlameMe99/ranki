@@ -102,25 +102,25 @@
     },
     "gui/frame/idle": {
       "budget_ms": 100.0,
-      "median_ms": 0.136577,
+      "median_ms": 0.120162,
       "method": 1,
       "repeat": 1,
       "samples": 10,
-      "sha": "a5ba2208a31d9be65ff898104cbf4ef34f7ee8e1",
-      "updated_at": "2026-11-25T03:37:44.682812+00:00",
+      "sha": "ae62ecbaac1789c57587090cc50c163a4efab802",
+      "updated_at": "2026-11-25T15:00:53.196451+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.16705
+      "worst_median_ms": 0.123817
     },
     "gui/frame/reveal": {
       "budget_ms": 100.0,
-      "median_ms": 0.327867,
+      "median_ms": 0.292951,
       "method": 1,
       "repeat": 1,
       "samples": 10,
-      "sha": "a5ba2208a31d9be65ff898104cbf4ef34f7ee8e1",
-      "updated_at": "2026-11-25T03:37:44.682812+00:00",
+      "sha": "ae62ecbaac1789c57587090cc50c163a4efab802",
+      "updated_at": "2026-11-25T15:00:53.196451+00:00",
       "warmup": 2,
-      "worst_median_ms": 0.43828999999999996
+      "worst_median_ms": 0.300533
     },
     "mcp/roundtrip/list-decks": {
       "budget_ms": 100.0,
@@ -212,14 +212,14 @@
     },
     "storage/search/common": {
       "budget_ms": 50.0,
-      "median_ms": 0.355839,
+      "median_ms": 0.333032,
       "method": 1,
       "repeat": 2,
       "samples": 10,
-      "sha": "a5ba2208a31d9be65ff898104cbf4ef34f7ee8e1",
-      "updated_at": "2026-11-25T03:37:44.682812+00:00",
+      "sha": "ae62ecbaac1789c57587090cc50c163a4efab802",
+      "updated_at": "2026-11-25T15:00:53.196451+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.365753
+      "worst_median_ms": 0.346032
     },
     "storage/search/missing": {
       "budget_ms": 20.0,
@@ -234,17 +234,17 @@
     },
     "storage/stats": {
       "budget_ms": 20.0,
-      "median_ms": 0.110437,
+      "median_ms": 0.102865,
       "method": 1,
       "repeat": 5,
       "samples": 10,
-      "sha": "a5ba2208a31d9be65ff898104cbf4ef34f7ee8e1",
-      "updated_at": "2026-11-25T03:37:44.682812+00:00",
+      "sha": "ae62ecbaac1789c57587090cc50c163a4efab802",
+      "updated_at": "2026-11-25T15:00:53.196451+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.117608
+      "worst_median_ms": 0.106831
     }
   },
-  "sha": "33cd4e746292d16dffd4ab7e1ec430be01b0fa51",
+  "sha": "ae62ecbaac1789c57587090cc50c163a4efab802",
   "version": 1,
   "workload_hash": "bb3b56caa290a9f6"
 }
