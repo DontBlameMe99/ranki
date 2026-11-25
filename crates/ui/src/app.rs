@@ -41,6 +41,7 @@ actions!(
     ranki_ui,
     [
         Reveal,
+        Space,
         GradeAgain,
         GradeHard,
         GradeGood,
@@ -1497,6 +1498,14 @@ impl Root {
         }
     }
 
+    pub(crate) fn session_complete(&self) -> bool {
+        self.view == View::Review
+            && self.review.current.is_none()
+            && self.review.answered > 0
+            && self.review.load_errors == 0
+            && self.review.load_error.is_none()
+    }
+
     pub(crate) fn end_session(&mut self, cx: &mut Context<Self>) {
         self.review.queue.clear();
         self.review.pending.clear();
@@ -2137,6 +2146,13 @@ impl Root {
         let had_dialog = self.confirmation.is_some();
         match action {
             UiAction::Reveal => self.reveal(cx),
+            UiAction::Space => {
+                if self.session_complete() {
+                    self.end_session(cx);
+                } else {
+                    self.reveal(cx);
+                }
+            }
             UiAction::Grade(Rating::Again) => self.grade(Rating::Again, cx),
             UiAction::Grade(Rating::Hard) => self.grade(Rating::Hard, cx),
             UiAction::Grade(Rating::Good) => self.grade(Rating::Good, cx),
@@ -2292,6 +2308,7 @@ impl Root {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UiAction {
     Reveal,
+    Space,
     Grade(Rating),
     Retry,
     Reload,
@@ -2321,6 +2338,11 @@ pub enum UiAction {
 impl From<&Reveal> for UiAction {
     fn from(_: &Reveal) -> Self {
         Self::Reveal
+    }
+}
+impl From<&Space> for UiAction {
+    fn from(_: &Space) -> Self {
+        Self::Space
     }
 }
 impl From<&GradeAgain> for UiAction {
@@ -2467,6 +2489,7 @@ pub fn dispatch_app_action(
 ) {
     match action {
         UiAction::Reveal => window.dispatch_action(Box::new(Reveal), cx),
+        UiAction::Space => window.dispatch_action(Box::new(Space), cx),
         UiAction::Grade(Rating::Again) => {
             window.dispatch_action(Box::new(GradeAgain), cx);
         }
@@ -2590,6 +2613,9 @@ impl Render for Root {
                 }),
             )
             .on_action(cx.listener(|this, action: &Reveal, window, cx| {
+                this.dispatch(UiAction::from(action), window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &Space, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
             .on_action(cx.listener(|this, action: &GradeAgain, window, cx| {
@@ -3377,6 +3403,13 @@ const FOCUS_CONTEXT: &str = "ranki && !ranki_dialog";
 pub fn key_bindings() -> Vec<KeyBinding> {
     let mut bindings = vec![
         KeyBinding::new("space", Reveal, Some(STUDY_CONTEXT)),
+        KeyBinding::new(
+            "space",
+            Space,
+            Some(
+                "ranki && ranki_review && !ranki_input && !ranki_dialog && !ranki_settings",
+            ),
+        ),
         KeyBinding::new("1", GradeAgain, Some(STUDY_CONTEXT)),
         KeyBinding::new("2", GradeHard, Some(STUDY_CONTEXT)),
         KeyBinding::new("3", GradeGood, Some(STUDY_CONTEXT)),
@@ -4092,6 +4125,41 @@ mod tests {
             let (bindings, _) = keymap.bindings_for_input(&[stroke], &root);
             assert_eq!(bindings.len(), expected, "{key}");
         }
+    }
+
+    #[gpui::test]
+    fn space_ends_a_completed_session(cx: &mut gpui::TestAppContext) {
+        cx.update(|app| app.bind_keys(super::key_bindings()));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(ModalStore),
+                    options: Options::default(),
+                    save_settings: std::sync::Arc::new(|_| Ok(())),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.update_entity(&root, |root, cx| {
+            root.view = super::View::Review;
+            root.review.current = None;
+            root.review.answered = 1;
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+            root.clone()
+        });
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            cx.read_entity(&root, |root, _| root.view),
+            super::View::Review
+        );
+        cx.simulate_keystrokes("space");
+        assert_eq!(
+            cx.read_entity(&root, |root, _| root.view),
+            super::View::Decks
+        );
     }
 
     #[test]
