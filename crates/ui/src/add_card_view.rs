@@ -544,7 +544,7 @@ impl Root {
         screen.child(div().flex().w_full().justify_center().child(column))
     }
 
-    /// Image-occlusion editor: media picker, drawing area, and mask list.
+    /// Image-occlusion editor: upload control, drawing area, and mask list.
     #[expect(
         clippy::too_many_arguments,
         reason = "one editor needs the palette, its errors, and the context"
@@ -559,15 +559,7 @@ impl Root {
         let masks = self.add.occlusion.masks.clone();
         let selected = self.add.occlusion.selected;
         let dragging = self.add.occlusion.drag_rect();
-        let filter = self.add.media_filter.read(cx).text();
-        let visible =
-            occlusion::filter_media(&self.add.occlusion.media, &filter)
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>();
-        let total = self.add.occlusion.media.len();
         let media_dir = self.options.media_dir.clone();
-        let media_filter = self.add.media_filter.clone();
 
         let button = |id: &'static str,
                       label: &'static str,
@@ -604,6 +596,20 @@ impl Root {
             element
         };
 
+        let upload_image = {
+            let handler: ClickHandler =
+                Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.upload_occlusion_image(cx);
+                }));
+            button(
+                "io-upload-image",
+                "Upload image",
+                "icon-upload",
+                true,
+                colors,
+                handler,
+            )
+        };
         let add_mask = {
             let handler: ClickHandler =
                 Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -647,56 +653,6 @@ impl Root {
             )
         };
 
-        let mut picker = div().flex().flex_wrap().gap(px(6.));
-        if visible.is_empty() {
-            picker = picker.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(colors.overlay)
-                    .child(format!("No images in {}", media_dir.display())),
-            );
-        }
-        let focus_handle = media_filter.read(cx).focus_handle().clone();
-        for name in &visible {
-            let chosen = image.as_deref() == Some(name.as_str());
-            let pick = name.clone();
-            let handle = focus_handle.clone();
-            picker = picker.child(
-                div()
-                    .id(SharedString::from(format!("io-image-{name}")))
-                    .h(px(30.))
-                    .px(px(10.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(9.))
-                    .border_1()
-                    .border_color(if chosen {
-                        colors.mauve
-                    } else {
-                        colors.surface1
-                    })
-                    .bg(if chosen {
-                        alpha(colors.mauve, 0.2)
-                    } else {
-                        colors.base
-                    })
-                    .text_size(px(12.))
-                    .text_color(if chosen {
-                        colors.mauve
-                    } else {
-                        colors.subtext
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(
-                        move |this, _: &ClickEvent, window, cx| {
-                            this.choose_occlusion_image(pick.clone(), cx);
-                            window.focus(&handle);
-                        },
-                    ))
-                    .child(name.clone()),
-            );
-        }
-
         let mut canvas = div()
             .id("io-canvas")
             .relative()
@@ -727,7 +683,7 @@ impl Root {
                     .justify_center()
                     .text_size(px(13.))
                     .text_color(colors.overlay)
-                    .child("Pick an image, then drag to draw masks"),
+                    .child("Upload an image, then drag to draw masks"),
             );
         }
         let mut overlay = div().absolute().inset_0().id("io-overlay");
@@ -877,22 +833,21 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .h(px(38.))
-                    .px(px(12.))
-                    .rounded(px(10.))
-                    .border_1()
-                    .border_color(colors.surface1)
-                    .bg(colors.base)
-                    .child(icon("icon-search", 14., colors.subtext))
-                    .child(div().flex_1().min_w(px(80.)).child(media_filter))
+                    .child(upload_image)
                     .child(
                         div()
+                            .flex_1()
                             .text_size(px(12.))
-                            .text_color(colors.overlay)
-                            .child(format!("{total} images")),
+                            .text_color(if image.is_some() {
+                                colors.subtext
+                            } else {
+                                colors.overlay
+                            })
+                            .child(image.unwrap_or_else(|| {
+                                String::from("No image selected")
+                            })),
                     ),
             )
-            .child(picker)
             .child(canvas)
             .child(list);
         if let Some(error) = errors.get("occlusion") {

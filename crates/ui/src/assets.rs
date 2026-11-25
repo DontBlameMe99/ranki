@@ -37,6 +37,10 @@ fn icon(body: &str) -> String {
 const ICONS: &[(&str, &str)] = &[
     ("icon-plus", "<path d=\"M12 5v14M5 12h14\"/>"),
     (
+        "icon-upload",
+        "<path d=\"M12 16V4m-5 5 5-5 5 5\"/><path d=\"M4 16v3h16v-3\"/>",
+    ),
+    (
         "icon-search",
         "<circle cx=\"11\" cy=\"11\" r=\"7\"/><path d=\"m20 20-4-4\"/>",
     ),

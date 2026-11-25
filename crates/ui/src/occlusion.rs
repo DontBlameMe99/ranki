@@ -3,7 +3,9 @@
 //! Masks live in image-relative coordinates, so the same numbers are written to
 //! Anki's `Occlusion` field and drawn by the add-card editor.
 
+use std::ffi::OsStr;
 use std::fs;
+use std::io::{self, ErrorKind};
 use std::path::Path;
 
 /// Smallest normalized side a drawn mask may have.
@@ -160,7 +162,7 @@ pub fn image_occlusion_fields(
     ]
 }
 
-/// Extensions the add-card editor offers as occlusion images.
+/// Extensions accepted for uploaded occlusion images.
 pub const IMAGE_EXTENSIONS: [&str; 8] =
     ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"];
 
@@ -174,31 +176,39 @@ pub fn is_image_name(name: &str) -> bool {
     })
 }
 
-/// Image files in `dir`, sorted by name. A missing directory lists nothing.
-#[must_use]
-pub fn media_images(dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut names = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| is_image_name(name))
-        .collect::<Vec<_>>();
-    names.sort();
-    names
-}
+/// Copies `source` into the collection media directory and returns its file
+/// name. An existing name gets a numeric suffix so uploads never overwrite media.
+///
+/// # Errors
+///
+/// Returns an error for a missing, unsupported, or unsafe file name, or when
+/// the copy into `media_dir` fails.
+pub fn import_image(source: &Path, media_dir: &Path) -> io::Result<String> {
+    let invalid =
+        |message: &str| io::Error::new(ErrorKind::InvalidInput, message);
+    let name = source
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| invalid("invalid image file name"))?;
+    if !is_image_name(name) {
+        return Err(invalid("choose an image file"));
+    }
+    if name.contains(['\\', '"', '<', '>']) {
+        return Err(invalid("unsafe image file name"));
+    }
+    let (stem, extension) = name
+        .rsplit_once('.')
+        .ok_or_else(|| invalid("invalid image file name"))?;
 
-/// Case-insensitive substring filter for the media picker.
-#[must_use]
-pub fn filter_media<'a>(names: &'a [String], filter: &str) -> Vec<&'a String> {
-    let needle = filter.trim().to_lowercase();
-    names
-        .iter()
-        .filter(|name| {
-            needle.is_empty() || name.to_lowercase().contains(&needle)
-        })
-        .collect()
+    fs::create_dir_all(media_dir)?;
+    let mut stored = name.to_owned();
+    let mut suffix = 2;
+    while media_dir.join(&stored).exists() {
+        stored = format!("{stem}-{suffix}.{extension}");
+        suffix += 1;
+    }
+    fs::copy(source, media_dir.join(&stored))?;
+    Ok(stored)
 }
 
 /// Converts a window position into image-relative coordinates.
@@ -237,11 +247,13 @@ pub fn ratio(value: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MaskShape, NormalizedRect, OcclusionMask, default_mask, filter_media,
-        image_field, image_occlusion_fields, is_image_name, media_images,
-        occlusion_field, ratio, relative_position,
+        MaskShape, NormalizedRect, OcclusionMask, default_mask, image_field,
+        image_occlusion_fields, import_image, is_image_name, occlusion_field,
+        ratio, relative_position,
     };
     use ranki_model::parse_image_occlusion_field;
+    use std::fs;
+    use std::path::PathBuf;
 
     #[expect(
         clippy::too_many_arguments,
@@ -379,20 +391,46 @@ mod tests {
         assert_eq!(ratio(1.0), "1");
     }
 
+    fn scratch(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(".tmp")
+            .join(format!("occlusion-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("scratch directory");
+        dir
+    }
+
     #[test]
-    fn media_lists_only_images_and_filters_by_substring() {
+    fn image_names_only_match_known_extensions() {
         assert!(is_image_name("diagram.PNG"));
         assert!(!is_image_name("audio.mp3"));
         assert!(!is_image_name("no-extension"));
-        let names = vec![
-            String::from("alpha.png"),
-            String::from("beta.jpg"),
-            String::from("gamma.svg"),
-        ];
-        assert_eq!(filter_media(&names, "BE").len(), 1);
-        assert_eq!(filter_media(&names, " ").len(), 3);
-        assert_eq!(filter_media(&names, "zzz").len(), 0);
-        let missing = media_images(std::path::Path::new("/nonexistent/ranki"));
-        assert_eq!(missing.len(), 0);
+    }
+
+    #[test]
+    fn uploaded_images_keep_existing_media_and_reject_other_files() {
+        let root = scratch("upload");
+        let source_dir = root.join("source");
+        let media_dir = root.join("media");
+        fs::create_dir_all(&source_dir).expect("source directory");
+        fs::create_dir_all(&media_dir).expect("media directory");
+        let source = source_dir.join("diagram.png");
+        fs::write(&source, b"new").expect("source image");
+        fs::write(media_dir.join("diagram.png"), b"old").expect("old image");
+
+        let stored = import_image(&source, &media_dir).expect("copy image");
+        assert_eq!(stored, "diagram-2.png");
+        assert_eq!(fs::read(media_dir.join(&stored)).unwrap(), b"new");
+        assert_eq!(fs::read(media_dir.join("diagram.png")).unwrap(), b"old");
+
+        let text = source_dir.join("notes.txt");
+        fs::write(&text, b"not an image").expect("text file");
+        assert!(import_image(&text, &media_dir).is_err());
+        let unsafe_name = source_dir.join("bad\"name.png");
+        fs::write(&unsafe_name, b"image").expect("unsafe name");
+        assert!(import_image(&unsafe_name, &media_dir).is_err());
+
+        fs::remove_dir_all(&root).expect("cleanup");
     }
 }
