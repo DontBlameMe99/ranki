@@ -223,14 +223,14 @@
     },
     "storage/search/missing": {
       "budget_ms": 20.0,
-      "median_ms": 0.258511,
+      "median_ms": 0.233548,
       "method": 1,
       "repeat": 5,
       "samples": 10,
-      "sha": "a5ba2208a31d9be65ff898104cbf4ef34f7ee8e1",
-      "updated_at": "2026-11-25T03:37:44.682812+00:00",
+      "sha": "2da8efb50fb41618800f33bcdb756cfb776cb4ed",
+      "updated_at": "2026-11-25T16:13:06.165178+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.26392899999999997
+      "worst_median_ms": 0.234279
     },
     "storage/stats": {
       "budget_ms": 20.0,
@@ -244,7 +244,7 @@
       "worst_median_ms": 0.106831
     }
   },
-  "sha": "4c3789351c59f134fa1b201629bb2720aa972b2e",
+  "sha": "2da8efb50fb41618800f33bcdb756cfb776cb4ed",
   "version": 1,
   "workload_hash": "bb3b56caa290a9f6"
 }
