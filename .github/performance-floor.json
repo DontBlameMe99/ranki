@@ -47,14 +47,14 @@
     },
     "connect/startup": {
       "budget_ms": 1000.0,
-      "median_ms": 10.688556,
+      "median_ms": 10.617882,
       "method": 1,
       "repeat": 1,
       "samples": 5,
-      "sha": "fb4ebbaf5993eeefd16d1db7960644d9dc6ecc4e",
-      "updated_at": "2026-11-25T21:04:09.900427+00:00",
+      "sha": "8be7e7088dbc7164526a8d4fb9437b0c4e0fa816",
+      "updated_at": "2026-11-25T21:23:07.339834+00:00",
       "warmup": 1,
-      "worst_median_ms": 10.707569
+      "worst_median_ms": 10.676616
     },
     "core/fsrs/schedule": {
       "budget_ms": 10.0,
@@ -179,14 +179,14 @@
     },
     "storage/due/50": {
       "budget_ms": 50.0,
-      "median_ms": 0.16176400000000002,
+      "median_ms": 0.157551,
       "method": 1,
       "repeat": 2,
       "samples": 10,
-      "sha": "e1f1a72588c64a7c372680e1628c3aad697970b7",
-      "updated_at": "2026-11-25T18:13:27.565312+00:00",
+      "sha": "8be7e7088dbc7164526a8d4fb9437b0c4e0fa816",
+      "updated_at": "2026-11-25T21:23:07.339834+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.169552
+      "worst_median_ms": 0.161301
     },
     "storage/review/write": {
       "budget_ms": 100.0,
@@ -201,25 +201,25 @@
     },
     "storage/search/common": {
       "budget_ms": 50.0,
-      "median_ms": 0.405645,
+      "median_ms": 0.39414899999999997,
       "method": 1,
       "repeat": 2,
       "samples": 10,
-      "sha": "e1f1a72588c64a7c372680e1628c3aad697970b7",
-      "updated_at": "2026-11-25T18:13:27.565312+00:00",
+      "sha": "8be7e7088dbc7164526a8d4fb9437b0c4e0fa816",
+      "updated_at": "2026-11-25T21:23:07.339834+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.406872
+      "worst_median_ms": 0.402393
     },
     "storage/search/missing": {
       "budget_ms": 20.0,
-      "median_ms": 0.281073,
+      "median_ms": 0.276515,
       "method": 1,
       "repeat": 5,
       "samples": 10,
-      "sha": "e1f1a72588c64a7c372680e1628c3aad697970b7",
-      "updated_at": "2026-11-25T18:13:27.565312+00:00",
+      "sha": "8be7e7088dbc7164526a8d4fb9437b0c4e0fa816",
+      "updated_at": "2026-11-25T21:23:07.339834+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.282402
+      "worst_median_ms": 0.278812
     },
     "storage/stats": {
       "budget_ms": 20.0,
@@ -233,7 +233,7 @@
       "worst_median_ms": 0.12679600000000002
     }
   },
-  "sha": "fb4ebbaf5993eeefd16d1db7960644d9dc6ecc4e",
+  "sha": "8be7e7088dbc7164526a8d4fb9437b0c4e0fa816",
   "version": 1,
   "workload_hash": "41c505710405ce82"
 }
