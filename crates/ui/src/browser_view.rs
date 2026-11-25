@@ -5,11 +5,11 @@ use std::sync::Arc;
 use crate::{
     app::{Root, UiAction},
     card_view::{self, CardRequest, MediaRef, RenderedCard},
-    components::{chip, icon, secondary_button},
+    components::{Interaction, chip, icon, secondary_button},
     text_field::{EditHook, TextField},
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_RELATED,
-        SPACE_SECTION, Style, interval_label,
+        SPACE_SECTION, Style, blend, interval_label,
     },
 };
 use gpui::{
@@ -270,18 +270,22 @@ impl Root {
                             .child("Browse"),
                     )
                     .child(
-                        div()
-                            .id("browse-search")
-                            .flex()
-                            .items_center()
-                            .gap(px(SPACE_GROUP))
-                            .w(px(460.))
-                            .h(px(44.))
-                            .px(px(SPACE_RELATED))
-                            .rounded(px(12.))
-                            .bg(colors.surface0)
-                            .text_size(px(14.))
-                            .text_color(colors.text)
+                        Interaction::raised(colors)
+                            .apply(
+                                div()
+                                    .id("browse-search")
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(SPACE_GROUP))
+                                    .w(px(460.))
+                                    .h(px(44.))
+                                    .px(px(SPACE_RELATED))
+                                    .rounded(px(12.))
+                                    .bg(colors.surface0)
+                                    .text_size(px(14.))
+                                    .text_color(colors.text)
+                                    .cursor_pointer(),
+                            )
                             .on_click(cx.listener(
                                 |this, _: &ClickEvent, window, cx| {
                                     let field = this.browse.search.clone();
@@ -360,6 +364,16 @@ impl Root {
                 u8::try_from(row.card.queue.code()).unwrap_or(3),
                 self.theme(),
             );
+            let hover_bg = if active {
+                blend(colors.surface0, colors.surface1, 0.5)
+            } else {
+                colors.surface0
+            };
+            let press_bg = if active {
+                blend(colors.surface1, colors.crust, 0.14)
+            } else {
+                blend(colors.surface0, colors.surface1, 0.7)
+            };
             let mut line = div()
                 .id(SharedString::from(format!("browse-row-{id}")))
                 .flex()
@@ -375,6 +389,14 @@ impl Root {
                     colors.mantle
                 })
                 .cursor_pointer()
+                .focusable()
+                .hover(move |style| style.bg(hover_bg))
+                .active(move |style| style.bg(press_bg))
+                .focus(move |style| {
+                    style
+                        .bg(blend(hover_bg, colors.text, 0.08))
+                        .border_color(colors.mauve)
+                })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.select_browse_row(id, cx);
                 }));

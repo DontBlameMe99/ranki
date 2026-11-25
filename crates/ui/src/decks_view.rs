@@ -9,10 +9,10 @@ use gpui::{
 
 use crate::{
     app::{self, Root, UiAction, due_total, leaf_deck_totals},
-    components::{icon, icon_tile, keycap, small_button},
+    components::{Interaction, icon, icon_tile, keycap, small_button},
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED,
-        SPACE_SECTION, Style, TABLE_COLUMNS, queue_text,
+        SPACE_SECTION, Style, TABLE_COLUMNS, alpha, blend, queue_text,
     },
 };
 
@@ -76,18 +76,22 @@ impl Root {
                         .items_center()
                         .gap(px(SPACE_RELATED))
                         .child(
-                            div()
-                                .id("decks-search")
-                                .flex()
-                                .items_center()
-                                .gap(px(SPACE_GROUP))
-                                .w(px(300.))
-                                .h(px(44.))
-                                .px(px(SPACE_RELATED))
-                                .rounded(px(12.))
-                                .bg(colors.surface0)
-                                .text_size(px(14.))
-                                .text_color(colors.text)
+                            Interaction::raised(colors)
+                                .apply(
+                                    div()
+                                        .id("decks-search")
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(SPACE_GROUP))
+                                        .w(px(300.))
+                                        .h(px(44.))
+                                        .px(px(SPACE_RELATED))
+                                        .rounded(px(12.))
+                                        .bg(colors.surface0)
+                                        .text_size(px(14.))
+                                        .text_color(colors.text)
+                                        .cursor_pointer(),
+                                )
                                 .on_click(cx.listener(
                                     |this, _: &ClickEvent, window, cx| {
                                         let field = this.deck_search.clone();
@@ -106,22 +110,28 @@ impl Root {
                                 .child(keycap("/", colors, false)),
                         )
                         .child(
-                            div()
-                                .id("decks-create")
-                                .flex()
-                                .items_center()
-                                .gap(px(SPACE_GROUP))
-                                .h(px(44.))
-                                .px(px(SPACE_BLOCK))
-                                .rounded(px(12.))
-                                .border_1()
-                                .border_color(colors.surface1)
-                                .text_size(px(14.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .cursor_pointer()
-                                .on_click(create_click)
-                                .child(icon("icon-plus", 18., colors.text))
-                                .child("Create deck"),
+                            Interaction::new(
+                                colors.surface1,
+                                colors.surface0,
+                                colors.surface1,
+                                colors.mauve,
+                            )
+                            .apply(
+                                div()
+                                    .id("decks-create")
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(SPACE_GROUP))
+                                    .h(px(44.))
+                                    .px(px(SPACE_BLOCK))
+                                    .rounded(px(12.))
+                                    .text_size(px(14.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .cursor_pointer(),
+                            )
+                            .on_click(create_click)
+                            .child(icon("icon-plus", 18., colors.text))
+                            .child("Create deck"),
                         ),
                 ),
         );
@@ -161,11 +171,14 @@ impl Root {
                         })),
                     ))
                     .child(
-                        div()
-                            .id("decks-create-cancel")
-                            .text_size(px(13.))
-                            .text_color(colors.subtext)
-                            .cursor_pointer()
+                        Interaction::surface(colors)
+                            .apply(
+                                div()
+                                    .id("decks-create-cancel")
+                                    .text_size(px(13.))
+                                    .text_color(colors.subtext)
+                                    .cursor_pointer(),
+                            )
                             .on_click(cx.listener(
                                 |this, _: &ClickEvent, window, cx| {
                                     this.cancel_create(window, cx);
@@ -301,35 +314,51 @@ impl Root {
                                     ),
                             )
                             .child(
-                                div()
-                                    .id("decks-study-all")
-                                    .flex()
-                                    .flex_none()
-                                    .items_center()
-                                    .gap(px(SPACE_GROUP))
-                                    .h(px(52.))
-                                    .px(px(SPACE_SECTION))
-                                    .rounded(px(26.))
-                                    .bg(if due > 0 {
-                                        colors.mauve
-                                    } else {
-                                        colors.surface1
-                                    })
-                                    .text_color(study_all_ink)
-                                    .text_size(px(16.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(
-                                        |this, _: &ClickEvent, _, cx| {
-                                            this.study_all(cx);
-                                        },
-                                    ))
-                                    .child(icon(
-                                        "icon-play",
-                                        18.,
-                                        study_all_ink,
-                                    ))
-                                    .child("Study all"),
+                                if due > 0 {
+                                    Interaction::accent(style)
+                                } else {
+                                    Interaction::new(
+                                        alpha(colors.text, 0.0),
+                                        blend(
+                                            colors.surface1,
+                                            colors.surface0,
+                                            0.5,
+                                        ),
+                                        blend(
+                                            colors.surface1,
+                                            colors.crust,
+                                            0.14,
+                                        ),
+                                        colors.mauve,
+                                    )
+                                }
+                                .apply(
+                                    div()
+                                        .id("decks-study-all")
+                                        .flex()
+                                        .flex_none()
+                                        .items_center()
+                                        .gap(px(SPACE_GROUP))
+                                        .h(px(52.))
+                                        .px(px(SPACE_SECTION))
+                                        .rounded(px(26.))
+                                        .bg(if due > 0 {
+                                            colors.mauve
+                                        } else {
+                                            colors.surface1
+                                        })
+                                        .text_color(study_all_ink)
+                                        .text_size(px(16.))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .cursor_pointer(),
+                                )
+                                .on_click(cx.listener(
+                                    |this, _: &ClickEvent, _, cx| {
+                                        this.study_all(cx);
+                                    },
+                                ))
+                                .child(icon("icon-play", 18., study_all_ink))
+                                .child("Study all"),
                             ),
                     )
                     .child(
@@ -512,15 +541,21 @@ impl Root {
         if row.has_children {
             let path = row.path.clone();
             name_cell = name_cell.child(
-                div()
-                    .id("decks-chevron")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(24.))
-                    .h(px(24.))
-                    .flex_none()
-                    .cursor_pointer()
+                Interaction::surface(colors)
+                    .apply(
+                        div()
+                            .id(SharedString::from(format!(
+                                "decks-chevron-{}",
+                                row.path
+                            )))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(24.))
+                            .h(px(24.))
+                            .flex_none()
+                            .cursor_pointer(),
+                    )
                     .on_click(cx.listener(
                         move |this, _: &ClickEvent, _, cx| {
                             this.toggle_deck(path.clone(), cx);
@@ -585,11 +620,14 @@ impl Root {
             && edit.id == deck_id
         {
             name_cell = name_cell.child(self.rename_field.clone()).child(
-                div()
-                    .id("decks-save-rename")
-                    .text_size(px(13.))
-                    .text_color(colors.mauve)
-                    .cursor_pointer()
+                Interaction::surface(colors)
+                    .apply(
+                        div()
+                            .id("decks-save-rename")
+                            .text_size(px(13.))
+                            .text_color(colors.mauve)
+                            .cursor_pointer(),
+                    )
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.apply_rename(cx);
                     }))
@@ -616,18 +654,24 @@ impl Root {
         if let Some(target) = index {
             if has_due {
                 action = action.child(
-                    div()
-                        .id("decks-study")
-                        .h(px(30.))
-                        .px(px(SPACE_RELATED))
-                        .flex()
-                        .items_center()
-                        .rounded(px(9.))
-                        .bg(colors.mauve)
-                        .text_color(style.ink())
-                        .text_size(px(13.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .cursor_pointer()
+                    Interaction::accent(style)
+                        .apply(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "decks-study-{}",
+                                    row.path
+                                )))
+                                .h(px(30.))
+                                .px(px(SPACE_RELATED))
+                                .flex()
+                                .items_center()
+                                .rounded(px(9.))
+                                .bg(colors.mauve)
+                                .text_color(style.ink())
+                                .text_size(px(13.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .cursor_pointer(),
+                        )
                         .on_click(cx.listener(
                             move |this, _: &ClickEvent, _, cx| {
                                 this.study_deck(target, cx);
@@ -637,22 +681,57 @@ impl Root {
                 );
             }
             let id = row.id.unwrap_or(0);
+            let menu_open = self.deck_menu.is_some_and(|menu| menu.id == id);
             action = action.child(
-                div()
-                    .id("decks-menu")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(30.))
-                    .h(px(30.))
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .on_click(cx.listener(
-                        move |this, event: &ClickEvent, _, cx| {
-                            let open = this
-                                .deck_menu
-                                .is_some_and(|menu| menu.id == id);
-                            this.deck_menu = if open {
+                Interaction::new(
+                    alpha(colors.text, 0.0),
+                    if menu_open {
+                        alpha(colors.mauve, 0.24)
+                    } else {
+                        alpha(colors.mauve, 0.12)
+                    },
+                    if menu_open {
+                        alpha(colors.mauve, 0.32)
+                    } else {
+                        alpha(colors.mauve, 0.22)
+                    },
+                    colors.mauve,
+                )
+                .apply(
+                    div()
+                        .id(SharedString::from(format!("decks-menu-{id}")))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(30.))
+                        .h(px(30.))
+                        .rounded(px(8.))
+                        .bg(if menu_open {
+                            alpha(colors.mauve, 0.16)
+                        } else {
+                            alpha(colors.text, 0.0)
+                        })
+                        .cursor_pointer(),
+                )
+                .on_click(cx.listener(
+                    move |this, event: &ClickEvent, _, cx| {
+                        let same_press = match event {
+                            gpui::ClickEvent::Mouse(click) => this
+                                .deck_menu_dismissed_press
+                                .as_ref()
+                                .is_some_and(|down| {
+                                    down.button == click.down.button
+                                        && down.position == click.down.position
+                                        && down.click_count
+                                            == click.down.click_count
+                                        && down.first_mouse
+                                            == click.down.first_mouse
+                                }),
+                            gpui::ClickEvent::Keyboard(_) => false,
+                        };
+                        this.deck_menu_dismissed_press = None;
+                        if !same_press {
+                            this.deck_menu = if menu_open {
                                 None
                             } else {
                                 Some(app::DeckMenu {
@@ -660,16 +739,22 @@ impl Root {
                                     anchor: event.position(),
                                 })
                             };
-                            cx.notify();
-                        },
-                    ))
-                    .child(icon("icon-more", 18., colors.overlay)),
+                        }
+                        cx.notify();
+                    },
+                ))
+                .child(icon("icon-more", 18., colors.overlay)),
             );
         }
         let hover_bg = if is_selected {
             crate::theme::blend(colors.surface0, colors.surface1, 0.5)
         } else {
             colors.surface0
+        };
+        let press_bg = if is_selected {
+            crate::theme::blend(colors.surface1, colors.crust, 0.14)
+        } else {
+            crate::theme::blend(colors.surface0, colors.surface1, 0.7)
         };
         div()
             .id(SharedString::from(format!("deck-row-{}", row.path)))
@@ -680,7 +765,14 @@ impl Root {
             .border_t_1()
             .border_color(colors.surface0)
             .cursor_pointer()
+            .focusable()
             .hover(move |style| style.bg(hover_bg))
+            .active(move |style| style.bg(press_bg))
+            .focus(move |style| {
+                style
+                    .bg(crate::theme::blend(hover_bg, colors.text, 0.08))
+                    .border_color(colors.mauve)
+            })
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 if let Some(index) = index {
                     this.selected = Some(index);
@@ -736,18 +828,21 @@ impl Root {
                     .child(detail),
             )
             .child(
-                div()
-                    .id("decks-empty-action")
-                    .mt(px(SPACE_RELATED))
-                    .flex()
-                    .items_center()
-                    .h(px(44.))
-                    .px(px(SPACE_SECTION))
-                    .rounded(px(12.))
-                    .bg(colors.mauve)
-                    .text_color(crate::theme::accent_ink(theme))
-                    .text_size(px(14.))
-                    .cursor_pointer()
+                Interaction::accent(Style::new(colors, theme))
+                    .apply(
+                        div()
+                            .id("decks-empty-action")
+                            .mt(px(SPACE_RELATED))
+                            .flex()
+                            .items_center()
+                            .h(px(44.))
+                            .px(px(SPACE_SECTION))
+                            .rounded(px(12.))
+                            .bg(colors.mauve)
+                            .text_color(crate::theme::accent_ink(theme))
+                            .text_size(px(14.))
+                            .cursor_pointer(),
+                    )
                     .on_click(self.action_click(action))
                     .child(label),
             )
