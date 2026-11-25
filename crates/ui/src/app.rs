@@ -1759,6 +1759,7 @@ impl Root {
                 cx.notify();
             }
             UiAction::NextDeck => {
+                self.refresh_stats();
                 let next =
                     next_due_deck(&self.decks, &self.stats, self.selected);
                 if let Some(index) = next {
