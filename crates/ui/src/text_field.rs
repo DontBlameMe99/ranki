@@ -141,12 +141,6 @@ impl TextField {
         self.content.to_string()
     }
 
-    /// Selected byte range, or the caret when nothing is selected.
-    #[must_use]
-    pub fn selection(&self) -> std::ops::Range<usize> {
-        self.selected_range.clone()
-    }
-
     pub fn set_text(
         &mut self,
         text: impl Into<SharedString>,
