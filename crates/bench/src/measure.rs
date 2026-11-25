@@ -35,9 +35,6 @@ use std::time::Instant;
 
 use ranki_core::FsrsPreset;
 use ranki_core::FsrsScheduler;
-use ranki_core::Scheduler;
-use ranki_core::Sm2Preset;
-use ranki_core::Sm2Scheduler;
 use ranki_format::export_apkg;
 use ranki_format::import_apkg;
 use ranki_model::Card;
@@ -606,13 +603,11 @@ pub fn run() -> BenchResult<Report> {
     let mut recorder = Recorder::default();
 
     let fsrs = FsrsScheduler::new(FsrsPreset::default());
-    let sm2 = Sm2Scheduler::new(Sm2Preset::default());
     let mut index = 0usize;
     let cards = &fixture.cards;
     let created = fixture.created;
     let now = fixture.now;
     let fsrs_sink = AtomicI64::new(0);
-    let sm2_sink = AtomicI64::new(0);
     recorder.measure(
         "core/fsrs/schedule",
         "one FSRS scheduling decision within 10 ms",
@@ -635,29 +630,6 @@ pub fn run() -> BenchResult<Report> {
     )?;
     if fsrs_sink.load(Ordering::Relaxed) == 0 {
         return Err(message("FSRS scheduler produced no intervals"));
-    }
-    recorder.measure(
-        "core/sm2/schedule",
-        "one SM-2 scheduling decision within 10 ms",
-        10.0,
-        10,
-        20,
-        3,
-        || {
-            let card = cards
-                .get(index.checked_rem(cards.len()).unwrap_or(0))
-                .ok_or_else(|| message("missing card"))?;
-            let decision = sm2.schedule(card, Rating::Good, now, created);
-            if decision.card.id != card.id {
-                return Err(message("SM-2 scheduler changed the card id"));
-            }
-            sm2_sink.fetch_add(1, Ordering::Relaxed);
-            index = index.saturating_add(1);
-            Ok(())
-        },
-    )?;
-    if sm2_sink.load(Ordering::Relaxed) == 0 {
-        return Err(message("SM-2 scheduler produced no intervals"));
     }
     let collection = &fixture.collection;
     recorder.measure(

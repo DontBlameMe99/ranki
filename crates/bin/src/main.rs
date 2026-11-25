@@ -9,10 +9,7 @@ mod sync;
 
 use clap::Parser;
 use clap::Subcommand;
-use ranki_core::FsrsParams;
-use ranki_core::FsrsPreset;
 use ranki_core::FsrsScheduler;
-use ranki_core::Scheduler;
 use ranki_format::export_apkg;
 use ranki_format::export_colpkg;
 use ranki_format::import_apkg;
@@ -324,7 +321,7 @@ fn run_with_sync(
         }
     }
 
-    let scheduler = scheduler_for(&settings);
+    let scheduler = ranki_core::from_settings(&settings);
     let collection_path = settings.collection.as_path();
     let media_dir = settings.media_dir.as_path();
     let command = cli.command.unwrap_or(Command::Gui);
@@ -355,7 +352,7 @@ fn run_with_sync(
         }
         Command::Check => check(collection_path),
         Command::Connect { port } => {
-            connect::serve(collection_path, port, scheduler.as_ref())
+            connect::serve(collection_path, port, &scheduler)
         }
         Command::Sync {
             status,
@@ -396,12 +393,7 @@ fn run_with_sync(
         | Command::Answer { .. }
         | Command::Stats { .. } => {
             let mut collection = open_or_create(collection_path)?;
-            run_store_command(
-                &mut collection,
-                command,
-                scheduler.as_ref(),
-                media_dir,
-            )
+            run_store_command(&mut collection, command, &scheduler, media_dir)
         }
     };
     let shutdown_auth =
@@ -455,41 +447,6 @@ const fn shutdown_sync_enabled(
     startup_sync && auto_sync_enabled(final_settings, has_credentials, manual)
 }
 
-fn scheduler_for(settings: &config::Settings) -> Arc<dyn Scheduler> {
-    if settings.scheduler != ranki_model::SchedulerKind::Fsrs {
-        return ranki_core::from_settings(settings);
-    }
-    let params = fsrs_params(settings);
-    Arc::new(
-        FsrsScheduler::new(FsrsPreset {
-            desired_retention: settings.desired_retention,
-            ..FsrsPreset::default()
-        })
-        .with_params(params),
-    )
-}
-
-fn fsrs_params(settings: &config::Settings) -> FsrsParams {
-    let mut values = if settings.fsrs_params.is_empty() {
-        FsrsParams::default().weights().to_vec()
-    } else {
-        settings.fsrs_params.clone()
-    };
-    apply_decay(&mut values, settings.fsrs_decay);
-    FsrsParams::from_slice(&values).unwrap_or_default()
-}
-fn apply_decay(values: &mut Vec<f32>, decay: f32) {
-    match values.len() {
-        19 => values.push(decay),
-        21 => {
-            if let Some(slot) = values.get_mut(20) {
-                *slot = decay;
-            }
-        }
-        _ => {}
-    }
-}
-
 fn maybe_optimize(config: &mut config::Config, settings: &config::Settings) {
     let Ok(now) = now_secs() else {
         return;
@@ -518,7 +475,7 @@ fn maybe_optimize(config: &mut config::Config, settings: &config::Settings) {
 fn run_store_command(
     collection: &mut Collection,
     command: Command,
-    scheduler: &dyn Scheduler,
+    scheduler: &FsrsScheduler,
     media_dir: &Path,
 ) -> CliResult<()> {
     match command {
@@ -975,7 +932,7 @@ pub(crate) fn answer_card<S: Store>(
     card_id: Id,
     rating: Rating,
     now: i64,
-    scheduler: &dyn Scheduler,
+    scheduler: &FsrsScheduler,
 ) -> CliResult<ReviewDecision> {
     let card = store.card(card_id)?.ok_or_else(|| {
         CliError::Message(format!("card not found: {card_id}"))
@@ -1041,7 +998,6 @@ mod tests {
     use super::Command;
     use super::auto_sync_enabled;
     use super::default_collection_path;
-    use super::fsrs_params;
     use super::media_dir_for;
     use super::parse_rating;
     use super::run_with_sync;
@@ -1393,18 +1349,5 @@ mod tests {
         run_with_sync(cli, &mut config, &mut transport).unwrap();
         assert_eq!(transport.request_count(), 1);
         assert_eq!(transport.requests()[0].method, SyncMethod::Meta);
-    }
-
-    #[test]
-    fn scheduler_uses_configured_fsrs_params_and_decay() {
-        let mut settings = ranki_model::Settings::default();
-        let params = fsrs_params(&settings);
-        assert_eq!(params.decay(), 0.1542);
-
-        settings.fsrs_params = vec![0.2; 21];
-        settings.fsrs_decay = 0.35;
-        let params = fsrs_params(&settings);
-        assert_eq!(params.decay(), 0.35);
-        assert_eq!(params.weights().get(20).copied(), Some(0.35));
     }
 }

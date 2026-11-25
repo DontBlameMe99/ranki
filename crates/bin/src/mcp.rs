@@ -10,11 +10,10 @@ use std::fs;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 
-use ranki_core::Scheduler;
+use ranki_core::FsrsScheduler;
 use ranki_model::Id;
 use ranki_model::Rating;
 use ranki_model::Store;
@@ -547,14 +546,14 @@ struct RankiMcp {
     collection: Mutex<Collection>,
     collection_path: PathBuf,
     root: PathBuf,
-    scheduler: Arc<dyn Scheduler>,
+    scheduler: FsrsScheduler,
 }
 
 impl RankiMcp {
     fn new(
         collection: Collection,
         root: PathBuf,
-        scheduler: Arc<dyn Scheduler>,
+        scheduler: FsrsScheduler,
     ) -> Self {
         let collection_path = collection.path().to_path_buf();
         Self {
@@ -948,7 +947,7 @@ pub fn collection_path(argument: Option<&Path>) -> CliResult<PathBuf> {
 
 pub fn serve(
     argument: Option<&Path>,
-    scheduler: Arc<dyn Scheduler>,
+    scheduler: FsrsScheduler,
 ) -> CliResult<()> {
     let path = collection_path(argument)?;
     let parent_dir = path.parent().ok_or_else(|| {

@@ -31,9 +31,6 @@ self: {
       ui.review_batch_size or null
     )
     && validOrNull builtins.isBool (ui.show_keyboard_hints or null)
-    && validOrNull (value: builtins.elem value ["fsrs" "sm2"]) (
-      scheduler.algorithm or null
-    )
     && validOrNull (value: builtins.isFloat value && value >= 0.5 && value <= 0.999) (
       scheduler.desired_retention or null
     );
@@ -70,7 +67,6 @@ in {
         ui.font_size = 16.0;
         ui.review_batch_size = 20;
         ui.show_keyboard_hints = true;
-        scheduler.algorithm = "fsrs";
         scheduler.desired_retention = 0.9;
       };
       description = ''

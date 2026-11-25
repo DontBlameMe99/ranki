@@ -143,20 +143,27 @@ jobs:
               grep -q 'pub struct BenchApp' "$dir/crates/ui/src/app.rs" 2>/dev/null || skip_gui=1
             fi
           fi
+          legacy_api=0
+          if [ "$SHA" != "$HEAD_SHA" ] && grep -q 'pub trait Scheduler' "$dir/crates/core/src/lib.rs"; then
+            legacy_api=1
+            sed -i '/^use ranki_core::FsrsPreset;/i use ranki_core::Scheduler;' \
+              "$dir/crates/bench/src/measure.rs"
+          fi
           key="$(cat "$dir/Cargo.lock" "$dir/flake.lock" | sha256sum | cut -d' ' -f1)"
           {
             echo "dir=$dir"
             echo "key=$key"
+            echo "legacy_api=$legacy_api"
             echo "skip_gui=$skip_gui"
           } >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@v4
         with:
           path: target
-          key: cargo-bench-release-${{ runner.os }}-${{ matrix.sha }}-${{ steps.variant.outputs.skip_gui }}-${{ steps.variant.outputs.key }}
+          key: cargo-bench-release-${{ runner.os }}-${{ matrix.sha }}-${{ steps.variant.outputs.skip_gui }}-${{ steps.variant.outputs.legacy_api }}-${{ steps.variant.outputs.key }}
           restore-keys: |
-            cargo-bench-release-${{ runner.os }}-${{ steps.variant.outputs.skip_gui }}-${{ steps.variant.outputs.key }}-
-            cargo-bench-release-${{ runner.os }}-${{ steps.variant.outputs.skip_gui }}-
+            cargo-bench-release-${{ runner.os }}-${{ matrix.sha }}-${{ steps.variant.outputs.skip_gui }}-${{ steps.variant.outputs.legacy_api }}-${{ steps.variant.outputs.key }}-
+            cargo-bench-release-${{ runner.os }}-${{ steps.variant.outputs.skip_gui }}-${{ steps.variant.outputs.legacy_api }}-
 
       - name: Build variant
         env:

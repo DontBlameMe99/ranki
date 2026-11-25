@@ -3,7 +3,7 @@
 use std::fmt;
 use std::path::Path;
 
-use ranki_core::Scheduler;
+use ranki_core::FsrsScheduler;
 use ranki_model::CardQueue;
 use ranki_model::CardType;
 use ranki_model::Deck;
@@ -116,7 +116,7 @@ impl RpcResponse {
 pub fn serve(
     path: &Path,
     port: u16,
-    scheduler: &dyn Scheduler,
+    scheduler: &FsrsScheduler,
 ) -> CliResult<()> {
     let address = ("127.0.0.1", port);
     let server = Server::http(address).map_err(|error| {
@@ -139,7 +139,7 @@ pub fn serve(
 fn read_and_dispatch(
     store: &mut Collection,
     request: &mut Request,
-    scheduler: &dyn Scheduler,
+    scheduler: &FsrsScheduler,
 ) -> RpcResponse {
     let mut body = Vec::new();
     if let Err(error) = request.as_reader().read_to_end(&mut body) {
@@ -151,7 +151,7 @@ fn read_and_dispatch(
 fn handle_body(
     store: &mut Collection,
     body: &[u8],
-    scheduler: &dyn Scheduler,
+    scheduler: &FsrsScheduler,
 ) -> RpcResponse {
     let request: RpcRequest = match serde_json::from_slice(body) {
         Ok(request) => request,
@@ -180,7 +180,7 @@ fn dispatch(
     store: &mut Collection,
     action: &str,
     params: &Value,
-    scheduler: &dyn Scheduler,
+    scheduler: &FsrsScheduler,
 ) -> Result<Value, RpcError> {
     match action {
         "version" => Ok(json!(API_VERSION)),
@@ -425,7 +425,7 @@ fn cards_info(store: &Collection, params: &Value) -> Result<Value, RpcError> {
 fn answer_cards(
     store: &mut Collection,
     params: &Value,
-    scheduler: &dyn Scheduler,
+    scheduler: &FsrsScheduler,
 ) -> Result<Value, RpcError> {
     let answers = member(params, "answers")?
         .as_array()
@@ -563,13 +563,12 @@ fn change_deck(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
-    use ranki_core::Scheduler;
     use serde_json::Value;
     use serde_json::json;
     use tempfile::TempDir;
 
+    use super::FsrsScheduler;
     use super::dispatch;
     use super::handle_body;
     use crate::answer_card;
@@ -585,7 +584,7 @@ mod tests {
         (dir, Collection::create(&path).unwrap())
     }
 
-    fn scheduler() -> Arc<dyn Scheduler> {
+    fn scheduler() -> FsrsScheduler {
         ranki_core::from_settings(&ranki_model::Settings::default())
     }
 
@@ -598,7 +597,7 @@ mod tests {
             "action": action, "version": 6, "params": params,
         }))
         .unwrap();
-        let response = handle_body(store, &body, scheduler().as_ref());
+        let response = handle_body(store, &body, &scheduler());
         assert_eq!(response.error, None);
         response.result
     }
@@ -689,7 +688,7 @@ mod tests {
             &mut store,
             "addNote",
             &json!({"note": payload}),
-            scheduler().as_ref(),
+            &scheduler(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("unknown field"));
@@ -751,7 +750,7 @@ mod tests {
             &mut store,
             "answerCards",
             &json!({"answers": [{"cardId": 1, "ease": 9}]}),
-            scheduler().as_ref(),
+            &scheduler(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("ease"));
@@ -803,12 +802,11 @@ mod tests {
         let response = handle_body(
             &mut store,
             br#"{"action":"nope","version":6,"params":{}}"#,
-            scheduler().as_ref(),
+            &scheduler(),
         );
         assert_eq!(response.result, Value::Null);
         assert_eq!(response.error.as_deref(), Some("unsupported action: nope"));
-        let response =
-            handle_body(&mut store, b"not json", scheduler().as_ref());
+        let response = handle_body(&mut store, b"not json", &scheduler());
         assert!(response.error.unwrap_or_default().contains("invalid JSON"));
     }
 
@@ -822,7 +820,7 @@ mod tests {
             card_id,
             Rating::Good,
             crate::now_secs().unwrap(),
-            scheduler().as_ref(),
+            &scheduler(),
         )
         .unwrap();
         assert_eq!(decision.card.id, card_id);
@@ -831,9 +829,8 @@ mod tests {
     #[test]
     fn transport_errors_keep_a_stable_code() {
         let (_dir, mut store) = fixture();
-        let error =
-            dispatch(&mut store, "cardInfo", &json!({}), scheduler().as_ref())
-                .unwrap_err();
+        let error = dispatch(&mut store, "cardInfo", &json!({}), &scheduler())
+            .unwrap_err();
         assert_eq!(error.0.code(), ErrorCode::Unsupported);
 
         let response = RpcResponse::error(ranki_model::StoreError::NotFound(
@@ -897,7 +894,7 @@ mod tests {
             ),
         ];
         for (body, expected) in cases {
-            let response = handle_body(&mut store, body, scheduler().as_ref());
+            let response = handle_body(&mut store, body, &scheduler());
             assert_eq!(response.result, Value::Null);
             assert_eq!(response.error_code, expected, "{body:?}");
         }
@@ -910,7 +907,7 @@ mod tests {
             "action": "version", "version": 7, "params": {},
         });
         let body = serde_json::to_vec(&request).unwrap();
-        let response = handle_body(&mut store, &body, scheduler().as_ref());
+        let response = handle_body(&mut store, &body, &scheduler());
         assert_eq!(
             response.error.as_deref(),
             Some("unsupported protocol version: 7")
@@ -960,7 +957,7 @@ mod tests {
         ];
         for (request, expected) in cases {
             let body = serde_json::to_vec(&request).unwrap();
-            let response = handle_body(&mut store, &body, scheduler().as_ref());
+            let response = handle_body(&mut store, &body, &scheduler());
             assert_eq!(response.error.as_deref(), Some(expected), "{request}");
         }
     }

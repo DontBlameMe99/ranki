@@ -1,18 +1,14 @@
 //! Headless review and deck frames for the performance gate.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
-use ranki_core::Scheduler;
+use ranki_core::{FsrsScheduler, from_settings};
 use ranki_model::{
     Card, Deck, DeckStats, Note, NoteModel, Rating, Settings, Store,
 };
 
 use crate::{
-    app::{
-        build_deck_rows, due_total, filter_decks, leaf_deck_totals,
-        scheduler_from_options,
-    },
+    app::{build_deck_rows, due_total, filter_decks, leaf_deck_totals},
     card_view::{self, CardRequest},
 };
 
@@ -37,7 +33,7 @@ const DECK_CHILDREN: usize = 10;
 pub struct BenchApp {
     store: Box<dyn Store>,
     models: Vec<NoteModel>,
-    scheduler: Arc<dyn Scheduler>,
+    scheduler: FsrsScheduler,
     batch: usize,
     current: Option<Card>,
     note: Option<Note>,
@@ -69,7 +65,7 @@ impl BenchApp {
         Self {
             store,
             models,
-            scheduler: scheduler_from_options(options),
+            scheduler: from_settings(options),
             batch: options.review_batch_size.max(1),
             current: None,
             note: None,
