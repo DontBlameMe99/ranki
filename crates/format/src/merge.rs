@@ -503,6 +503,7 @@ fn insert_deck_row(
         .and_then(|usn| i32::try_from(usn).ok())
         .unwrap_or_default();
     let modified = entry.get("mod").and_then(Value::as_i64).unwrap_or_default();
+    let config_id = entry.get("conf").and_then(Value::as_i64).unwrap_or(1);
     transaction
         .execute(
             "INSERT OR IGNORE INTO main.decks (id, name, mtime_secs, usn, common, kind)
@@ -513,7 +514,7 @@ fn insert_deck_row(
                 modified,
                 usn,
                 Vec::<u8>::new(),
-                ranki_storage::normal_deck_kind(1),
+                ranki_storage::normal_deck_kind(config_id),
             ],
         )
         .map(|_| ())

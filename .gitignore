@@ -2,4 +2,5 @@
 .direnv
 .pre-commit-config.yaml
 /.tmp
+scripts/__pycache__/
 result

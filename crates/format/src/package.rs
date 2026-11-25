@@ -449,11 +449,6 @@ fn snapshot_collection(collection: &Path) -> Result<Vec<u8>, FormatError> {
                 .map_err(db_error("cannot normalize pending sync ids"))?;
         }
     }
-    for table in ["cards", "revlog"] {
-        snapshot_db
-            .execute(&format!("UPDATE {table} SET ivl = 0 WHERE ivl < 0"), [])
-            .map_err(db_error("cannot normalize learning intervals"))?;
-    }
     for key in ["conf", "models", "decks", "dconf", "tags"] {
         let raw: Option<String> = snapshot_db
             .query_row(
