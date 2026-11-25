@@ -562,10 +562,6 @@ impl Root {
     }
 
     /// Image-occlusion editor: upload control and drawing area.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one editor needs the palette, its errors, and the context"
-    )]
     fn render_occlusion_editor(
         &mut self,
         colors: crate::theme::Palette,
@@ -577,61 +573,51 @@ impl Root {
         let dragging = self.add.occlusion.drag_rect();
         let media_dir = self.options.media_dir.clone();
 
-        let button = |id: &'static str,
-                      label: &'static str,
-                      icon_name: &'static str,
-                      enabled: bool,
-                      colors: crate::theme::Palette,
-                      on_click: ClickHandler| {
-            let mut element = div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap(px(SPACE_GROUP))
-                .h(px(32.))
-                .px(px(SPACE_RELATED))
-                .rounded(px(10.))
-                .border_1()
-                .border_color(colors.surface1)
-                .text_size(px(13.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(if enabled { colors.text } else { colors.overlay })
-                .child(icon(
-                    icon_name,
-                    14.,
-                    if enabled {
-                        colors.subtext
-                    } else {
-                        colors.overlay
-                    },
-                ))
-                .child(label);
-            if enabled {
-                element = Interaction::new(
-                    colors.surface1,
-                    colors.surface0,
-                    colors.surface1,
-                    colors.mauve,
-                )
-                .apply(element.cursor_pointer())
-                .on_click(on_click);
-            }
-            element
-        };
-
-        let remove_image = {
-            let handler: ClickHandler =
+        let image_button = {
+            let has_image = image.is_some();
+            let hue = if has_image { colors.red } else { colors.mauve };
+            let handler: ClickHandler = if has_image {
                 Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.remove_occlusion_image(cx);
-                }));
-            button(
-                "io-remove-image",
-                "Remove image",
-                "icon-x",
-                image.is_some(),
-                colors,
-                handler,
+                }))
+            } else {
+                Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.upload_occlusion_image(cx);
+                }))
+            };
+            Interaction::new(
+                alpha(hue, 0.3),
+                alpha(hue, 0.22),
+                alpha(hue, 0.34),
+                hue,
             )
+            .apply(
+                div()
+                    .id("io-image")
+                    .debug_selector(|| "io-image".to_owned())
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_GROUP))
+                    .h(px(32.))
+                    .px(px(SPACE_RELATED))
+                    .rounded(px(10.))
+                    .bg(alpha(hue, 0.14))
+                    .text_size(px(13.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(hue)
+                    .cursor_pointer()
+                    .child(icon(
+                        if has_image { "icon-x" } else { "icon-upload" },
+                        14.,
+                        hue,
+                    ))
+                    .child(if has_image {
+                        "Remove image"
+                    } else {
+                        "Upload image"
+                    }),
+            )
+            .on_click(handler)
         };
 
         let mut canvas = div()
@@ -797,31 +783,21 @@ impl Root {
                             .child("OCCLUSION EDITOR"),
                     )
                     .child(div().flex_1())
-                    .child(remove_image),
+                    .child(image_button),
             )
             .child(div().flex().items_center().gap(px(SPACE_GROUP)).child({
-                let label =
-                    div()
-                        .id("io-upload-image")
-                        .flex_1()
-                        .text_size(px(12.))
-                        .text_color(if image.is_some() {
-                            colors.subtext
-                        } else {
-                            colors.mauve
-                        })
-                        .child(image.clone().unwrap_or_else(|| {
-                            String::from("Upload an image")
-                        }));
-                if image.is_none() {
-                    Interaction::tinted(colors, colors.mauve)
-                        .apply(label.cursor_pointer())
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.upload_occlusion_image(cx);
-                        }))
-                } else {
-                    label
-                }
+                div()
+                    .flex_1()
+                    .text_size(px(12.))
+                    .text_color(if image.is_some() {
+                        colors.subtext
+                    } else {
+                        colors.overlay
+                    })
+                    .child(
+                        image
+                            .unwrap_or_else(|| String::from("Upload an image")),
+                    )
             }))
             .child(canvas);
         if let Some(error) = errors.get("occlusion") {
