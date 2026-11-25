@@ -120,7 +120,7 @@ impl TextField {
         placeholder: impl Into<SharedString>,
     ) -> Self {
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             content: String::new().into(),
             placeholder: placeholder.into(),
             placeholder_color: gpui::hsla(0., 0., 0.5, 1.0),
