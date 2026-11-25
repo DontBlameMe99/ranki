@@ -374,9 +374,7 @@ impl Root {
                 .hover(move |style| style.bg(hover_bg))
                 .active(move |style| style.bg(press_bg))
                 .focus(move |style| {
-                    style
-                        .bg(blend(hover_bg, colors.text, 0.08))
-                        .border_color(colors.mauve)
+                    style.bg(blend(hover_bg, colors.text, 0.08))
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.select_browse_row(id, cx);
