@@ -19,7 +19,7 @@ use ranki_model::{
     parse_image_occlusion_field,
 };
 
-use crate::theme::{Palette, alpha};
+use crate::theme::{Palette, SPACE_GROUP, alpha};
 
 /// Side of the card being rendered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -761,7 +761,7 @@ pub fn rendered_text(card: &RenderedCard, color: Rgba, size_px: f32) -> Div {
         .flex()
         .flex_col()
         .items_center()
-        .gap(px(6.))
+        .gap(px(SPACE_GROUP))
         .text_size(px(size_px))
         .text_color(color);
     for line in card.text.lines() {
@@ -1036,7 +1036,8 @@ pub fn media_column(
     if refs.is_empty() {
         return None;
     }
-    let mut column = div().flex().flex_col().items_center().gap(px(6.));
+    let mut column =
+        div().flex().flex_col().items_center().gap(px(SPACE_GROUP));
     for media in refs {
         column = column.child(match media.kind {
             MediaKind::Image => {
@@ -1046,7 +1047,7 @@ pub fn media_column(
             MediaKind::Sound => div()
                 .flex()
                 .items_center()
-                .gap(px(6.))
+                .gap(px(SPACE_GROUP))
                 .text_size(px(12.))
                 .text_color(colors.mauve)
                 .child(icon_placeholder("[sound]", colors))

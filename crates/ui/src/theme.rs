@@ -462,19 +462,30 @@ pub fn font_candidates(matched: Option<&str>) -> Vec<&str> {
     candidates
 }
 
+/// Spacing scale. The distance maps to the relation between the elements:
+/// inline parts of one control, siblings in a group, groups in a block,
+/// blocks in a panel, panels in a page, and page edges. Every step is a
+/// 4 px multiple.
+pub const SPACE_INLINE: f32 = 4.0;
+pub const SPACE_GROUP: f32 = 8.0;
+pub const SPACE_RELATED: f32 = 12.0;
+pub const SPACE_BLOCK: f32 = 16.0;
+pub const SPACE_SECTION: f32 = 24.0;
+pub const SPACE_GUTTER: f32 = 32.0;
+
 pub const NAV_WIDTH: f32 = 232.0;
 pub const TOPBAR_HEIGHT: f32 = 72.0;
 pub const FOOTER_HEIGHT: f32 = 64.0;
 pub const STAGE_WIDTH: f32 = 760.0;
 pub const STAGE_HEIGHT: f32 = 440.0;
 pub const STAGE_RADIUS: f32 = 32.0;
-pub const STAGE_PADDING: f32 = 28.0;
+pub const STAGE_PADDING: f32 = SPACE_GUTTER;
 pub const CONTROL_HEIGHT: f32 = 76.0;
-pub const RATING_GAP: f32 = 14.0;
+pub const RATING_GAP: f32 = SPACE_RELATED;
 pub const PROGRESS_WIDTH: f32 = 420.0;
 pub const PROGRESS_HEIGHT: f32 = 6.0;
-pub const PAGE_X: f32 = 40.0;
-pub const PAGE_Y: f32 = 32.0;
+pub const PAGE_X: f32 = SPACE_GUTTER;
+pub const PAGE_Y: f32 = SPACE_GUTTER;
 /// Fixed width of one queue-count column in the deck table.
 pub const COUNT_COLUMN_WIDTH: f32 = 72.0;
 /// Reserved width of the deck table action column, so rows never shift.
@@ -492,7 +503,7 @@ pub const ADD_FORM_WIDTH: f32 = 720.0;
 /// Preview rail width on the add-card screen.
 pub const PREVIEW_WIDTH: f32 = 380.0;
 /// Gap between the add-card form and its preview rail.
-pub const ADD_GAP: f32 = 32.0;
+pub const ADD_GAP: f32 = SPACE_GUTTER;
 /// Full add-card content width: form plus gap plus preview rail.
 pub const ADD_CONTENT_WIDTH: f32 = ADD_FORM_WIDTH + ADD_GAP + PREVIEW_WIDTH;
 
@@ -520,8 +531,10 @@ mod tests {
     use gpui::rgb;
 
     use super::{
-        LATTE, MOCHA, MOTION_PROGRESS_MS, MOTION_QUICK_MS, PROGRESS_HEIGHT,
-        PROGRESS_WIDTH, STAGE_HEIGHT, STAGE_RADIUS, STAGE_WIDTH, Theme,
+        ADD_GAP, LATTE, MOCHA, MOTION_PROGRESS_MS, MOTION_QUICK_MS, PAGE_X,
+        PAGE_Y, PROGRESS_HEIGHT, PROGRESS_WIDTH, RATING_GAP, SPACE_BLOCK,
+        SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE, SPACE_RELATED, SPACE_SECTION,
+        STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS, STAGE_WIDTH, Theme,
         accent_hover, accent_press, alpha, blend, font_candidates,
         gtk_animations_disabled, interval_label, kde_animations_disabled,
         keycap_ink, palette, parse_flag_bool, placeholder_color, rating_fill,
@@ -594,6 +607,30 @@ mod tests {
         assert_eq!(STAGE_RADIUS, 32.0);
         assert_eq!(PROGRESS_WIDTH, 420.0);
         assert_eq!(PROGRESS_HEIGHT, 6.0);
+    }
+
+    #[test]
+    fn spacing_steps_express_relations_on_a_four_pixel_grid() {
+        let steps = [
+            SPACE_INLINE,
+            SPACE_GROUP,
+            SPACE_RELATED,
+            SPACE_BLOCK,
+            SPACE_SECTION,
+            SPACE_GUTTER,
+        ];
+        for step in steps {
+            assert_eq!(step % 4.0, 0.0);
+        }
+        assert!(
+            steps
+                .iter()
+                .zip(steps.iter().skip(1))
+                .all(|(near, far)| near < far)
+        );
+        for spacing in [PAGE_X, PAGE_Y, STAGE_PADDING, RATING_GAP, ADD_GAP] {
+            assert!(steps.contains(&spacing), "{spacing} is off the scale");
+        }
     }
 
     #[test]

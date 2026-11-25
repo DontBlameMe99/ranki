@@ -10,7 +10,10 @@ use gpui::{
 use crate::{
     app::{self, Root, UiAction, due_total, leaf_deck_totals},
     components::{icon, icon_tile, keycap, small_button},
-    theme::{PAGE_X, PAGE_Y, Style, TABLE_COLUMNS, queue_text},
+    theme::{
+        PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED,
+        SPACE_SECTION, Style, TABLE_COLUMNS, queue_text,
+    },
 };
 
 impl Root {
@@ -53,7 +56,7 @@ impl Root {
             .flex()
             .flex_col()
             .id("decks-scroll")
-            .gap(px(24.))
+            .gap(px(SPACE_SECTION))
             .overflow_scroll()
             .px(px(PAGE_X))
             .py(px(PAGE_Y));
@@ -73,16 +76,16 @@ impl Root {
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(12.))
+                        .gap(px(SPACE_RELATED))
                         .child(
                             div()
                                 .id("decks-search")
                                 .flex()
                                 .items_center()
-                                .gap(px(10.))
+                                .gap(px(SPACE_GROUP))
                                 .w(px(300.))
                                 .h(px(44.))
-                                .px(px(14.))
+                                .px(px(SPACE_RELATED))
                                 .rounded(px(12.))
                                 .bg(colors.surface0)
                                 .text_size(px(14.))
@@ -109,9 +112,9 @@ impl Root {
                                 .id("decks-create")
                                 .flex()
                                 .items_center()
-                                .gap(px(8.))
+                                .gap(px(SPACE_GROUP))
                                 .h(px(44.))
-                                .px(px(16.))
+                                .px(px(SPACE_BLOCK))
                                 .rounded(px(12.))
                                 .border_1()
                                 .border_color(colors.surface1)
@@ -130,14 +133,14 @@ impl Root {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(px(SPACE_GROUP))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .w(px(320.))
                             .h(px(44.))
-                            .px(px(14.))
+                            .px(px(SPACE_RELATED))
                             .rounded(px(12.))
                             .overflow_hidden()
                             .bg(colors.surface0)
@@ -191,8 +194,8 @@ impl Root {
                 div()
                     .flex()
                     .items_center()
-                    .px(px(20.))
-                    .py(px(12.))
+                    .px(px(SPACE_SECTION))
+                    .py(px(SPACE_RELATED))
                     .text_size(px(12.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(header_cell("DECK", colors.subtext, 0))
@@ -240,12 +243,12 @@ impl Root {
                 .flex_1()
                 .flex()
                 .flex_col()
-                .gap(px(2.))
+                .gap(px(SPACE_INLINE))
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(6.))
+                        .gap(px(SPACE_GROUP))
                         .child(crate::components::dot(color, 8.))
                         .child(
                             div()
@@ -263,13 +266,13 @@ impl Root {
         };
         div()
             .flex()
-            .gap(px(20.))
+            .gap(px(SPACE_SECTION))
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .flex_col()
-                    .p(px(24.))
+                    .p(px(SPACE_SECTION))
                     .rounded(px(24.))
                     .bg(colors.surface0)
                     .child(
@@ -277,7 +280,7 @@ impl Root {
                             .flex()
                             .items_end()
                             .justify_between()
-                            .gap(px(16.))
+                            .gap(px(SPACE_BLOCK))
                             .child(
                                 div()
                                     .flex()
@@ -304,9 +307,9 @@ impl Root {
                                     .flex()
                                     .flex_none()
                                     .items_center()
-                                    .gap(px(10.))
+                                    .gap(px(SPACE_GROUP))
                                     .h(px(52.))
-                                    .px(px(20.))
+                                    .px(px(SPACE_SECTION))
                                     .rounded(px(26.))
                                     .bg(if due > 0 {
                                         colors.mauve
@@ -333,9 +336,9 @@ impl Root {
                     .child(
                         div()
                             .flex()
-                            .gap(px(16.))
-                            .mt(px(16.))
-                            .pt(px(16.))
+                            .gap(px(SPACE_BLOCK))
+                            .mt(px(SPACE_BLOCK))
+                            .pt(px(SPACE_BLOCK))
                             .border_t_1()
                             .border_color(colors.surface1)
                             .child(queue_stat(
@@ -361,7 +364,7 @@ impl Root {
                     .flex_col()
                     .w(px(320.))
                     .flex_none()
-                    .p(px(24.))
+                    .p(px(SPACE_SECTION))
                     .rounded(px(24.))
                     .bg(colors.mantle)
                     .border_1()
@@ -379,8 +382,8 @@ impl Root {
                             )
                             .child(
                                 div()
-                                    .px(px(10.))
-                                    .py(px(4.))
+                                    .px(px(SPACE_RELATED))
+                                    .py(px(SPACE_INLINE))
                                     .rounded(px(10.))
                                     .bg(colors.surface0)
                                     .text_size(px(12.))
@@ -415,8 +418,11 @@ impl Root {
                             .copied()
                             .max()
                             .unwrap_or_default();
-                        let mut bars =
-                            div().mt(px(16.)).flex().flex_1().gap(px(10.));
+                        let mut bars = div()
+                            .mt(px(SPACE_BLOCK))
+                            .flex()
+                            .flex_1()
+                            .gap(px(SPACE_GROUP));
                         for (index, count) in self.forecast.iter().enumerate() {
                             bars = bars.child(
                                 div()
@@ -426,7 +432,7 @@ impl Root {
                                     .flex_col()
                                     .items_center()
                                     .justify_end()
-                                    .gap(px(6.))
+                                    .gap(px(SPACE_GROUP))
                                     .child(
                                         div()
                                             .text_size(px(11.))
@@ -496,8 +502,8 @@ impl Root {
         let mut name_cell = div()
             .flex()
             .items_center()
-            .gap(px(12.))
-            .pl(px(35.0 * row.depth as f32))
+            .gap(px(SPACE_RELATED))
+            .pl(px(SPACE_SECTION * row.depth as f32))
             .flex_1();
         if row.depth > 0 {
             name_cell = name_cell.child(
@@ -534,7 +540,7 @@ impl Root {
         } else {
             name_cell = name_cell.child(div().w(px(24.)).flex_none());
         }
-        let mut label = div().flex().items_center().gap(px(10.));
+        let mut label = div().flex().items_center().gap(px(SPACE_GROUP));
         label = label.child(
             div()
                 .text_size(px(if row.depth == 0 { 15. } else { 14.5 }))
@@ -607,14 +613,14 @@ impl Root {
             .flex()
             .items_center()
             .justify_end()
-            .gap(px(8.));
+            .gap(px(SPACE_GROUP));
         if let Some(target) = index {
             if has_due {
                 action = action.child(
                     div()
                         .id("decks-study")
                         .h(px(30.))
-                        .px(px(14.))
+                        .px(px(SPACE_RELATED))
                         .flex()
                         .items_center()
                         .rounded(px(9.))
@@ -671,7 +677,7 @@ impl Root {
             .flex()
             .items_center()
             .min_h(px(if row.depth == 0 { 60. } else { 45. }))
-            .px(px(20.))
+            .px(px(SPACE_SECTION))
             .border_t_1()
             .border_color(colors.surface0)
             .cursor_pointer()
@@ -712,7 +718,7 @@ impl Root {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(10.))
+            .gap(px(SPACE_GROUP))
             .min_h(px(260.))
             .rounded(px(20.))
             .bg(colors.mantle)
@@ -733,11 +739,11 @@ impl Root {
             .child(
                 div()
                     .id("decks-empty-action")
-                    .mt(px(10.))
+                    .mt(px(SPACE_RELATED))
                     .flex()
                     .items_center()
                     .h(px(44.))
-                    .px(px(20.))
+                    .px(px(SPACE_SECTION))
                     .rounded(px(12.))
                     .bg(colors.mauve)
                     .text_color(crate::theme::accent_ink(theme))

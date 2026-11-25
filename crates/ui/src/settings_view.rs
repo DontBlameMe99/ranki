@@ -9,7 +9,10 @@ use crate::{
     ThemeChoice,
     app::{Root, UiAction},
     components::{icon, keycap},
-    theme::{PAGE_X, PAGE_Y, alpha},
+    theme::{
+        PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_INLINE, SPACE_RELATED,
+        SPACE_SECTION, alpha,
+    },
 };
 
 impl Root {
@@ -20,8 +23,8 @@ impl Root {
         let mut segments = div()
             .flex()
             .items_center()
-            .gap(px(4.))
-            .p(px(4.))
+            .gap(px(SPACE_INLINE))
+            .p(px(SPACE_INLINE))
             .rounded(px(12.))
             .bg(colors.surface0);
         for (choice, label, key) in [
@@ -46,7 +49,7 @@ impl Root {
                     .id(SharedString::from(format!("theme-{choice:?}")))
                     .flex()
                     .flex_col()
-                    .gap(px(2.))
+                    .gap(px(SPACE_INLINE))
                     .w(px(112.))
                     .h(px(44.))
                     .items_center()
@@ -71,7 +74,7 @@ impl Root {
             .size_full()
             .flex()
             .flex_col()
-            .gap(px(24.))
+            .gap(px(SPACE_SECTION))
             .overflow_scroll()
             .px(px(PAGE_X))
             .py(px(PAGE_Y))
@@ -92,8 +95,8 @@ impl Root {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(18.))
-                    .p(px(24.))
+                    .gap(px(SPACE_BLOCK))
+                    .p(px(SPACE_SECTION))
                     .rounded(px(24.))
                     .bg(colors.mantle)
                     .border_1()
@@ -102,7 +105,7 @@ impl Root {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(12.))
+                            .gap(px(SPACE_RELATED))
                             .child(icon("icon-settings", 18., colors.mauve))
                             .child(
                                 div()
@@ -116,7 +119,7 @@ impl Root {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .gap(px(24.))
+                            .gap(px(SPACE_SECTION))
                             .child(
                                 div()
                                     .text_size(px(14.))

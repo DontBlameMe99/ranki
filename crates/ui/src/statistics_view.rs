@@ -12,7 +12,9 @@ use crate::{
     app::{self, Root, duration_label},
     components::keycap,
     theme::{
-        PAGE_X, PAGE_Y, Style, alpha, queue_text, rating_fill, rating_label,
+        PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE,
+        SPACE_RELATED, SPACE_SECTION, Style, alpha, queue_text, rating_fill,
+        rating_label,
     },
 };
 
@@ -141,7 +143,7 @@ impl Root {
             .size_full()
             .flex()
             .flex_col()
-            .gap(px(20.))
+            .gap(px(SPACE_SECTION))
             .id("statistics-scroll")
             .overflow_scroll()
             .px(px(PAGE_X))
@@ -173,7 +175,7 @@ impl Root {
             div()
                 .flex()
                 .flex_col()
-                .gap(px(2.))
+                .gap(px(SPACE_INLINE))
                 .child(
                     div()
                         .text_size(px(12.))
@@ -188,12 +190,12 @@ impl Root {
                         .child(value),
                 )
         };
-        let mut panel = div().flex().gap(px(20.)).child(
+        let mut panel = div().flex().gap(px(SPACE_SECTION)).child(
             div()
                 .flex()
                 .flex_1()
                 .flex_col()
-                .p(px(20.))
+                .p(px(SPACE_SECTION))
                 .rounded(px(24.))
                 .bg(colors.surface0)
                 .child(
@@ -212,10 +214,10 @@ impl Root {
                 )
                 .child(
                     div()
-                        .mt(px(12.))
-                        .pt(px(16.))
+                        .mt(px(SPACE_RELATED))
+                        .pt(px(SPACE_BLOCK))
                         .flex()
-                        .gap(px(28.))
+                        .gap(px(SPACE_GUTTER))
                         .border_t_1()
                         .border_color(colors.surface1)
                         .child(metric("Accuracy", accuracy, colors.green))
@@ -243,15 +245,15 @@ impl Root {
             .flex()
             .flex_col()
             .w(px(320.))
-            .gap(px(8.))
+            .gap(px(SPACE_GROUP))
             .rounded(px(24.))
             .bg(colors.mantle)
             .border_1()
             .border_color(colors.surface0)
-            .p(px(20.))
+            .p(px(SPACE_SECTION))
             .child(
                 div()
-                    .pb(px(6.))
+                    .pb(px(SPACE_GROUP))
                     .text_size(px(14.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child("Today's answers"),
@@ -267,13 +269,13 @@ impl Root {
                     .justify_between()
                     .rounded(px(10.))
                     .bg(alpha(colors.surface0, 0.7))
-                    .px(px(12.))
-                    .py(px(7.))
+                    .px(px(SPACE_RELATED))
+                    .py(px(SPACE_GROUP))
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.))
+                            .gap(px(SPACE_GROUP))
                             .text_size(px(13.))
                             .text_color(colors.subtext)
                             .child(crate::components::dot(dot, 8.))
@@ -305,7 +307,7 @@ impl Root {
             .map(|day| day.reviews)
             .max()
             .unwrap_or_default();
-        let mut bars = div().flex().flex_1().items_end().gap(px(18.));
+        let mut bars = div().flex().flex_1().items_end().gap(px(SPACE_BLOCK));
         for (index, day) in stats.days.iter().enumerate() {
             let height = if peak == 0 || day.reviews == 0 {
                 6.0
@@ -324,7 +326,7 @@ impl Root {
                     .flex_col()
                     .items_center()
                     .justify_end()
-                    .gap(px(8.))
+                    .gap(px(SPACE_GROUP))
                     .child(
                         div()
                             .text_size(px(12.))
@@ -350,8 +352,8 @@ impl Root {
         div()
             .flex()
             .flex_col()
-            .gap(px(16.))
-            .p(px(20.))
+            .gap(px(SPACE_BLOCK))
+            .p(px(SPACE_SECTION))
             .rounded(px(24.))
             .bg(colors.mantle)
             .border_1()
@@ -393,12 +395,12 @@ impl Root {
                 .flex()
                 .flex_1()
                 .flex_col()
-                .gap(px(4.))
+                .gap(px(SPACE_INLINE))
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(6.))
+                        .gap(px(SPACE_GROUP))
                         .text_size(px(12.))
                         .text_color(colors.subtext)
                         .child(crate::components::dot(hue, 8.))
@@ -414,8 +416,8 @@ impl Root {
         div()
             .flex()
             .flex_col()
-            .gap(px(16.))
-            .p(px(20.))
+            .gap(px(SPACE_BLOCK))
+            .p(px(SPACE_SECTION))
             .rounded(px(24.))
             .bg(colors.mantle)
             .border_1()
@@ -429,7 +431,7 @@ impl Root {
             .child(
                 div()
                     .flex()
-                    .gap(px(20.))
+                    .gap(px(SPACE_SECTION))
                     .child(count(
                         "New",
                         totals.new_cards,

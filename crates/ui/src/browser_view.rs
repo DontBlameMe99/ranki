@@ -7,7 +7,10 @@ use crate::{
     card_view::{self, CardRequest, MediaRef, RenderedCard},
     components::{chip, icon, secondary_button},
     text_field::{EditHook, TextField},
-    theme::{PAGE_X, PAGE_Y, Style, interval_label},
+    theme::{
+        PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_RELATED,
+        SPACE_SECTION, Style, interval_label,
+    },
 };
 use gpui::{
     ClickEvent, Context, Entity, InteractiveElement, IntoElement,
@@ -252,7 +255,7 @@ impl Root {
             .size_full()
             .flex()
             .flex_col()
-            .gap(px(20.))
+            .gap(px(SPACE_SECTION))
             .px(px(PAGE_X))
             .py(px(PAGE_Y))
             .child(
@@ -271,10 +274,10 @@ impl Root {
                             .id("browse-search")
                             .flex()
                             .items_center()
-                            .gap(px(10.))
+                            .gap(px(SPACE_GROUP))
                             .w(px(460.))
                             .h(px(44.))
-                            .px(px(14.))
+                            .px(px(SPACE_RELATED))
                             .rounded(px(12.))
                             .bg(colors.surface0)
                             .text_size(px(14.))
@@ -337,9 +340,9 @@ impl Root {
             div()
                 .flex()
                 .items_center()
-                .gap(px(8.))
-                .px(px(16.))
-                .py(px(12.))
+                .gap(px(SPACE_GROUP))
+                .px(px(SPACE_BLOCK))
+                .py(px(SPACE_RELATED))
                 .text_size(px(12.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(colors.subtext)
@@ -361,9 +364,9 @@ impl Root {
                 .id(SharedString::from(format!("browse-row-{id}")))
                 .flex()
                 .items_center()
-                .gap(px(8.))
+                .gap(px(SPACE_GROUP))
                 .h(px(52.))
-                .px(px(16.))
+                .px(px(SPACE_BLOCK))
                 .border_t_1()
                 .border_color(colors.surface0)
                 .bg(if active {
@@ -413,7 +416,7 @@ impl Root {
                 .flex()
                 .flex_1()
                 .min_h(px(0.))
-                .gap(px(20.))
+                .gap(px(SPACE_SECTION))
                 .child(table)
                 .child(self.render_browse_detail(selected, style)),
         );
@@ -442,8 +445,8 @@ impl Root {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(12.))
-            .py(px(48.))
+            .gap(px(SPACE_RELATED))
+            .py(px(SPACE_GUTTER))
             .child(
                 div()
                     .text_size(px(18.))
@@ -482,8 +485,8 @@ impl Root {
             .id("browse-detail")
             .flex()
             .flex_col()
-            .gap(px(16.))
-            .p(px(24.))
+            .gap(px(SPACE_BLOCK))
+            .p(px(SPACE_SECTION))
             .rounded(px(20.))
             .bg(colors.mantle)
             .border_1()
@@ -545,10 +548,11 @@ impl Root {
                 180.0,
             ));
         if !row.note.tags.is_empty() {
-            detail =
-                detail.child(div().flex().flex_wrap().gap(px(6.)).children(
+            detail = detail.child(
+                div().flex().flex_wrap().gap(px(SPACE_GROUP)).children(
                     row.note.tags.iter().map(|tag| chip(tag.clone(), colors)),
-                ));
+                ),
+            );
         }
         detail.child(browse_meta("Reviews", &row.card.reps.to_string(), colors))
     }
@@ -601,7 +605,7 @@ fn browse_meta(
     div()
         .flex()
         .justify_between()
-        .gap(px(12.))
+        .gap(px(SPACE_RELATED))
         .text_size(px(12.))
         .child(div().text_color(colors.subtext).child(label.to_owned()))
         .child(div().child(value.to_owned()))
