@@ -454,22 +454,17 @@ impl Root {
                 .into_any_element()
         });
         if let Some(name) = self.add.occlusion.image.clone() {
-            let mut image = div().relative().child(
-                img(self.options.media_dir.join(name))
-                    .h(px(120.))
-                    .w_full()
-                    .object_fit(gpui::ObjectFit::Contain),
-            );
-            if let Some(rendered) = rendered_preview.as_ref()
-                && !rendered.masks.is_empty()
-            {
-                image = image.child(card_view::occlusion_layer(
-                    &rendered.masks,
-                    colors,
-                    false,
-                ));
-            }
-            preview = preview.child(image);
+            let masks = rendered_preview
+                .as_ref()
+                .map_or(&[][..], |card| card.masks.as_slice());
+            preview = preview.child(card_view::occlusion_media(
+                &self.options.media_dir,
+                &name,
+                masks,
+                colors,
+                false,
+                120.,
+            ));
         }
 
         let mut form = div().flex().w_full().gap(px(ADD_GAP));
@@ -636,10 +631,28 @@ impl Root {
             )
         };
 
+        let remove_image = {
+            let handler: ClickHandler =
+                Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.remove_occlusion_image(cx);
+                }));
+            button(
+                "io-remove-image",
+                "Remove image",
+                "icon-x",
+                image.is_some(),
+                colors,
+                handler,
+            )
+        };
+
         let mut canvas = div()
             .id("io-canvas")
             .relative()
             .w_full()
+            .flex()
+            .items_center()
+            .justify_center()
             .h(px(OCCLUSION_CANVAS_HEIGHT))
             .rounded(px(16.))
             .overflow_hidden()
@@ -650,15 +663,20 @@ impl Root {
                 colors.surface1
             })
             .bg(colors.mantle);
-        if image.is_none() {
-            canvas = canvas.cursor_pointer();
-        }
         if let Some(name) = &image {
-            canvas = canvas.child(
-                img(media_dir.join(name))
-                    .size_full()
-                    .object_fit(gpui::ObjectFit::Contain),
-            );
+            let mut fitted_image = img(media_dir.join(name))
+                .h(px(OCCLUSION_CANVAS_HEIGHT))
+                .object_fit(gpui::ObjectFit::Contain);
+            if let Some((width, height)) = self.add.occlusion.image_size {
+                let width = OCCLUSION_CANVAS_HEIGHT * width / height;
+                let width = self.add.occlusion.bounds.map_or(width, |bounds| {
+                    width.min(f32::from(bounds.size.width))
+                });
+                fitted_image = fitted_image.w(px(width));
+            } else {
+                fitted_image = fitted_image.w_full();
+            }
+            canvas = canvas.child(fitted_image);
         } else {
             canvas = canvas.child(
                 div()
@@ -672,7 +690,21 @@ impl Root {
                     .child("Upload an image, then drag to draw masks"),
             );
         }
-        let mut overlay = div().absolute().inset_0().id("io-overlay");
+        let fitted = self.add.occlusion.image_rect().unwrap_or(
+            occlusion::NormalizedRect {
+                left: 0.0,
+                top: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+        );
+        let mut overlay = div()
+            .absolute()
+            .left(relative(fitted.left))
+            .top(relative(fitted.top))
+            .w(relative(fitted.width))
+            .h(relative(fitted.height))
+            .id("io-overlay");
         for (index, mask) in masks.iter().enumerate() {
             overlay = overlay.child(mask_box(
                 mask,
@@ -698,18 +730,14 @@ impl Root {
             .child(overlay)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    if this.add.occlusion.image.is_none() {
-                        this.upload_occlusion_image(cx);
-                    } else {
-                        this.occlusion_press(pointer(event.position), cx);
-                    }
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.occlusion_press(pointer(event.position), cx);
                 }),
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                    this.upload_occlusion_image(cx);
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.remove_mask_at(pointer(event.position), cx);
                 }),
             )
             .on_mouse_move(cx.listener(
@@ -735,8 +763,8 @@ impl Root {
             .w_full()
             .on_children_prepainted(move |children, _, cx| {
                 if let Some(first) = children.first() {
-                    let _ = weak.update(cx, |root, _| {
-                        root.set_occlusion_bounds(*first);
+                    let _ = weak.update(cx, |root, cx| {
+                        root.set_occlusion_bounds(*first, cx);
                     });
                 }
             })
@@ -832,47 +860,33 @@ impl Root {
                     .child(div().flex_1())
                     .child(add_mask)
                     .child(delete_mask)
-                    .child(clear_masks),
+                    .child(clear_masks)
+                    .child(remove_image),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(SPACE_GROUP))
-                    .child({
-                        let label = div()
-                            .id("io-upload-image")
-                            .flex_1()
-                            .text_size(px(12.))
-                            .text_color(if image.is_some() {
-                                colors.subtext
-                            } else {
-                                colors.mauve
-                            })
-                            .child(image.clone().unwrap_or_else(|| {
-                                String::from("Upload an image")
-                            }));
-                        if image.is_none() {
-                            Interaction::tinted(colors, colors.mauve)
-                                .apply(label.cursor_pointer())
-                                .on_click(cx.listener(
-                                    |this, _: &ClickEvent, _, cx| {
-                                        this.upload_occlusion_image(cx);
-                                    },
-                                ))
+            .child(div().flex().items_center().gap(px(SPACE_GROUP)).child({
+                let label =
+                    div()
+                        .id("io-upload-image")
+                        .flex_1()
+                        .text_size(px(12.))
+                        .text_color(if image.is_some() {
+                            colors.subtext
                         } else {
-                            label
-                        }
-                    })
-                    .child(if image.is_some() {
-                        div()
-                            .text_size(px(11.))
-                            .text_color(colors.overlay)
-                            .child("Right-click image to change")
-                    } else {
-                        div()
-                    }),
-            )
+                            colors.mauve
+                        })
+                        .child(image.clone().unwrap_or_else(|| {
+                            String::from("Upload an image")
+                        }));
+                if image.is_none() {
+                    Interaction::tinted(colors, colors.mauve)
+                        .apply(label.cursor_pointer())
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.upload_occlusion_image(cx);
+                        }))
+                } else {
+                    label
+                }
+            }))
             .child(canvas)
             .child(list);
         if let Some(error) = errors.get("occlusion") {

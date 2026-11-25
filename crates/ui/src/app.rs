@@ -177,6 +177,8 @@ impl Toast {
 pub struct OcclusionState {
     /// Media file name chosen for the `Image` field.
     pub image: Option<String>,
+    /// Natural image size, used to align masks inside a letterboxed canvas.
+    pub image_size: Option<(f32, f32)>,
     pub masks: Vec<OcclusionMask>,
     pub selected: Option<usize>,
     /// Drag in progress, in image-relative coordinates.
@@ -186,13 +188,80 @@ pub struct OcclusionState {
 }
 
 impl OcclusionState {
-    fn pointer(&self, position: (f32, f32)) -> Option<(f32, f32)> {
+    /// Rectangle of the fitted image inside the drawing area.
+    pub(crate) fn image_rect(&self) -> Option<NormalizedRect> {
         let bounds = self.bounds?;
-        Some(occlusion::relative_position(
-            position,
-            (f32::from(bounds.origin.x), f32::from(bounds.origin.y)),
+        let Some(size) = self.image_size else {
+            return Some(NormalizedRect {
+                left: 0.0,
+                top: 0.0,
+                width: 1.0,
+                height: 1.0,
+            });
+        };
+        Some(occlusion::contain_rect(
+            size,
             (f32::from(bounds.size.width), f32::from(bounds.size.height)),
         ))
+    }
+
+    fn raw_pointer(&self, position: (f32, f32)) -> Option<(f32, f32)> {
+        let bounds = self.bounds?;
+        let rect = self.image_rect()?;
+        let width = rect.width * f32::from(bounds.size.width);
+        let height = rect.height * f32::from(bounds.size.height);
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let origin_x = f32::from(bounds.origin.x)
+            + rect.left * f32::from(bounds.size.width);
+        let origin_y = f32::from(bounds.origin.y)
+            + rect.top * f32::from(bounds.size.height);
+        Some((
+            (position.0 - origin_x) / width,
+            (position.1 - origin_y) / height,
+        ))
+    }
+
+    fn pointer(&self, position: (f32, f32)) -> Option<(f32, f32)> {
+        self.raw_pointer(position)
+            .map(|(x, y)| (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)))
+    }
+
+    /// Topmost mask under an image-relative point, if any.
+    #[must_use]
+    pub fn mask_at(&self, point: (f32, f32)) -> Option<usize> {
+        self.masks
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, mask)| mask.rect.contains(point))
+            .map(|(index, _)| index)
+    }
+
+    /// Removes one mask and keeps the selection valid.
+    fn remove_mask(&mut self, index: usize) -> bool {
+        if index >= self.masks.len() {
+            return false;
+        }
+        let _ = self.masks.remove(index);
+        self.selected = self.masks.len().checked_sub(1);
+        true
+    }
+
+    /// Removes the topmost mask under an image-relative point.
+    fn remove_mask_at(&mut self, point: (f32, f32)) -> bool {
+        self.mask_at(point)
+            .is_some_and(|index| self.remove_mask(index))
+    }
+
+    /// Drops the image and the masks that belonged to it.
+    fn clear_image(&mut self) {
+        self.image = None;
+        self.image_size = None;
+        self.masks.clear();
+        self.selected = None;
+        self.drag = None;
     }
 
     /// Current drag as a mask, for the dashed preview outline.
@@ -1126,8 +1195,19 @@ impl Root {
             self.add.occlusion.masks.clear();
             self.add.occlusion.selected = None;
         }
+        let size = image::image_dimensions(self.options.media_dir.join(&name))
+            .ok()
+            .map(|(width, height)| (width as f32, height as f32));
+        self.add.occlusion.image_size = size;
         self.add.occlusion.image = Some(name);
         let _ = self.add.errors.remove("occlusion");
+        cx.notify();
+    }
+
+    pub(crate) fn remove_occlusion_image(&mut self, cx: &mut Context<Self>) {
+        self.add.occlusion.clear_image();
+        let _ = self.add.errors.remove("occlusion");
+        let _ = self.add.errors.remove("masks");
         cx.notify();
     }
 
@@ -1165,13 +1245,31 @@ impl Root {
         let Some(index) = self.add.occlusion.selected else {
             return;
         };
-        if index >= self.add.occlusion.masks.len() {
+        self.remove_mask(index, cx);
+    }
+
+    fn remove_mask(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.add.occlusion.remove_mask(index) {
+            cx.notify();
+        }
+    }
+
+    /// Removes the mask under a right-click on the canvas.
+    pub(crate) fn remove_mask_at(
+        &mut self,
+        position: (f32, f32),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(point) = self.add.occlusion.raw_pointer(position) else {
+            return;
+        };
+        if !(0.0..=1.0).contains(&point.0) || !(0.0..=1.0).contains(&point.1) {
             return;
         }
-        let _ = self.add.occlusion.masks.remove(index);
-        self.add.occlusion.selected =
-            self.add.occlusion.masks.len().checked_sub(1);
-        cx.notify();
+        if self.add.occlusion.remove_mask_at(point) {
+            let _ = self.add.errors.remove("masks");
+            cx.notify();
+        }
     }
 
     pub(crate) fn clear_occlusion_masks(&mut self, cx: &mut Context<Self>) {
@@ -1182,8 +1280,15 @@ impl Root {
     }
 
     /// Records the drawing area so pointer positions can be normalized.
-    pub(crate) fn set_occlusion_bounds(&mut self, bounds: Bounds<Pixels>) {
-        self.add.occlusion.bounds = Some(bounds);
+    pub(crate) fn set_occlusion_bounds(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.add.occlusion.bounds != Some(bounds) {
+            self.add.occlusion.bounds = Some(bounds);
+            cx.notify();
+        }
     }
 
     pub(crate) fn occlusion_press(
@@ -3244,14 +3349,15 @@ mod tests {
     use crate::Options;
 
     use super::{
-        DeckRow, EmptyKind, Phase, UiAction, View, build_deck_rows,
-        collect_tags, date_label, deck_meta, due_total, duration_label,
-        empty_copy, empty_kind, filter_decks, focused_delta,
-        forecast_bar_height, forecast_total, model_index, models_with_stock,
-        next_due_deck, next_view, queue_counts, session_progress,
-        sum_leaf_counts, validate_draft, validate_occlusion,
+        DeckRow, EmptyKind, MaskShape, NormalizedRect, OcclusionMask,
+        OcclusionState, Phase, UiAction, View, build_deck_rows, collect_tags,
+        date_label, deck_meta, due_total, duration_label, empty_copy,
+        empty_kind, filter_decks, focused_delta, forecast_bar_height,
+        forecast_total, model_index, models_with_stock, next_due_deck,
+        next_view, queue_counts, session_progress, sum_leaf_counts,
+        validate_draft, validate_occlusion,
     };
-    use gpui::{point, px};
+    use gpui::{point, px, size};
 
     struct ModalStore;
 
@@ -3894,6 +4000,88 @@ mod tests {
         let merged = models_with_stock(vec![installed]);
         assert_eq!(merged.len(), 4);
         assert_eq!(merged[0].id, 7);
+    }
+
+    #[test]
+    fn occlusion_drag_creates_one_mask_on_release() {
+        let mut state = OcclusionState {
+            bounds: Some(gpui::Bounds {
+                origin: point(px(100.), px(50.)),
+                size: size(px(200.), px(100.)),
+            }),
+            ..OcclusionState::default()
+        };
+        let start = state.pointer((125., 75.)).expect("start point");
+        let end = state.pointer((175., 125.)).expect("end point");
+        state.drag = Some((start.0, start.1, end.0, end.1));
+        let rect = state.drag_rect().expect("drag preview");
+        assert_eq!((rect.left, rect.top), (0.125, 0.25));
+        assert_eq!((rect.width, rect.height), (0.25, 0.5));
+        state.finish_drag();
+        assert_eq!(state.masks.len(), 1);
+        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.drag, None);
+    }
+
+    #[test]
+    fn occlusion_pointer_uses_the_fitted_image_area() {
+        let state = OcclusionState {
+            image_size: Some((200.0, 100.0)),
+            bounds: Some(gpui::Bounds {
+                origin: point(px(0.), px(0.)),
+                size: size(px(400.), px(400.)),
+            }),
+            masks: vec![OcclusionMask {
+                shape: MaskShape::Rect,
+                rect: NormalizedRect {
+                    left: 0.0,
+                    top: 0.0,
+                    width: 0.2,
+                    height: 1.0,
+                },
+            }],
+            ..OcclusionState::default()
+        };
+        let rect = state.image_rect().expect("fitted image");
+        assert_eq!((rect.top, rect.height), (0.25, 0.5));
+        assert_eq!(state.pointer((200.0, 100.0)), Some((0.5, 0.0)));
+        assert_eq!(state.pointer((200.0, 300.0)), Some((0.5, 1.0)));
+        let outside = state.raw_pointer((40.0, 50.0)).expect("raw point");
+        assert!(outside.1 < 0.0);
+        assert_eq!(
+            state.mask_at(state.pointer((40.0, 50.0)).unwrap()),
+            Some(0)
+        );
+        assert_eq!(state.mask_at(outside), None);
+    }
+
+    #[test]
+    fn mask_hit_test_finds_the_newest_overlap_and_clears_with_the_image() {
+        let mask = |left, top| OcclusionMask {
+            shape: MaskShape::Rect,
+            rect: NormalizedRect {
+                left,
+                top,
+                width: 0.4,
+                height: 0.4,
+            },
+        };
+        let mut state = OcclusionState {
+            image: Some("diagram.png".into()),
+            masks: vec![mask(0.1, 0.1), mask(0.3, 0.3)],
+            ..OcclusionState::default()
+        };
+        assert_eq!(state.mask_at((0.2, 0.2)), Some(0));
+        assert_eq!(state.mask_at((0.35, 0.35)), Some(1));
+        assert_eq!(state.mask_at((0.9, 0.9)), None);
+        assert!(state.remove_mask_at((0.35, 0.35)));
+        assert_eq!(state.masks.len(), 1);
+        assert_eq!(state.selected, Some(0));
+        assert!(!state.remove_mask_at((0.9, 0.9)));
+        state.clear_image();
+        assert_eq!(state.image, None);
+        assert_eq!(state.masks.len(), 0);
+        assert_eq!(state.selected, None);
     }
 
     #[test]

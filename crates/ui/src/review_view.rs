@@ -51,6 +51,23 @@ impl Root {
         let phase = self.review.phase;
         let question = self.review.question.clone();
         let answer = self.review.answer.clone();
+        let answer_media = answer
+            .as_ref()
+            .and_then(|card| {
+                let shown = question
+                    .as_ref()
+                    .map_or(&[][..], |card| card.media.as_slice());
+                let extra = card_view::answer_only_media(shown, &card.media);
+                (!extra.is_empty()).then(|| {
+                    card_view::media_column(
+                        &extra,
+                        &self.options.media_dir,
+                        colors,
+                        image_height,
+                    )
+                })
+            })
+            .flatten();
         let note = self.review.note.clone();
         let status = self.review.status.clone();
         let answered = self.review.answered;
@@ -474,14 +491,7 @@ impl Root {
                     } else {
                         div().into_any_element()
                     });
-                if let Some(card) = answer.as_ref()
-                    && let Some(media) = card_view::media_column(
-                        &card.media,
-                        &self.options.media_dir,
-                        colors,
-                        image_height,
-                    )
-                {
+                if let Some(media) = answer_media {
                     answer_group = answer_group.child(media);
                 }
                 let key = current
@@ -494,32 +504,55 @@ impl Root {
                 ));
             }
             stage = stage.child(center.child(content));
-            if let Some(card) = question.as_ref() {
-                let masks = (!card.masks.is_empty()).then(|| {
-                    card_view::occlusion_layer(
-                        &card.masks,
-                        colors,
-                        phase == Phase::Answer,
-                    )
+            let occlusion_image = note
+                .as_ref()
+                .and_then(|note| note.fields.get(1))
+                .and_then(|field| {
+                    card_view::media_refs(field)
+                        .into_iter()
+                        .find(|media| media.kind == card_view::MediaKind::Image)
                 });
-                match card_view::media_column(
+            if let Some(card) = question.as_ref() {
+                let masked =
+                    occlusion_image.as_ref().filter(|_| !card.masks.is_empty());
+                if let Some(image) = masked {
+                    let mut media = div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(SPACE_GROUP))
+                        .child(card_view::occlusion_media(
+                            &self.options.media_dir,
+                            &image.name,
+                            &card.masks,
+                            colors,
+                            phase == Phase::Answer,
+                            image_height,
+                        ));
+                    let rest = card
+                        .media
+                        .iter()
+                        .filter(|media| {
+                            Some(*media) != occlusion_image.as_ref()
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if let Some(rest) = card_view::media_column(
+                        &rest,
+                        &self.options.media_dir,
+                        colors,
+                        image_height,
+                    ) {
+                        media = media.child(rest);
+                    }
+                    stage = stage.child(media);
+                } else if let Some(media) = card_view::media_column(
                     &card.media,
                     &self.options.media_dir,
                     colors,
                     image_height,
                 ) {
-                    Some(media) => {
-                        let mut image = div().relative().child(media);
-                        if let Some(masks) = masks {
-                            image = image.child(masks);
-                        }
-                        stage = stage.child(image);
-                    }
-                    None => {
-                        if let Some(masks) = masks {
-                            stage = stage.child(masks);
-                        }
-                    }
+                    stage = stage.child(media);
                 }
             }
             let stage = gpui::image_cache(self.images.clone()).child(stage);
