@@ -104,11 +104,6 @@ impl Root {
                         .into_any_element()
                 })
         };
-        let status_color = if self.external_change {
-            colors.red
-        } else {
-            colors.green
-        };
         div()
             .w(px(NAV_WIDTH))
             .h_full()
@@ -184,22 +179,6 @@ impl Root {
                 true,
             ))
             .child(div().flex_1())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(SPACE_GROUP))
-                    .p(px(SPACE_RELATED))
-                    .rounded(px(14.))
-                    .bg(colors.mantle)
-                    .text_size(px(12.))
-                    .text_color(colors.subtext)
-                    .child(crate::components::dot(status_color, 8.))
-                    .child(crate::app::status_label(
-                        self.last_sync,
-                        Self::now(),
-                    )),
-            )
     }
 
     pub(crate) fn render_overlay(&self, cx: &Context<Self>) -> Vec<AnyElement> {

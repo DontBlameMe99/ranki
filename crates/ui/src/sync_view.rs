@@ -3,18 +3,20 @@
 use std::path::Path;
 use std::time::Duration;
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     Styled, div, px,
 };
+use ranki_storage::Collection;
 
 use ranki_sync::{
-    Credentials, HttpTransport, RetryPolicy, SyncClient, SyncState,
-    TransportConfig, state_path,
+    Credentials, HttpTransport, RetryPolicy, SyncClient, SyncOutcome,
+    SyncState, SyncTransport, TransportConfig, state_path,
 };
 
 use crate::{
-    app::{Root, status_label},
+    app::{Root, ToastKind},
     components::{icon, small_button},
     theme::{Palette, SPACE_BLOCK, SPACE_GROUP, SPACE_RELATED, SPACE_SECTION},
 };
@@ -22,6 +24,51 @@ use crate::{
 /// Reads the local sync state without changing it.
 pub fn read_state(collection: &Path) -> Option<SyncState> {
     SyncState::load(&state_path(collection)).ok()
+}
+/// Exchanges the password for a host key, then runs one sync immediately.
+fn login_and_sync<T: SyncTransport>(
+    client: &mut SyncClient<T>,
+    username: String,
+    password: String,
+) -> Result<(String, Result<SyncOutcome, String>), String> {
+    client
+        .login(&Credentials::new(username.clone(), password))
+        .map_err(|error| error.to_string())?;
+    Ok((
+        username,
+        client.sync(None).map_err(|error| error.to_string()),
+    ))
+}
+
+fn sync_message(outcome: &SyncOutcome) -> (ToastKind, String) {
+    match outcome {
+        SyncOutcome::Disabled => (
+            ToastKind::Error,
+            String::from("Signed in, but sync did not start"),
+        ),
+        SyncOutcome::NoChanges => (
+            ToastKind::Success,
+            String::from("Signed in. AnkiWeb is up to date"),
+        ),
+        SyncOutcome::Uploaded => (
+            ToastKind::Success,
+            String::from("Signed in. Collection uploaded"),
+        ),
+        SyncOutcome::Downloaded => (
+            ToastKind::Success,
+            String::from("Signed in. Collection downloaded"),
+        ),
+        SyncOutcome::Conflict { reason } => (
+            ToastKind::Error,
+            format!("Signed in. Sync needs a manual choice: {reason}"),
+        ),
+        SyncOutcome::RetryLater { reason } => (
+            ToastKind::Error,
+            format!(
+                "Signed in. Sync failed: {reason}. Run ranki sync to retry"
+            ),
+        ),
+    }
 }
 
 impl Root {
@@ -80,42 +127,55 @@ impl Root {
                 &state_path(&collection),
             )
             .map_err(|error| error.to_string())?;
-            client
-                .login(&Credentials::new(username.clone(), password))
-                .map_err(|error| error.to_string())?;
-            Ok::<(String, Option<i64>), String>((
-                username,
-                client.state().last_success,
-            ))
+            login_and_sync(&mut client, username, password)
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |root, cx| {
                 root.sync.busy = false;
                 match result {
-                    Ok((username, last_sync)) => {
+                    Ok((username, sync)) => {
                         root.sync.signed_in = true;
-                        root.last_sync = last_sync;
                         root.options.sync.enabled = true;
                         root.options.sync.username = Some(username);
                         root.sync.password.update(cx, |field, cx| {
                             field.clear(cx);
                         });
+                        let downloaded =
+                            matches!(&sync, Ok(SyncOutcome::Downloaded));
+                        let (kind, message) = match sync {
+                            Ok(outcome) => sync_message(&outcome),
+                            Err(error) => (
+                                ToastKind::Error,
+                                format!("Signed in, but sync failed: {error}"),
+                            ),
+                        };
                         if let Err(error) = (root.save_settings)(&root.options)
                         {
                             root.show_toast(
-                                crate::app::ToastKind::Error,
+                                ToastKind::Error,
                                 format!(
-                                    "Signed in, but could not save settings: {error}"
+                                    "{message} Could not save settings: {error}"
                                 ),
                                 cx,
                             );
                         } else {
-                            root.show_toast(
-                                crate::app::ToastKind::Success,
-                                "Signed in. AnkiWeb sync runs at the next launch",
-                                cx,
-                            );
+                            root.show_toast(kind, message, cx);
+                        }
+                        if downloaded {
+                            match Collection::open(&root.options.collection) {
+                                Ok(collection) => {
+                                    root.store = Box::new(collection);
+                                    root.reload_collection(cx);
+                                }
+                                Err(error) => root.show_toast(
+                                    ToastKind::Error,
+                                    format!(
+                                        "Downloaded the collection, but could not reopen it: {error}"
+                                    ),
+                                    cx,
+                                ),
+                            }
                         }
                     }
                     Err(error) => root.show_toast(
@@ -135,18 +195,18 @@ impl Root {
         let enabled = self.options.sync.enabled;
         let signed_in = self.sync.signed_in;
         let status = if self.sync.busy {
-            String::from("Signing in with AnkiWeb")
+            Some(String::from("Signing in with AnkiWeb"))
         } else if signed_in {
-            format!(
+            Some(format!(
                 "Signed in{}",
                 self.options
                     .sync
                     .username
                     .as_deref()
                     .map_or_else(String::new, |name| format!(" as {name}"))
-            )
+            ))
         } else {
-            status_label(self.last_sync, Self::now())
+            None
         };
         let note = if enabled {
             "AnkiWeb sync is on. Passwords are used once and never stored."
@@ -170,11 +230,8 @@ impl Root {
                     colors,
                 ))
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(SPACE_RELATED))
-                        .child(small_button(
+                    div().flex().items_center().gap(px(SPACE_RELATED)).child(
+                        small_button(
                             if self.sync.busy {
                                 "Signing in"
                             } else {
@@ -182,13 +239,8 @@ impl Root {
                             },
                             self.style(),
                             sign_in,
-                        ))
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(colors.subtext)
-                                .child("Sync starts on the next launch"),
                         ),
+                    ),
                 );
         }
 
@@ -245,16 +297,18 @@ impl Root {
                         toggle,
                     )),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(SPACE_GROUP))
-                    .text_size(px(12.))
-                    .text_color(colors.subtext)
-                    .child(icon("icon-check", 14., colors.green))
-                    .child(SharedString::from(status)),
-            )
+            .when_some(status, |this, status| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(SPACE_GROUP))
+                        .text_size(px(12.))
+                        .text_color(colors.subtext)
+                        .child(icon("icon-check", 14., colors.green))
+                        .child(SharedString::from(status)),
+                )
+            })
             .child(fields)
     }
 }
@@ -285,16 +339,19 @@ fn labeled_input(
                 .border_color(colors.surface1)
                 .bg(colors.base)
                 .text_size(px(14.))
-                .child(field),
+                .child(div().flex_1().child(field)),
         )
 }
 
 #[cfg(test)]
 mod tests {
-    use ranki_sync::{SyncState, state_path};
+    use ranki_sync::{
+        MockResponse, MockTransport, SyncClient, SyncMethod, SyncOutcome,
+        SyncState, state_path,
+    };
+    use serde_json::json;
 
-    use super::read_state;
-
+    use super::{login_and_sync, read_state, sync_message};
     #[test]
     fn footer_reads_the_last_sync_from_the_state_file() {
         let Ok(directory) = tempfile::tempdir() else {
@@ -315,5 +372,75 @@ mod tests {
         let loaded = read_state(&collection).unwrap_or_default();
         assert_eq!(loaded.host_key, "stored-key");
         assert_eq!(loaded.last_success, Some(1_700_000_000));
+    }
+    #[test]
+    fn sign_in_runs_a_sync_immediately() {
+        let Ok(directory) = tempfile::tempdir() else {
+            return;
+        };
+        let collection = directory.path().join("collection.anki2");
+        if ranki_storage::Collection::create(&collection).is_err() {
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let transport = MockTransport::new()
+            .with_response(
+                SyncMethod::HostKey,
+                MockResponse::ok_json(&json!({ "key": "host-key" })).unwrap(),
+            )
+            .with_response(
+                SyncMethod::Meta,
+                MockResponse::ok_json(&json!({
+                    "mod": 1,
+                    "scm": 1,
+                    "usn": 1,
+                    "ts": now,
+                    "empty": true,
+                    "cont": true,
+                    "media_usn": 1,
+                }))
+                .unwrap(),
+            );
+        let state_path = state_path(&collection);
+        let Ok(mut client) = SyncClient::new(
+            transport,
+            &collection,
+            directory.path(),
+            &state_path,
+        ) else {
+            return;
+        };
+
+        let password = directory
+            .path()
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .chars()
+            .rev()
+            .collect();
+        let result =
+            login_and_sync(&mut client, String::from("user"), password);
+
+        let Ok((username, outcome)) = result else {
+            return;
+        };
+        assert_eq!(username, "user");
+        assert!(matches!(outcome, Ok(SyncOutcome::Conflict { .. })));
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, SyncMethod::HostKey);
+        assert_eq!(requests[1].method, SyncMethod::Meta);
+    }
+
+    #[test]
+    fn sync_outcome_messages_name_the_result() {
+        let (_, uploaded) = sync_message(&SyncOutcome::Uploaded);
+        assert_eq!(uploaded, "Signed in. Collection uploaded");
+        let (_, downloaded) = sync_message(&SyncOutcome::Downloaded);
+        assert_eq!(downloaded, "Signed in. Collection downloaded");
     }
 }
