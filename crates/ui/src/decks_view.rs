@@ -584,7 +584,7 @@ impl Root {
                 .w(px(TABLE_COLUMNS[1]))
                 .flex_none()
                 .flex()
-                .justify_end()
+                .justify_center()
                 .text_size(px(15.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(if value == 0 { colors.overlay } else { color })
@@ -807,7 +807,7 @@ fn header_cell(label: &str, color: Rgba, column: usize) -> gpui::Div {
         cell = cell
             .flex()
             .flex_none()
-            .justify_end()
+            .justify_center()
             .w(px(TABLE_COLUMNS[column]));
     }
     cell.child(label.to_owned())
