@@ -181,11 +181,35 @@ pub struct OcclusionState {
     pub image_size: Option<(f32, f32)>,
     pub masks: Vec<OcclusionMask>,
     /// Drag in progress, in image-relative coordinates.
-    pub drag: Option<(f32, f32, f32, f32)>,
+    pub drag: Option<OcclusionDrag>,
     /// Screen rectangle of the drawing area, from the last prepaint.
     pub bounds: Option<Bounds<Pixels>>,
 }
 
+/// What a held pointer is doing on the canvas.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OcclusionDrag {
+    Draw {
+        start: (f32, f32),
+        end: (f32, f32),
+    },
+    Move {
+        index: usize,
+        start: (f32, f32),
+        rect: NormalizedRect,
+    },
+    Resize {
+        index: usize,
+        press: (f32, f32),
+        anchor: (f32, f32),
+        moves_right: bool,
+        moves_down: bool,
+        moved: bool,
+    },
+}
+
+/// Screen distance before a right press counts as a resize instead of a click.
+const RESIZE_SLOP: f32 = 3.0;
 impl OcclusionState {
     /// Rectangle of the fitted image inside the drawing area.
     pub(crate) fn image_rect(&self) -> Option<NormalizedRect> {
@@ -247,12 +271,6 @@ impl OcclusionState {
         true
     }
 
-    /// Removes the topmost mask under an image-relative point.
-    fn remove_mask_at(&mut self, point: (f32, f32)) -> bool {
-        self.mask_at(point)
-            .is_some_and(|index| self.remove_mask(index))
-    }
-
     /// Drops the image and the masks that belonged to it.
     fn clear_image(&mut self) {
         self.image = None;
@@ -261,21 +279,185 @@ impl OcclusionState {
         self.drag = None;
     }
 
-    /// Current drag as a mask, for the dashed preview outline.
+    /// Current draw preview as a mask, for the dashed outline.
     #[must_use]
     pub fn drag_rect(&self) -> Option<NormalizedRect> {
-        let (left, top, right, bottom) = self.drag?;
-        NormalizedRect::from_points((left, top), (right, bottom))
+        match self.drag? {
+            OcclusionDrag::Draw { start, end } => {
+                NormalizedRect::from_points(start, end)
+            }
+            OcclusionDrag::Move { .. } | OcclusionDrag::Resize { .. } => None,
+        }
     }
 
-    fn finish_drag(&mut self) {
-        if let Some(rect) = self.drag_rect() {
-            self.masks.push(OcclusionMask {
-                shape: MaskShape::Rect,
-                rect,
-            });
+    /// Starts a draw, move, or resize from a pointer press.
+    fn press(&mut self, position: (f32, f32), button: MouseButton) -> bool {
+        if self.image.is_none() {
+            return false;
         }
+        let (Some(raw), Some(point)) =
+            (self.raw_pointer(position), self.pointer(position))
+        else {
+            return false;
+        };
+        let inside =
+            (0.0..=1.0).contains(&raw.0) && (0.0..=1.0).contains(&raw.1);
+        let hit = inside.then(|| self.mask_at(raw)).flatten();
+        self.drag = match button {
+            MouseButton::Left => Some(if let Some(index) = hit {
+                OcclusionDrag::Move {
+                    index,
+                    start: point,
+                    rect: self.masks[index].rect,
+                }
+            } else {
+                OcclusionDrag::Draw {
+                    start: point,
+                    end: point,
+                }
+            }),
+            MouseButton::Right => hit.map(|index| {
+                let rect = self.masks[index].rect;
+                let right_side = point.0 >= rect.left + rect.width / 2.0;
+                let bottom_side = point.1 >= rect.top + rect.height / 2.0;
+                OcclusionDrag::Resize {
+                    index,
+                    press: position,
+                    anchor: (
+                        if right_side {
+                            rect.left
+                        } else {
+                            rect.left + rect.width
+                        },
+                        if bottom_side {
+                            rect.top
+                        } else {
+                            rect.top + rect.height
+                        },
+                    ),
+                    moves_right: right_side,
+                    moves_down: bottom_side,
+                    moved: false,
+                }
+            }),
+            MouseButton::Middle | MouseButton::Navigate(_) => None,
+        };
+        self.drag.is_some()
+    }
+
+    /// Applies a held pointer's movement to the active drag.
+    fn drag_to(&mut self, position: (f32, f32)) -> bool {
+        let Some(drag) = self.drag else {
+            return false;
+        };
+        let Some(pointer) = self.pointer(position) else {
+            return false;
+        };
+        match drag {
+            OcclusionDrag::Draw { start, .. } => {
+                self.drag = Some(OcclusionDrag::Draw {
+                    start,
+                    end: pointer,
+                });
+                true
+            }
+            OcclusionDrag::Move { index, start, rect } => {
+                if let Some(mask) = self.masks.get_mut(index) {
+                    mask.rect.left = (rect.left + pointer.0 - start.0)
+                        .clamp(0.0, 1.0 - rect.width);
+                    mask.rect.top = (rect.top + pointer.1 - start.1)
+                        .clamp(0.0, 1.0 - rect.height);
+                }
+                true
+            }
+            OcclusionDrag::Resize {
+                index,
+                press,
+                anchor,
+                moves_right,
+                moves_down,
+                moved,
+            } => {
+                let moved = moved
+                    || f32::hypot(position.0 - press.0, position.1 - press.1)
+                        >= RESIZE_SLOP;
+                if moved {
+                    let width = (if moves_right {
+                        pointer.0 - anchor.0
+                    } else {
+                        anchor.0 - pointer.0
+                    })
+                    .max(occlusion::MIN_MASK_SIZE);
+                    let height = (if moves_down {
+                        pointer.1 - anchor.1
+                    } else {
+                        anchor.1 - pointer.1
+                    })
+                    .max(occlusion::MIN_MASK_SIZE);
+                    let rect = NormalizedRect {
+                        left: (if moves_right {
+                            anchor.0
+                        } else {
+                            anchor.0 - width
+                        })
+                        .clamp(0.0, 1.0 - width),
+                        top: (if moves_down {
+                            anchor.1
+                        } else {
+                            anchor.1 - height
+                        })
+                        .clamp(0.0, 1.0 - height),
+                        width,
+                        height,
+                    };
+                    if let Some(mask) = self.masks.get_mut(index) {
+                        mask.rect = rect;
+                    }
+                }
+                self.drag = Some(OcclusionDrag::Resize {
+                    index,
+                    press,
+                    anchor,
+                    moves_right,
+                    moves_down,
+                    moved,
+                });
+                moved
+            }
+        }
+    }
+
+    /// Commits the drag. A right press that never moved removes its mask.
+    fn finish_drag(&mut self) -> bool {
+        let Some(drag) = self.drag else {
+            return false;
+        };
+        let changed = match drag {
+            OcclusionDrag::Draw { start, end } => {
+                if let Some(rect) = NormalizedRect::from_points(start, end) {
+                    self.masks.push(OcclusionMask {
+                        shape: MaskShape::Rect,
+                        rect,
+                    });
+                    true
+                } else {
+                    false
+                }
+            }
+            OcclusionDrag::Resize {
+                index,
+                moved: false,
+                ..
+            } => self.remove_mask(index),
+            OcclusionDrag::Move { .. }
+            | OcclusionDrag::Resize { moved: true, .. } => false,
+        };
         self.drag = None;
+        changed
+    }
+
+    fn cancel_drag(&mut self) -> bool {
+        self.drag.take().is_some()
     }
 }
 
@@ -1341,24 +1523,6 @@ impl Root {
         cx.notify();
     }
 
-    /// Removes the mask under a right-click on the canvas.
-    pub(crate) fn remove_mask_at(
-        &mut self,
-        position: (f32, f32),
-        cx: &mut Context<Self>,
-    ) {
-        let Some(point) = self.add.occlusion.raw_pointer(position) else {
-            return;
-        };
-        if !(0.0..=1.0).contains(&point.0) || !(0.0..=1.0).contains(&point.1) {
-            return;
-        }
-        if self.add.occlusion.remove_mask_at(point) {
-            let _ = self.add.errors.remove("masks");
-            cx.notify();
-        }
-    }
-
     /// Records the drawing area so pointer positions can be normalized.
     pub(crate) fn set_occlusion_bounds(
         &mut self,
@@ -1374,13 +1538,10 @@ impl Root {
     pub(crate) fn occlusion_press(
         &mut self,
         position: (f32, f32),
+        button: MouseButton,
         cx: &mut Context<Self>,
     ) {
-        if self.add.occlusion.image.is_some()
-            && let Some(pointer) = self.add.occlusion.pointer(position)
-        {
-            let corner = (pointer.0, pointer.1, pointer.0, pointer.1);
-            self.add.occlusion.drag = Some(corner);
+        if self.add.occlusion.press(position, button) {
             cx.notify();
         }
     }
@@ -1390,29 +1551,25 @@ impl Root {
         position: (f32, f32),
         cx: &mut Context<Self>,
     ) {
-        let Some((left, top, _, _)) = self.add.occlusion.drag else {
-            return;
-        };
-        if let Some(pointer) = self.add.occlusion.pointer(position) {
-            self.add.occlusion.drag = Some((left, top, pointer.0, pointer.1));
+        if self.add.occlusion.drag_to(position) {
             cx.notify();
         }
     }
 
     pub(crate) fn occlusion_release(&mut self, cx: &mut Context<Self>) {
         if self.add.occlusion.drag.is_some() {
-            self.add.occlusion.finish_drag();
-            let _ = self.add.errors.remove("masks");
+            if self.add.occlusion.finish_drag() {
+                let _ = self.add.errors.remove("masks");
+            }
             cx.notify();
         }
     }
 
     pub(crate) fn cancel_occlusion_drag(&mut self, cx: &mut Context<Self>) {
-        if self.add.occlusion.drag.take().is_some() {
+        if self.add.occlusion.cancel_drag() {
             cx.notify();
         }
     }
-
     /// Image Occlusion field values in the stock model order.
     pub(crate) fn occlusion_fields(
         &self,
@@ -3464,13 +3621,13 @@ mod tests {
     use crate::Options;
 
     use super::{
-        DeckRow, EmptyKind, MaskShape, NormalizedRect, OcclusionMask,
-        OcclusionState, Phase, UiAction, View, build_deck_rows, collect_tags,
-        date_label, deck_meta, due_total, duration_label, empty_copy,
-        empty_kind, filter_decks, focused_delta, forecast_bar_height,
-        forecast_total, model_index, models_with_stock, next_due_deck,
-        next_view, queue_counts, refreshed_card, session_progress,
-        sum_leaf_counts, validate_draft, validate_occlusion,
+        DeckRow, EmptyKind, MaskShape, MouseButton, NormalizedRect,
+        OcclusionDrag, OcclusionMask, OcclusionState, Phase, UiAction, View,
+        build_deck_rows, collect_tags, date_label, deck_meta, due_total,
+        duration_label, empty_copy, empty_kind, filter_decks, focused_delta,
+        forecast_bar_height, forecast_total, model_index, models_with_stock,
+        next_due_deck, next_view, queue_counts, refreshed_card,
+        session_progress, sum_leaf_counts, validate_draft, validate_occlusion,
     };
     use gpui::{point, px, size};
 
@@ -3804,6 +3961,132 @@ mod tests {
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
+    }
+
+    fn mouse_drag(
+        cx: &mut gpui::VisualTestContext,
+        from: gpui::Point<gpui::Pixels>,
+        to: gpui::Point<gpui::Pixels>,
+        button: gpui::MouseButton,
+    ) {
+        cx.simulate_mouse_move(from, None, gpui::Modifiers::none());
+        cx.simulate_mouse_down(from, button, gpui::Modifiers::none());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_move(to, Some(button), gpui::Modifiers::none());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_up(to, button, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn occlusion_canvas_moves_resizes_and_removes_masks(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let media = dir.path().join("media");
+        std::fs::create_dir_all(&media).expect("media directory");
+        image::RgbaImage::new(200, 100)
+            .save(media.join("diagram.png"))
+            .expect("test image");
+        let options = Options {
+            media_dir: media,
+            ..Options::default()
+        };
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(ModalStore),
+                    options,
+                    save_settings: std::sync::Arc::new(|_| Ok(())),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.update_entity(&root, |root, cx| {
+            root.view = super::View::AddCard;
+            let occlusion = root
+                .models
+                .iter()
+                .position(ranki_model::NoteModel::is_image_occlusion)
+                .expect("stock occlusion");
+            root.select_model(occlusion, cx);
+            root.add.occlusion.image = Some(String::from("diagram.png"));
+            root.add.occlusion.masks = vec![OcclusionMask {
+                shape: MaskShape::Rect,
+                rect: NormalizedRect {
+                    left: 0.2,
+                    top: 0.2,
+                    width: 0.4,
+                    height: 0.4,
+                },
+            }];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let bounds = cx.read_entity(&root, |root, _| {
+            root.add.occlusion.bounds.expect("canvas bounds")
+        });
+        let at = |x: f32, y: f32| {
+            point(
+                px(f32::from(bounds.origin.x)
+                    + f32::from(bounds.size.width) * x),
+                px(f32::from(bounds.origin.y)
+                    + f32::from(bounds.size.height) * y),
+            )
+        };
+
+        mouse_drag(cx, at(0.3, 0.3), at(0.4, 0.35), gpui::MouseButton::Left);
+        let moved =
+            cx.read_entity(&root, |root, _| root.add.occlusion.masks[0].rect);
+        assert!((moved.left - 0.3).abs() < 1e-5, "{moved:?}");
+        assert!((moved.top - 0.25).abs() < 1e-5, "{moved:?}");
+        assert_eq!(
+            cx.read_entity(&root, |root, _| root.add.occlusion.masks.len()),
+            1
+        );
+
+        mouse_drag(cx, at(0.35, 0.3), at(0.25, 0.2), gpui::MouseButton::Right);
+        let resized =
+            cx.read_entity(&root, |root, _| root.add.occlusion.masks[0].rect);
+        assert!((resized.left - 0.25).abs() < 1e-5, "{resized:?}");
+        assert!((resized.top - 0.2).abs() < 1e-5, "{resized:?}");
+        assert!((resized.width - 0.45).abs() < 1e-5, "{resized:?}");
+        assert_eq!(
+            cx.read_entity(&root, |root, _| root.add.occlusion.masks.len()),
+            1
+        );
+
+        let click = at(0.475, 0.425);
+        cx.simulate_mouse_move(click, None, gpui::Modifiers::none());
+        cx.simulate_mouse_down(
+            click,
+            gpui::MouseButton::Right,
+            gpui::Modifiers::none(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_up(
+            click,
+            gpui::MouseButton::Right,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read_entity(&root, |root, _| root.add.occlusion.masks.len()),
+            0
+        );
     }
 
     #[gpui::test]
@@ -4563,12 +4846,111 @@ mod tests {
         };
         let start = state.pointer((125., 75.)).expect("start point");
         let end = state.pointer((175., 125.)).expect("end point");
-        state.drag = Some((start.0, start.1, end.0, end.1));
+        state.drag = Some(OcclusionDrag::Draw { start, end });
         let rect = state.drag_rect().expect("drag preview");
         assert_eq!((rect.left, rect.top), (0.125, 0.25));
         assert_eq!((rect.width, rect.height), (0.25, 0.5));
         state.finish_drag();
         assert_eq!(state.masks.len(), 1);
+        assert_eq!(state.drag, None);
+    }
+
+    #[test]
+    fn left_drag_moves_the_mask_under_the_press() {
+        let mut state = OcclusionState {
+            image: Some("diagram.png".into()),
+            bounds: Some(gpui::Bounds {
+                origin: point(px(100.), px(50.)),
+                size: size(px(200.), px(100.)),
+            }),
+            masks: vec![OcclusionMask {
+                shape: MaskShape::Rect,
+                rect: NormalizedRect {
+                    left: 0.2,
+                    top: 0.2,
+                    width: 0.3,
+                    height: 0.3,
+                },
+            }],
+            ..OcclusionState::default()
+        };
+        assert!(state.press((160., 80.), MouseButton::Left));
+        assert!(matches!(
+            state.drag,
+            Some(OcclusionDrag::Move { index: 0, .. })
+        ));
+        assert!(state.drag_to((180., 95.)));
+        let moved = state.masks[0].rect;
+        assert_eq!((moved.left, moved.width, moved.height), (0.3, 0.3, 0.3));
+        assert!((moved.top - 0.35).abs() < 1e-5, "{moved:?}");
+        assert!(!state.finish_drag());
+        assert_eq!(state.masks.len(), 1);
+    }
+
+    #[test]
+    fn right_drag_resizes_from_the_pressed_corner() {
+        let mut state = OcclusionState {
+            image: Some("diagram.png".into()),
+            bounds: Some(gpui::Bounds {
+                origin: point(px(100.), px(50.)),
+                size: size(px(200.), px(100.)),
+            }),
+            masks: vec![OcclusionMask {
+                shape: MaskShape::Rect,
+                rect: NormalizedRect {
+                    left: 0.2,
+                    top: 0.2,
+                    width: 0.4,
+                    height: 0.4,
+                },
+            }],
+            ..OcclusionState::default()
+        };
+        assert!(state.press((150., 75.), MouseButton::Right));
+        assert!(matches!(
+            state.drag,
+            Some(OcclusionDrag::Resize { index: 0, .. })
+        ));
+        assert!(state.drag_to((120., 60.)));
+        let resized = state.masks[0].rect;
+        assert!((resized.left - 0.1).abs() < 1e-5, "{resized:?}");
+        assert!((resized.top - 0.1).abs() < 1e-5, "{resized:?}");
+        assert!((resized.width - 0.5).abs() < 1e-5, "{resized:?}");
+        assert!((resized.height - 0.5).abs() < 1e-5, "{resized:?}");
+        assert!(state.drag_to((220., 115.)));
+        let clamped = state.masks[0].rect;
+        assert!((clamped.left - 0.59).abs() < 1e-5, "{clamped:?}");
+        assert!((clamped.top - 0.59).abs() < 1e-5, "{clamped:?}");
+        assert!((clamped.width - 0.01).abs() < 1e-5, "{clamped:?}");
+        assert!((clamped.height - 0.01).abs() < 1e-5, "{clamped:?}");
+        assert!(!state.finish_drag());
+        assert_eq!(state.masks.len(), 1);
+    }
+
+    #[test]
+    fn right_click_without_dragging_removes_the_mask() {
+        let mut state = OcclusionState {
+            image: Some("diagram.png".into()),
+            bounds: Some(gpui::Bounds {
+                origin: point(px(100.), px(50.)),
+                size: size(px(200.), px(100.)),
+            }),
+            masks: vec![OcclusionMask {
+                shape: MaskShape::Rect,
+                rect: NormalizedRect {
+                    left: 0.2,
+                    top: 0.2,
+                    width: 0.4,
+                    height: 0.4,
+                },
+            }],
+            ..OcclusionState::default()
+        };
+        assert!(state.press((150., 75.), MouseButton::Right));
+        assert!(!state.drag_to((151., 75.)));
+        assert_eq!(state.masks[0].rect.left, 0.2);
+        assert!(state.finish_drag());
+        assert_eq!(state.masks.len(), 0);
         assert_eq!(state.drag, None);
     }
 
@@ -4623,9 +5005,9 @@ mod tests {
         assert_eq!(state.mask_at((0.2, 0.2)), Some(0));
         assert_eq!(state.mask_at((0.35, 0.35)), Some(1));
         assert_eq!(state.mask_at((0.9, 0.9)), None);
-        assert!(state.remove_mask_at((0.35, 0.35)));
+        assert!(state.remove_mask(1));
         assert_eq!(state.masks.len(), 1);
-        assert!(!state.remove_mask_at((0.9, 0.9)));
+        assert!(!state.remove_mask(5));
         state.clear_image();
         assert_eq!(state.image, None);
         assert_eq!(state.masks.len(), 0);
