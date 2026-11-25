@@ -7,7 +7,7 @@ directly, so a collection created here opens in Anki and vice versa.
 
 - `crates/model` (`ranki-model`): shared data types, Anki numeric codes, `Store`
   trait and `StoreError`. Owned by the orchestrator. Do not edit from worktrees.
-- `crates/core` (`ranki-core`): scheduler implementations (FSRS and SM-2) and
+- `crates/core` (`ranki-core`): the Anki-compatible FSRS scheduler and
   deck presets. Depends only on `ranki-model`.
 - `crates/storage` (`ranki-storage`): SQLite collection access. Implements
   `ranki_model::Store` against Anki's `col`, `notes`, `cards`, `revlog` and

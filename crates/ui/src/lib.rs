@@ -49,7 +49,7 @@ use ranki_model::Store;
 use std::sync::Arc;
 
 pub use bench::{BenchApp, BenchKey};
-pub use ranki_model::{SchedulerKind, Settings, ThemeChoice};
+pub use ranki_model::{Settings, ThemeChoice};
 
 /// Writes settings changed in the window back to the shared config file.
 pub type SettingsSaver =

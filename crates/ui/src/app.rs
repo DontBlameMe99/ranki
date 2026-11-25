@@ -12,16 +12,14 @@ use gpui::{
     KeyBinding, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point,
     Render, Window, WindowAppearance, actions, div, point, prelude::*, px,
 };
-use ranki_core::{
-    FsrsParams, FsrsPreset, FsrsScheduler, Scheduler, from_settings,
-};
+use ranki_core::{FsrsScheduler, from_settings};
 use ranki_model::{
     Card, CardQueue, CardType, Deck, DeckStats, Id, NewNote, Note, NoteModel,
     Rating, ReviewDecision, StockModelKind, Store,
 };
 
 use crate::{
-    Options, SchedulerKind, SettingsSaver, ThemeChoice,
+    Options, SettingsSaver, ThemeChoice,
     browser_view::BrowseState,
     card_view::{self, RenderedCard},
     occlusion::{
@@ -68,7 +66,6 @@ actions!(
         SaveNote,
         CancelAdd,
         ToggleHelp,
-        ToggleScheduler,
         ConfirmDialog,
         CancelDialog,
         NextDeck,
@@ -141,7 +138,6 @@ pub struct DeckMenu {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Confirmation {
     RemoveDeck { id: Id, name: String },
-    SwitchScheduler { kind: SchedulerKind },
     Reload,
 }
 
@@ -314,7 +310,7 @@ pub struct Root {
     pub(crate) confirmation: Option<Confirmation>,
     pub(crate) review: ReviewState,
     pub(crate) add: AddState,
-    pub(crate) scheduler: Arc<dyn Scheduler>,
+    pub(crate) scheduler: FsrsScheduler,
     pub(crate) toast: Option<Toast>,
     pub(crate) help_open: bool,
     pub(crate) dev_reveal: bool,
@@ -346,48 +342,6 @@ impl Focusable for Root {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
-}
-
-/// Builds the session scheduler, honoring the optional FSRS settings fields.
-///
-/// `Settings` is serialized so newer fields are read without changing the
-/// shared model or CLI. Missing fields use the scheduler defaults.
-#[must_use]
-pub fn scheduler_from_options(options: &Options) -> Arc<dyn Scheduler> {
-    let mut scheduler = from_settings(options);
-    if options.scheduler != SchedulerKind::Fsrs {
-        return scheduler;
-    }
-    let Ok(value) = serde_json::to_value(options) else {
-        return scheduler;
-    };
-    let weights = value
-        .get("fsrs_params")
-        .and_then(|field| {
-            serde_json::from_value::<Vec<f32>>(field.clone()).ok()
-        })
-        .and_then(|weights| FsrsParams::from_slice(&weights));
-    let Some(mut params) = weights else {
-        return scheduler;
-    };
-    if let Some(decay) = value
-        .get("fsrs_decay")
-        .and_then(|field| serde_json::from_value::<f32>(field.clone()).ok())
-    {
-        let mut values = *params.weights();
-        if let Some(last) = values.last_mut() {
-            *last = decay;
-        }
-        if let Some(updated) = FsrsParams::from_fsrs6(&values) {
-            params = updated;
-        }
-    }
-    let preset = FsrsPreset {
-        desired_retention: options.desired_retention,
-        ..FsrsPreset::default()
-    };
-    scheduler = Arc::new(FsrsScheduler::new(preset).with_params(params));
-    scheduler
 }
 
 impl Root {
@@ -442,7 +396,7 @@ impl Root {
             sync_username.update(cx, |field, cx| field.seed(name, cx));
         }
         let mut root = Self {
-            scheduler: scheduler_from_options(&options),
+            scheduler: from_settings(&options),
             store,
             options,
             focus,
@@ -1764,12 +1718,6 @@ impl Root {
         }
     }
 
-    pub(crate) fn toggle_scheduler(&mut self, cx: &mut Context<Self>) {
-        let other = self.options.scheduler.other();
-        self.confirmation = Some(Confirmation::SwitchScheduler { kind: other });
-        cx.notify();
-    }
-
     pub(crate) fn confirm(&mut self, cx: &mut Context<Self>) {
         match self.confirmation.take() {
             Some(Confirmation::RemoveDeck { id, .. }) => {
@@ -1784,11 +1732,6 @@ impl Root {
                         cx,
                     ),
                 }
-            }
-            Some(Confirmation::SwitchScheduler { kind }) => {
-                self.options.scheduler = kind;
-                self.scheduler = scheduler_from_options(&self.options);
-                self.refresh_previews();
             }
             Some(Confirmation::Reload) => self.reload_collection(cx),
             None => {}
@@ -2116,7 +2059,6 @@ impl Root {
                 self.help_open = !self.help_open;
                 cx.notify();
             }
-            UiAction::ToggleScheduler => self.toggle_scheduler(cx),
             UiAction::Confirm => {
                 if self.create_modal {
                     self.create_deck(window, cx);
@@ -2191,7 +2133,6 @@ pub enum UiAction {
     SaveNote,
     CancelAdd,
     ToggleHelp,
-    ToggleScheduler,
     Confirm,
     CancelDialog,
     NextDeck,
@@ -2311,11 +2252,6 @@ impl From<&ToggleHelp> for UiAction {
         Self::ToggleHelp
     }
 }
-impl From<&ToggleScheduler> for UiAction {
-    fn from(_: &ToggleScheduler) -> Self {
-        Self::ToggleScheduler
-    }
-}
 impl From<&ConfirmDialog> for UiAction {
     fn from(_: &ConfirmDialog) -> Self {
         Self::Confirm
@@ -2406,9 +2342,6 @@ pub fn dispatch_app_action(
         UiAction::CancelAdd => window.dispatch_action(Box::new(CancelAdd), cx),
         UiAction::ToggleHelp => {
             window.dispatch_action(Box::new(ToggleHelp), cx);
-        }
-        UiAction::ToggleScheduler => {
-            window.dispatch_action(Box::new(ToggleScheduler), cx);
         }
         UiAction::Confirm => {
             window.dispatch_action(Box::new(ConfirmDialog), cx);
@@ -2559,11 +2492,6 @@ impl Render for Root {
             .on_action(cx.listener(|this, action: &ToggleHelp, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
-            .on_action(cx.listener(
-                |this, action: &ToggleScheduler, window, cx| {
-                    this.dispatch(UiAction::from(action), window, cx);
-                },
-            ))
             .on_action(cx.listener(
                 |this, action: &ConfirmDialog, window, cx| {
                     this.dispatch(UiAction::from(action), window, cx);
@@ -3278,8 +3206,6 @@ const STUDY_CONTEXT: &str =
 /// Settings shortcuts only apply while the settings screen is mounted.
 const SETTINGS_CONTEXT: &str =
     "ranki > ranki_settings && !ranki_input && !ranki_dialog";
-const REVIEW_CONTEXT: &str =
-    "ranki && ranki_review && !ranki_input && !ranki_dialog";
 const STATISTICS_CONTEXT: &str =
     "ranki && !ranki_review && !ranki_input && !ranki_dialog";
 
@@ -3306,7 +3232,6 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("?", ToggleHelp, Some(STUDY_CONTEXT)),
         KeyBinding::new("shift-?", ToggleHelp, Some(STUDY_CONTEXT)),
         KeyBinding::new("f1", ToggleHelp, Some(STUDY_CONTEXT)),
-        KeyBinding::new("t", ToggleScheduler, Some(REVIEW_CONTEXT)),
         KeyBinding::new("t", OpenStatistics, Some(STATISTICS_CONTEXT)),
         KeyBinding::new("n", NextDeck, Some(STUDY_CONTEXT)),
         KeyBinding::new("d", OpenDecks, Some(SETTINGS_CONTEXT)),
@@ -3336,7 +3261,7 @@ mod tests {
     use ranki_model::Store as _;
     use ranki_model::{
         Card, CardQueue, CardTemplate, CardType, Deck, Id, NewNote, Note,
-        NoteKind, NoteModel, ReviewDecision, SchedulerKind, StoreError,
+        NoteKind, NoteModel, ReviewDecision, StoreError,
     };
 
     use crate::Options;
@@ -3520,14 +3445,10 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_follows_the_configured_algorithm() {
-        let mut options = Options {
-            scheduler: SchedulerKind::Sm2,
-            ..Options::default()
-        };
-        assert_eq!(super::scheduler_from_options(&options).name(), "sm2");
-        options.scheduler = SchedulerKind::Fsrs;
-        assert_eq!(super::scheduler_from_options(&options).name(), "fsrs");
+    fn review_uses_anki_fsrs_defaults() {
+        let scheduler = super::from_settings(&Options::default());
+        assert_eq!(scheduler.params(), &ranki_core::FsrsParams::default());
+        assert_eq!(scheduler.preset().desired_retention, 0.9);
     }
 
     #[test]
@@ -3678,7 +3599,7 @@ mod tests {
     }
 
     #[test]
-    fn statistics_key_is_routed_by_view_context() {
+    fn statistics_key_is_only_bound_in_statistics() {
         let mut keymap = gpui::Keymap::default();
         keymap.add_bindings(super::key_bindings());
         let keystroke = gpui::Keystroke::parse("t").expect("keystroke");
@@ -3698,7 +3619,7 @@ mod tests {
         let (in_input, _) = keymap
             .bindings_for_input(std::slice::from_ref(&keystroke), &typing);
         assert_eq!(on_stats.len(), 1);
-        assert_eq!(in_review.len(), 1);
+        assert!(in_review.is_empty());
         assert!(in_input.is_empty());
     }
 

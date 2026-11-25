@@ -79,7 +79,6 @@ review_batch_size = 20
 show_keyboard_hints = true
 reduce_motion = false # omitted: follow the desktop animation preference
 [scheduler]
-algorithm = "fsrs" # fsrs | sm2
 desired_retention = 0.9
 ```
 
@@ -167,7 +166,6 @@ The review window uses these keys:
 | 1, 2, 3, 4 | Again, Hard, Good, Easy |
 | R | Toggle the answer |
 | Up, Down | Select another deck |
-| T | Switch between FSRS and SM-2 |
 | F5 | Reload the collection |
 
 ## Compatibility
@@ -181,6 +179,9 @@ unused configuration keys may not survive a round trip. Anki's sync protocol
 is limited to login, metadata checks, and full collection transfers. Media sync
 and delta merges are not implemented, and AnkiConnect support is a subset of the
 upstream API.
+
+All reviews use Anki-compatible FSRS: Anki's default parameters unless the
+config overrides them, and memory state stored in `cards.data` for Anki to read.
 
 ## Testing
 

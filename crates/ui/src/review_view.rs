@@ -576,7 +576,6 @@ impl Root {
         let undo = self.action_click(UiAction::Undo);
         let help = self.action_click(UiAction::ToggleHelp);
         let add = self.action_click(UiAction::OpenAdd);
-        let scheduler = self.action_click(UiAction::ToggleScheduler);
         screen.child(
             div()
                 .h(px(FOOTER_HEIGHT))
@@ -606,27 +605,16 @@ impl Root {
                             help,
                         )),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(SPACE_INLINE))
-                        .child(footer_action(
-                            "Scheduler",
-                            "T",
-                            Some("icon-clock"),
-                            colors,
-                            true,
-                            scheduler,
-                        ))
-                        .child(footer_action(
-                            "Add card",
-                            "A",
-                            Some("icon-plus"),
-                            colors,
-                            true,
-                            add,
-                        )),
-                ),
+                .child(div().flex().gap(px(SPACE_INLINE)).child(
+                    footer_action(
+                        "Add card",
+                        "A",
+                        Some("icon-plus"),
+                        colors,
+                        true,
+                        add,
+                    ),
+                )),
         )
     }
 }

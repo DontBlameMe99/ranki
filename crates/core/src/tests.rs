@@ -2,9 +2,8 @@ use ranki_model::{Card, CardQueue, CardType, Rating, RevLogKind};
 
 use super::{
     ANKI_DEFAULT_PARAMS, DEFAULT_DECAY, FsrsParams, FsrsPreset, FsrsScheduler,
-    MAX_DESIRED_RETENTION, MIN_DESIRED_RETENTION, Scheduler, Sm2Preset,
-    Sm2Scheduler, clamp_desired_retention, interval_days_for_stability,
-    raw_interval_days_for_stability,
+    MAX_DESIRED_RETENTION, MIN_DESIRED_RETENTION, clamp_desired_retention,
+    interval_days_for_stability, raw_interval_days_for_stability,
 };
 
 const NOW: i64 = 1_700_000_000;
@@ -178,7 +177,6 @@ fn fsrs_same_day_uses_short_term_scaling() {
 #[test]
 fn suspended_buried_and_preview_cards_are_unchanged() {
     let fsrs = FsrsScheduler::default();
-    let sm2 = Sm2Scheduler::default();
     for queue in [CardQueue::Suspended, CardQueue::Buried, CardQueue::Preview] {
         let card = Card {
             queue,
@@ -186,12 +184,8 @@ fn suspended_buried_and_preview_cards_are_unchanged() {
         };
         let fsrs_decision =
             fsrs.schedule(&card, Rating::Good, NOW, COLLECTION_START);
-        let sm2_decision =
-            sm2.schedule(&card, Rating::Good, NOW, COLLECTION_START);
         assert_eq!(fsrs_decision.card, card);
-        assert_eq!(sm2_decision.card, card);
         assert_eq!(fsrs_decision.revlog.kind, RevLogKind::Manual);
-        assert_eq!(sm2_decision.revlog.kind, RevLogKind::Manual);
     }
 }
 
@@ -243,17 +237,6 @@ fn extreme_inputs_do_not_panic() {
             );
         }
     }
-    let sm2 = Sm2Scheduler::new(Sm2Preset {
-        learning_steps_minutes: vec![u32::MAX],
-        relearning_steps_minutes: vec![u32::MAX],
-        minimum_ease: u32::MAX,
-        easy_bonus: f32::NAN,
-    });
-    for rating in [Rating::Again, Rating::Hard, Rating::Good, Rating::Easy] {
-        let decision =
-            sm2.schedule(&extreme, rating, i64::MAX, COLLECTION_START);
-        assert_eq!(decision.card.factor, u32::MAX);
-    }
 }
 
 #[test]
@@ -268,90 +251,6 @@ fn revlog_matches_contract() {
     assert_eq!(decision.revlog.time_ms, 0);
     assert_eq!(decision.revlog.ease, Rating::Good);
     assert_eq!(decision.revlog.kind, RevLogKind::Review);
-}
-
-#[test]
-fn sm2_reference_intervals_are_one_six_fifteen() {
-    let scheduler = Sm2Scheduler::default();
-    let mut card = Card {
-        interval: 0,
-        reps: 0,
-        ..base_card()
-    };
-    let mut now = NOW;
-    for expected in [1, 6, 15] {
-        let decision =
-            scheduler.schedule(&card, Rating::Good, now, COLLECTION_START);
-        assert_eq!(decision.card.interval, expected);
-        advance(&decision.card, &mut now);
-        card = decision.card;
-    }
-}
-
-#[test]
-fn sm2_again_resets_to_relearning_and_reduces_factor() {
-    let scheduler = Sm2Scheduler::default();
-    let card = Card {
-        interval: 30,
-        ..base_card()
-    };
-    let decision =
-        scheduler.schedule(&card, Rating::Again, NOW, COLLECTION_START);
-    assert_eq!(decision.card.card_type, CardType::Relearning);
-    assert_eq!(decision.card.queue, CardQueue::Learning);
-    assert_eq!(decision.card.lapses, 1);
-    assert_eq!(decision.card.factor, 2_300);
-    assert_eq!(decision.revlog.kind, RevLogKind::Relearn);
-}
-
-#[test]
-fn sm2_learning_steps_and_easy_graduation() {
-    let scheduler = Sm2Scheduler::default();
-    let first =
-        scheduler.schedule(&new_card(), Rating::Good, NOW, COLLECTION_START);
-    assert_eq!(first.card.card_type, CardType::Learning);
-    assert_eq!(first.card.left, 1_001);
-    let graduated = scheduler.schedule(
-        &first.card,
-        Rating::Easy,
-        NOW.saturating_add(60),
-        COLLECTION_START,
-    );
-    assert_eq!(graduated.card.card_type, CardType::Review);
-    assert_eq!(graduated.card.interval, 4);
-}
-
-#[test]
-fn sm2_ease_floor_and_easy_bonus() {
-    let scheduler = Sm2Scheduler::new(Sm2Preset {
-        minimum_ease: 2_400,
-        easy_bonus: 1.5,
-        ..Sm2Preset::default()
-    });
-    let low_factor = Card {
-        factor: 1_000,
-        ..base_card()
-    };
-    let lapse =
-        scheduler.schedule(&low_factor, Rating::Again, NOW, COLLECTION_START);
-    assert_eq!(lapse.card.factor, 2_400);
-
-    let plain = Sm2Scheduler::default();
-    let good =
-        plain.schedule(&base_card(), Rating::Good, NOW, COLLECTION_START);
-    let easy =
-        plain.schedule(&base_card(), Rating::Easy, NOW, COLLECTION_START);
-    assert!(easy.card.interval > good.card.interval);
-}
-
-#[test]
-fn scheduler_names_and_presets() {
-    let fsrs = FsrsScheduler::default();
-    let sm2 = Sm2Scheduler::default();
-    assert_eq!(fsrs.name(), "fsrs");
-    assert_eq!(sm2.name(), "sm2");
-    assert_eq!(fsrs.preset(), &FsrsScheduler::default_preset());
-    assert_eq!(sm2.preset(), &Sm2Preset::default());
 }
 
 #[test]
@@ -401,41 +300,23 @@ fn fsrs_same_day_good_and_easy_do_not_shrink() {
 
 #[test]
 fn previews_are_pure_and_match_scheduling() {
-    let fsrs = FsrsScheduler::new(fsrs_preset(false, 0.9));
-    let sm2 = Sm2Scheduler::default();
-    for (scheduler, card) in [
-        (&fsrs as &dyn Scheduler, fsrs_card()),
-        (&sm2 as &dyn Scheduler, new_card()),
-    ] {
-        for rating in [Rating::Again, Rating::Hard, Rating::Good, Rating::Easy]
-        {
-            let preview =
-                scheduler.preview(&card, rating, NOW, COLLECTION_START);
-            assert_eq!(
-                preview,
-                scheduler.preview(&card, rating, NOW, COLLECTION_START)
-            );
-            let decision =
-                scheduler.schedule(&card, rating, NOW, COLLECTION_START);
-            assert_eq!(decision.revlog.interval, preview);
-        }
+    let scheduler = FsrsScheduler::new(fsrs_preset(false, 0.9));
+    let card = fsrs_card();
+    for rating in [Rating::Again, Rating::Hard, Rating::Good, Rating::Easy] {
+        let preview = scheduler.preview(&card, rating, NOW, COLLECTION_START);
+        assert_eq!(
+            preview,
+            scheduler.preview(&card, rating, NOW, COLLECTION_START)
+        );
+        let decision = scheduler.schedule(&card, rating, NOW, COLLECTION_START);
+        assert_eq!(decision.revlog.interval, preview);
     }
 }
 
 #[test]
 fn scheduler_is_built_from_settings() {
-    let settings = ranki_model::Settings {
-        scheduler: ranki_model::SchedulerKind::Sm2,
-        ..ranki_model::Settings::default()
-    };
-    assert_eq!(super::from_settings(&settings).name(), "sm2");
-
     let card = fsrs_card();
-    let standard = ranki_model::Settings {
-        scheduler: ranki_model::SchedulerKind::Fsrs,
-        desired_retention: 0.9,
-        ..ranki_model::Settings::default()
-    };
+    let standard = ranki_model::Settings::default();
     let easy = ranki_model::Settings {
         desired_retention: 0.8,
         ..standard.clone()
@@ -453,6 +334,15 @@ fn scheduler_is_built_from_settings() {
         COLLECTION_START,
     );
     assert_ne!(standard_interval, easy_interval);
+
+    let tuned = ranki_model::Settings {
+        fsrs_params: LEGACY_FSRS5_WEIGHTS.to_vec(),
+        fsrs_decay: 0.42,
+        ..ranki_model::Settings::default()
+    };
+    let scheduler = super::from_settings(&tuned);
+    assert_eq!(scheduler.params().decay(), 0.42);
+    assert_eq!(scheduler.params().weights().last(), Some(&0.42));
 }
 
 const LEGACY_FSRS5_WEIGHTS: [f32; 19] = [

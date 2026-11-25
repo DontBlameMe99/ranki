@@ -22,37 +22,6 @@ pub enum ThemeChoice {
     System,
 }
 
-/// Scheduler available for a review session.
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum SchedulerKind {
-    #[default]
-    Fsrs,
-    Sm2,
-}
-
-impl SchedulerKind {
-    /// The other scheduler, used by the session choice shortcut.
-    #[must_use]
-    pub const fn other(self) -> Self {
-        match self {
-            Self::Fsrs => Self::Sm2,
-            Self::Sm2 => Self::Fsrs,
-        }
-    }
-
-    /// Short name shown in the sidebar and review header.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Fsrs => "FSRS",
-            Self::Sm2 => "SM-2",
-        }
-    }
-}
-
 /// Settings after CLI flags, config, and defaults are merged.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[expect(
@@ -69,7 +38,6 @@ pub struct Settings {
     pub show_keyboard_hints: bool,
     /// `None` follows the desktop animation preference.
     pub reduce_motion: Option<bool>,
-    pub scheduler: SchedulerKind,
     pub desired_retention: f32,
     pub auto_optimize: bool,
     pub fsrs_params: Vec<f32>,
@@ -117,7 +85,6 @@ impl Default for Settings {
             review_batch_size: 20,
             show_keyboard_hints: true,
             reduce_motion: None,
-            scheduler: SchedulerKind::Fsrs,
             desired_retention: 0.9,
             auto_optimize: true,
             fsrs_params: Vec::new(),
@@ -164,7 +131,6 @@ impl Settings {
             review_batch_size: config.ui.review_batch_size,
             show_keyboard_hints: config.ui.show_keyboard_hints,
             reduce_motion: config.ui.reduce_motion,
-            scheduler: config.scheduler.algorithm,
             desired_retention: config.scheduler.desired_retention,
             auto_optimize: config.scheduler.auto_optimize,
             fsrs_params: config.scheduler.params.clone(),
@@ -268,8 +234,6 @@ impl Default for UiConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SchedulerConfig {
-    #[serde(deserialize_with = "algorithm_field")]
-    pub algorithm: SchedulerKind,
     #[serde(deserialize_with = "retention_field")]
     pub desired_retention: f32,
     #[serde(deserialize_with = "auto_optimize_field")]
@@ -287,7 +251,6 @@ pub struct SchedulerConfig {
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
-            algorithm: SchedulerKind::Fsrs,
             desired_retention: 0.9,
             auto_optimize: true,
             params: Vec::new(),
@@ -307,7 +270,6 @@ const UI_KEYS: &[&str] = &[
     "reduce_motion",
 ];
 const SCHEDULER_KEYS: &[&str] = &[
-    "algorithm",
     "desired_retention",
     "auto_optimize",
     "params",
@@ -498,21 +460,6 @@ where
     )
 }
 
-fn algorithm_field<'de, D>(deserializer: D) -> Result<SchedulerKind, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = choice_text(deserializer, "scheduler.algorithm")?;
-    match value.as_str() {
-        "fsrs" => Ok(SchedulerKind::Fsrs),
-        "sm2" => Ok(SchedulerKind::Sm2),
-        _ => {
-            invalid("scheduler.algorithm");
-            Ok(SchedulerKind::Fsrs)
-        }
-    }
-}
-
 fn retention_field<'de, D>(deserializer: D) -> Result<f32, D::Error>
 where
     D: Deserializer<'de>,
@@ -671,15 +618,12 @@ where
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{
-        Config, SchedulerKind, Settings, ThemeChoice, media_dir_for, parse,
-    };
+    use super::{Config, Settings, ThemeChoice, media_dir_for, parse};
 
     #[test]
     fn defaults_are_stable() {
         assert_eq!(parse(""), Config::default());
         assert_eq!(Settings::default().theme, ThemeChoice::System);
-        assert_eq!(Settings::default().scheduler, SchedulerKind::Fsrs);
     }
 
     #[test]
@@ -688,15 +632,23 @@ mod tests {
             "[general]\ncollection = '/data/c.anki2'\nmedia_dir = '/data/media'\n\
              [ui]\ntheme = 'light'\nfont_size = 18.0\nreview_batch_size = 40\n\
              show_keyboard_hints = false\n\
-             [scheduler]\nalgorithm = 'sm2'\ndesired_retention = 0.85\n",
+             [scheduler]\ndesired_retention = 0.85\n",
         );
         assert_eq!(config.general.collection.as_deref(), Some("/data/c.anki2"));
         assert_eq!(config.ui.theme, ThemeChoice::Light);
         assert_eq!(config.ui.font_size, 18.0);
         assert_eq!(config.ui.review_batch_size, 40);
         assert!(!config.ui.show_keyboard_hints);
-        assert_eq!(config.scheduler.algorithm, SchedulerKind::Sm2);
         assert_eq!(config.scheduler.desired_retention, 0.85);
+    }
+
+    #[test]
+    fn legacy_scheduler_algorithm_is_ignored() {
+        let config =
+            parse("[scheduler]\nalgorithm = 'sm2'\ndesired_retention = 0.85\n");
+        assert_eq!(config.scheduler.desired_retention, 0.85);
+        assert_eq!(config.scheduler.params, Vec::<f32>::new());
+        assert!(!toml::to_string(&config).unwrap().contains("algorithm"));
     }
 
     #[test]
@@ -704,7 +656,7 @@ mod tests {
         let config = parse(
             "[ui]\nthem = 'dark'\ntheme = 'solarized'\nfont_size = -4\n\
              review_batch_size = 0\nshow_keyboard_hints = 'yes'\n\
-             [scheduler]\nalgorithm = 'magic'\ndesired_retention = 2.0\n",
+             [scheduler]\nparams = [1.0]\ndesired_retention = 2.0\n",
         );
         assert_eq!(config, Config::default());
     }

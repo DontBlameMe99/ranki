@@ -4,7 +4,6 @@ use ranki_model::CardQueue;
 use ranki_model::CardType;
 use ranki_model::Rating;
 use ranki_model::RevLogKind;
-use ranki_model::SchedulerKind;
 use ranki_model::ThemeChoice;
 use ranki_model::config::parse;
 
@@ -66,22 +65,14 @@ fn rating_and_review_kinds_cover_every_code() {
 }
 
 #[test]
-fn scheduler_choices_switch_and_have_labels() {
-    assert_eq!(SchedulerKind::Fsrs.other(), SchedulerKind::Sm2);
-    assert_eq!(SchedulerKind::Sm2.other(), SchedulerKind::Fsrs);
-    assert_eq!(SchedulerKind::Fsrs.label(), "FSRS");
-    assert_eq!(SchedulerKind::Sm2.label(), "SM-2");
-}
-
-#[test]
 fn invalid_config_values_fall_back_field_by_field() {
     let config = parse(
-        "[general]\ncollection = ''\n[ui]\ntheme = ''\nshow_keyboard_hints = 'no'\n[scheduler]\nalgorithm = 'nope'\n",
+        "[general]\ncollection = ''\n[ui]\ntheme = ''\nshow_keyboard_hints = 'no'\n[scheduler]\ndesired_retention = 'no'\n",
     );
     assert_eq!(config.general.collection, None);
     assert_eq!(config.ui.theme, ThemeChoice::System);
     assert!(config.ui.show_keyboard_hints);
-    assert_eq!(config.scheduler.algorithm, SchedulerKind::Fsrs);
+    assert_eq!(config.scheduler.desired_retention, 0.9);
 }
 
 #[test]

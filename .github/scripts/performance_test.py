@@ -212,17 +212,17 @@ class FloorTest(unittest.TestCase):
             self.assertEqual(meta["floor"]["core/fsrs"], other)
 
     def test_ceiling_only_lowers_when_worst_run_beats_it(self):
-        first = report([("core/sm2", 100.0, 10.0)])
+        first = report([("storage/review/write", 100.0, 10.0)])
         floor = floor_for(first)
-        noisy = report([("core/sm2", 100.0, 9.0)])
+        noisy = report([("storage/review/write", 100.0, 9.0)])
         noisy["results"][0]["worst_median_ms"] = 11.0
         kept = record_floor(floor, noisy, SHA, "2026-01-02T00:00:00Z")
-        self.assertEqual(kept["metrics"]["core/sm2"]["median_ms"], 10.0)
-        improved = report([("core/sm2", 50.0, 8.0)])
+        self.assertEqual(kept["metrics"]["storage/review/write"]["median_ms"], 10.0)
+        improved = report([("storage/review/write", 50.0, 8.0)])
         improved["results"][0]["worst_median_ms"] = 8.5
         lowered = record_floor(kept, improved, SHA, "2026-01-03T00:00:00Z")
-        self.assertEqual(lowered["metrics"]["core/sm2"]["median_ms"], 8.0)
-        self.assertEqual(lowered["metrics"]["core/sm2"]["budget_ms"], 50.0)
+        self.assertEqual(lowered["metrics"]["storage/review/write"]["median_ms"], 8.0)
+        self.assertEqual(lowered["metrics"]["storage/review/write"]["budget_ms"], 50.0)
         validate_aggregate(improved)
 
 class StitchTest(unittest.TestCase):
