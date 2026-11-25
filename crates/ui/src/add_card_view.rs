@@ -16,8 +16,9 @@ use crate::{
     occlusion::{self, OcclusionMask},
     theme::{
         ADD_CONTENT_WIDTH, ADD_FORM_WIDTH, ADD_GAP, NAV_WIDTH, PAGE_X,
-        PREVIEW_WIDTH, Style, alpha,
-    SPACE_INLINE, SPACE_GROUP, SPACE_RELATED, SPACE_BLOCK, SPACE_SECTION, SPACE_GUTTER, },
+        PREVIEW_WIDTH, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE,
+        SPACE_RELATED, SPACE_SECTION, Style, alpha,
+    },
 };
 
 /// Height of the occlusion drawing area.
@@ -223,8 +224,12 @@ impl Root {
             model.is_some_and(ranki_model::NoteModel::is_image_occlusion);
         let is_cloze = model
             .is_some_and(|model| model.kind == ranki_model::NoteKind::Cloze);
-        let mut left =
-            div().flex().flex_col().w_full().gap(px(SPACE_BLOCK)).min_w(px(0.));
+        let mut left = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap(px(SPACE_BLOCK))
+            .min_w(px(0.));
         if occlusion_mode {
             let editor = self.render_occlusion_editor(colors, &errors, cx);
             left = left.child(editor);
@@ -1163,7 +1168,8 @@ fn formatting_toolbar(
             toolbar = toolbar.child(cloze_button(
                 format!("[…] Link c{number}"),
                 number,
-                field,                handle,
+                field,
+                handle,
             ));
         }
     }
