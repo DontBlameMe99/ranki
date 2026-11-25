@@ -16,17 +16,6 @@ impl Root {
     pub(crate) fn render_settings(&self) -> impl IntoElement {
         let colors = self.colors();
         let chosen = self.options.theme;
-        let note = match chosen {
-            ThemeChoice::Light => {
-                "Light uses Catppuccin Latte with a mauve accent."
-            }
-            ThemeChoice::Dark => {
-                "Dark uses Catppuccin Mocha with a mauve accent."
-            }
-            ThemeChoice::System => {
-                "System follows the desktop light or dark appearance."
-            }
-        };
 
         let mut segments = div()
             .flex()
@@ -35,10 +24,10 @@ impl Root {
             .p(px(4.))
             .rounded(px(12.))
             .bg(colors.surface0);
-        for (choice, label, detail, key) in [
-            (ThemeChoice::Light, "Light", "Catppuccin Latte", "1"),
-            (ThemeChoice::Dark, "Dark", "Catppuccin Mocha", "2"),
-            (ThemeChoice::System, "System", "Follow desktop", "3"),
+        for (choice, label, key) in [
+            (ThemeChoice::Light, "Light", "1"),
+            (ThemeChoice::Dark, "Dark", "2"),
+            (ThemeChoice::System, "System", "3"),
         ] {
             let selected = chosen == choice;
             let ink = if selected {
@@ -59,7 +48,7 @@ impl Root {
                     .flex_col()
                     .gap(px(2.))
                     .w(px(112.))
-                    .h(px(62.))
+                    .h(px(44.))
                     .items_center()
                     .justify_center()
                     .rounded(px(9.))
@@ -71,12 +60,6 @@ impl Root {
                     .hover(move |element| element.bg(hover))
                     .on_click(self.action_click(UiAction::SetTheme(choice)))
                     .child(label)
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(detail),
-                    )
                     .child(keycap(key, colors, false)),
             );
         }
@@ -136,58 +119,11 @@ impl Root {
                             .gap(px(24.))
                             .child(
                                 div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(6.))
-                                    .child(
-                                        div()
-                                            .text_size(px(14.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child("Theme"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(13.))
-                                            .text_color(colors.subtext)
-                                            .child(note),
-                                    ),
+                                    .text_size(px(14.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Theme"),
                             )
                             .child(segments),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(
-                        div()
-                            .w(px(18.))
-                            .h(px(18.))
-                            .rounded(px(6.))
-                            .bg(colors.base)
-                            .border_1()
-                            .border_color(colors.surface1),
-                    )
-                    .child(
-                        div()
-                            .w(px(18.))
-                            .h(px(18.))
-                            .rounded(px(6.))
-                            .bg(colors.surface0),
-                    )
-                    .child(
-                        div()
-                            .w(px(18.))
-                            .h(px(18.))
-                            .rounded(px(6.))
-                            .bg(colors.mauve),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(colors.overlay)
-                            .child("Base, surface, accent"),
                     ),
             )
     }
