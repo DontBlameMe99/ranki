@@ -16,8 +16,8 @@ use ranki_core::{
     FsrsParams, FsrsPreset, FsrsScheduler, Scheduler, from_settings,
 };
 use ranki_model::{
-    Card, CardType, Deck, DeckStats, Id, NewNote, Note, NoteModel, Rating,
-    ReviewDecision, StockModelKind, Store,
+    Card, CardQueue, CardType, Deck, DeckStats, Id, NewNote, Note, NoteModel,
+    Rating, ReviewDecision, StockModelKind, Store,
 };
 
 use crate::{
@@ -33,6 +33,8 @@ use crate::{
     theme::{self, Palette, Theme, interval_label},
 };
 
+/// Anki shows learning cards due within this window when the queue runs dry.
+pub const LEARN_AHEAD_SECS: i64 = 20 * 60;
 pub const DEBOUNCE: Duration = Duration::from_millis(120);
 pub const FORECAST_DAYS: usize = 7;
 const TOAST_LIFETIME: Duration = Duration::from_secs(5);
@@ -237,6 +239,8 @@ pub struct UndoEntry {
     pub rating: Rating,
     /// Time the undone card contributed to the session total.
     pub spent: Duration,
+    /// Whether this grade added a learning repeat to the session total.
+    pub requeued: bool,
 }
 
 /// Rendered halves of one card, prepared before a session transition.
@@ -250,6 +254,8 @@ struct LoadedCard {
 #[derive(Default)]
 pub struct ReviewState {
     pub queue: VecDeque<Card>,
+    /// Learning cards waiting for their next step inside this session.
+    pub pending: VecDeque<Card>,
     pub seen: HashSet<Id>,
     pub current: Option<Card>,
     pub note: Option<Note>,
@@ -1339,6 +1345,7 @@ impl Root {
 
     pub(crate) fn end_session(&mut self, cx: &mut Context<Self>) {
         self.review.queue.clear();
+        self.review.pending.clear();
         self.review.current = None;
         self.review.last_grade = None;
         self.review.phase = Phase::Question;
@@ -1367,7 +1374,50 @@ impl Root {
         }
     }
 
+    /// Picks the earliest learning card due by `cutoff_secs`.
+    ///
+    /// Learning dues are Unix milliseconds; review dues are day numbers, so only
+    /// queued learning cards can be pulled forward.
+    fn due_learning_card(
+        pending: &VecDeque<Card>,
+        cutoff_secs: i64,
+    ) -> Option<Card> {
+        let cutoff_ms = cutoff_secs.saturating_mul(1_000);
+        pending
+            .iter()
+            .filter(|card| {
+                matches!(
+                    card.queue,
+                    CardQueue::Learning | CardQueue::DayLearning
+                ) && card.due <= cutoff_ms
+            })
+            .min_by_key(|card| card.due)
+            .cloned()
+    }
+
+    fn take_learning_card(
+        &mut self,
+        cutoff_secs: i64,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(card) =
+            Self::due_learning_card(&self.review.pending, cutoff_secs)
+        else {
+            return false;
+        };
+        self.review.pending.retain(|entry| entry.id != card.id);
+        let _ = self.review.seen.remove(&card.id);
+        if !self.load_card(&card, cx) {
+            self.review.load_errors = self.review.load_errors.saturating_add(1);
+        }
+        true
+    }
+
     fn ensure_current(&mut self, cx: &mut Context<Self>) {
+        let now = Self::now();
+        while self.review.current.is_none() && self.take_learning_card(now, cx)
+        {
+        }
         while self.review.current.is_none()
             && let Some(card) = self.review.queue.pop_front()
         {
@@ -1381,6 +1431,10 @@ impl Root {
                 continue;
             }
             break;
+        }
+        while self.review.current.is_none()
+            && self.take_learning_card(now.saturating_add(LEARN_AHEAD_SECS), cx)
+        {
         }
         if self.review.current.is_none() {
             self.review.question = None;
@@ -1578,12 +1632,23 @@ impl Root {
             .review
             .studied
             .saturating_add(self.review.focused_elapsed);
+        let requeued = matches!(
+            decision.card.queue,
+            CardQueue::Learning | CardQueue::DayLearning
+        );
         self.review.last_grade = Some(UndoEntry {
             card,
             revlog_id: decision.revlog.id,
             rating,
             spent: self.review.focused_elapsed,
+            requeued,
         });
+        if requeued {
+            let _ = self.review.seen.remove(&decision.card.id);
+            self.review.pending.push_back(decision.card);
+            self.review.session_total =
+                self.review.session_total.saturating_add(1);
+        }
         self.review.focused_elapsed = Duration::ZERO;
         self.review.current = None;
         self.review.note = None;
@@ -1637,7 +1702,15 @@ impl Root {
                 ));
                 if let Some(current) = self.review.current.clone() {
                     let _ = self.review.seen.remove(&current.id);
-                    self.review.queue.push_front(current);
+                    self.review.pending.retain(|card| card.id != current.id);
+                    if current.id != entry.card.id {
+                        self.review.queue.push_front(current);
+                    }
+                }
+                self.review.pending.retain(|card| card.id != entry.card.id);
+                if entry.requeued {
+                    self.review.session_total =
+                        self.review.session_total.saturating_sub(1);
                 }
                 let _ = self.review.seen.remove(&entry.card.id);
                 let Some(restored) =
@@ -2672,16 +2745,21 @@ pub fn session_progress(answered: usize, total: usize) -> f32 {
     (answered as f32 / total as f32).clamp(0.0, 1.0)
 }
 
-/// Remaining cards in the session, split by queue. The current card counts as
-/// remaining until it is graded, so the header never claims a card is done
-/// while it still fills the stage.
+/// Remaining cards in the session, split by queue. Learning cards waiting for
+/// their next step and the current card count as remaining, so the header never
+/// claims a card is done while it will appear again.
 #[must_use]
 pub fn queue_counts(
     current: Option<&Card>,
     queue: &VecDeque<Card>,
+    pending: &VecDeque<Card>,
 ) -> DeckStats {
     let mut stats = DeckStats::default();
-    for card in current.into_iter().chain(queue.iter()) {
+    for card in current
+        .into_iter()
+        .chain(queue.iter())
+        .chain(pending.iter())
+    {
         stats.total_cards = stats.total_cards.saturating_add(1);
         match card.card_type {
             CardType::New => {
@@ -3182,7 +3260,7 @@ mod tests {
     use std::time::Duration;
 
     use ranki_model::{
-        Card, CardTemplate, CardType, Deck, Id, NoteKind, NoteModel,
+        Card, CardQueue, CardTemplate, CardType, Deck, Id, NoteKind, NoteModel,
         SchedulerKind,
     };
 
@@ -3239,12 +3317,15 @@ mod tests {
         let mut queue = VecDeque::new();
         queue.push_back(make(2, CardType::Learning));
         queue.push_back(make(3, CardType::Review));
-        let stats = queue_counts(Some(&make(1, CardType::New)), &queue);
+        let mut pending = VecDeque::new();
+        pending.push_back(make(4, CardType::Learning));
+        let stats =
+            queue_counts(Some(&make(1, CardType::New)), &queue, &pending);
         assert_eq!(stats.new_cards, 1);
-        assert_eq!(stats.learning_cards, 1);
+        assert_eq!(stats.learning_cards, 2);
         assert_eq!(stats.review_cards, 1);
-        assert_eq!(stats.total_cards, 3);
-        let empty = queue_counts(None, &VecDeque::new());
+        assert_eq!(stats.total_cards, 4);
+        let empty = queue_counts(None, &VecDeque::new(), &VecDeque::new());
         assert_eq!(empty, ranki_model::DeckStats::default());
     }
 
@@ -3776,5 +3857,48 @@ mod tests {
         assert_eq!(chips, ["japan", "verb"]);
         assert_eq!(collect_tags(&mut chips, " 	 "), "");
         assert_eq!(chips, ["japan", "verb"]);
+    }
+
+    #[test]
+    fn learn_ahead_pulls_learning_cards_within_twenty_minutes() {
+        let now = 1_700_000_000;
+        let card = |id, queue, due| Card {
+            id,
+            note_id: 0,
+            deck_id: 0,
+            ordinal: 0,
+            modified: now,
+            usn: -1,
+            card_type: CardType::Learning,
+            queue,
+            due,
+            interval: -600,
+            factor: 2_500,
+            reps: 1,
+            lapses: 0,
+            left: 1_001,
+            original_due: 0,
+            original_deck_id: 0,
+            flags: 0,
+            data: String::new(),
+        };
+        let mut pending = VecDeque::new();
+        pending.push_back(card(
+            1,
+            CardQueue::Learning,
+            (now + 10 * 60) * 1_000,
+        ));
+        pending.push_back(card(2, CardQueue::Review, (now + 60) * 1_000));
+        pending.push_back(card(4, CardQueue::Learning, (now + 60) * 1_000));
+        pending.push_back(card(
+            3,
+            CardQueue::Learning,
+            (now + 21 * 60) * 1_000,
+        ));
+        let picked = super::Root::due_learning_card(
+            &pending,
+            now + super::LEARN_AHEAD_SECS,
+        );
+        assert_eq!(picked.map(|card| card.id), Some(4));
     }
 }

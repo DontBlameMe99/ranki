@@ -29,6 +29,8 @@ pub struct ReviewOutcome {
     pub data: String,
     pub kind: RevLogKind,
     pub step_seconds: Option<u32>,
+    /// Interval before this answer: days, or negative learning seconds.
+    pub last_interval: Option<i32>,
 }
 
 pub struct StepConfig<'steps> {
@@ -41,11 +43,13 @@ pub struct StepConfig<'steps> {
 
 #[derive(Clone, Copy)]
 pub struct FuzzInput {
-    pub interval: i32,
-    pub maximum_interval: i32,
+    /// Raw, unrounded interval in days.
+    pub interval: f32,
+    pub minimum: u32,
+    pub maximum: u32,
     pub card_id: i64,
     pub reps: u32,
-    pub rating: Rating,
+
     pub enabled: bool,
 }
 
@@ -105,14 +109,29 @@ fn half_sum(first: u64, second: u64) -> Option<u32> {
     u32::try_from(half).ok()
 }
 
+#[expect(
+    clippy::integer_division,
+    reason = "Anki rounds learning day delays to whole days"
+)]
+const fn maybe_round_in_days(seconds: u32) -> u32 {
+    const DAY: u32 = 86_400;
+    if seconds <= DAY {
+        return seconds;
+    }
+    let half = DAY / 2;
+    let days = seconds.saturating_add(half) / DAY;
+    days.saturating_mul(DAY)
+}
+
 fn first_step_hard_delay(steps: &[u32]) -> Option<u32> {
     let first = minutes_to_seconds(steps.first().copied().unwrap_or(1));
-    steps.get(1).copied().map_or_else(
-        || half_sum(u64::from(first).saturating_mul(3), 0),
-        |second| {
-            half_sum(u64::from(first), u64::from(minutes_to_seconds(second)))
-        },
-    )
+    let seconds = if let Some(second) = steps.get(1) {
+        half_sum(u64::from(first), u64::from(minutes_to_seconds(*second)))?
+    } else {
+        half_sum(u64::from(first).saturating_mul(3), 0)?
+            .min(first.saturating_add(86_400))
+    };
+    Some(maybe_round_in_days(seconds))
 }
 
 /// `None` graduates the card; `Some` keeps it in a learning step.
@@ -132,7 +151,10 @@ pub fn step_delay_seconds(
             if remaining <= 1 {
                 None
             } else {
-                steps.get(index).copied().map(minutes_to_seconds)
+                steps
+                    .get(index.saturating_add(1))
+                    .copied()
+                    .map(minutes_to_seconds)
             }
         }
         Rating::Hard => {
@@ -168,6 +190,8 @@ pub fn step_outcome(
                 Rating::Good => remaining.saturating_sub(1),
                 Rating::Easy => 0,
             };
+            let interval =
+                i32::try_from(seconds).unwrap_or(i32::MAX).saturating_neg();
             ReviewOutcome {
                 card_type: if config.relearning {
                     CardType::Relearning
@@ -176,7 +200,7 @@ pub fn step_outcome(
                 },
                 queue: CardQueue::Learning,
                 due: due_from_seconds(ctx.now_secs, seconds),
-                interval: 0,
+                interval,
                 lapses: 0,
                 left: LEFT_STEP_MARKER.saturating_add(
                     u32::try_from(steps_left).unwrap_or(MAX_STEPS),
@@ -185,6 +209,7 @@ pub fn step_outcome(
                 data: config.data,
                 kind,
                 step_seconds: Some(seconds),
+                last_interval: Some(ctx.card.interval),
             }
         }
         None => ReviewOutcome {
@@ -202,6 +227,7 @@ pub fn step_outcome(
             data: config.data,
             kind,
             step_seconds: None,
+            last_interval: Some(ctx.card.interval),
         },
     }
 }
@@ -228,6 +254,7 @@ pub fn unchanged_outcome(ctx: &ReviewContext<'_>) -> ReviewOutcome {
         data: ctx.card.data.clone(),
         kind: RevLogKind::Manual,
         step_seconds: None,
+        last_interval: None,
     }
 }
 pub fn finish(
@@ -254,7 +281,9 @@ pub fn finish(
         usn: -1,
         ease: ctx.rating,
         interval,
-        last_interval: ctx.card.interval.max(0),
+        last_interval: outcome
+            .last_interval
+            .unwrap_or_else(|| ctx.card.interval.max(0)),
         factor: outcome.factor,
         time_ms: 0,
         kind: outcome.kind,
@@ -332,37 +361,99 @@ const fn mix64(value: u64) -> u64 {
     state ^ (state >> 31)
 }
 
-fn hash_interval(card_id: i64, reps: u32, rating: Rating) -> u64 {
+fn hash_interval(card_id: i64, reps: u32) -> u64 {
     let id = u64::from_be_bytes(card_id.to_be_bytes());
-    let seed = id
-        ^ u64::from(reps).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ u64::from(rating.code()).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    let seed = id ^ u64::from(reps).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     mix64(seed)
 }
 
-/// Deterministic FSRS fuzz derived from the card and this review.
+fn as_u32(value: f32) -> u32 {
+    u32::try_from(as_i32(value.round())).unwrap_or(0)
+}
+
+fn as_f32_u32(value: u32) -> f32 {
+    as_f32(i32::try_from(value).unwrap_or(i32::MAX))
+}
+
+/// Anki's lower bound for a review interval, derived from its previous due day.
+#[must_use]
+pub fn minimum_review_fuzz_interval(
+    interval: f32,
+    previous_interval: u32,
+    maximum_interval: u32,
+) -> u32 {
+    let maximum = maximum_interval.max(1);
+    let upper =
+        fuzz_bounds(interval.clamp(0.0, as_f32_u32(maximum)), 1, maximum).1;
+    let rounded = as_u32(interval.round());
+    if rounded > previous_interval {
+        previous_interval.saturating_add(1).min(maximum)
+    } else if previous_interval <= upper {
+        previous_interval.min(maximum)
+    } else {
+        0
+    }
+}
+
+fn fuzz_delta(interval: f32) -> f32 {
+    if interval < 2.5 {
+        return 0.0;
+    }
+    1.0 + 0.15 * (interval.min(7.0) - 2.5).max(0.0)
+        + 0.10 * (interval.min(20.0) - 7.0).max(0.0)
+        + 0.05 * (interval - 20.0).max(0.0)
+}
+
+fn fuzz_bounds(interval: f32, minimum: u32, maximum: u32) -> (u32, u32) {
+    let delta = fuzz_delta(interval);
+    let lower = as_u32(interval - delta).clamp(minimum, maximum);
+    let mut upper = as_u32(interval + delta).clamp(minimum, maximum);
+    if upper == lower && upper > 2 && upper < maximum {
+        upper = upper.saturating_add(1);
+    }
+    (lower, upper)
+}
+
+/// Applies Anki's review fuzz to a raw interval, using a deterministic factor.
+#[must_use]
 pub fn fuzz_interval(input: FuzzInput) -> i32 {
-    let maximum = input.maximum_interval.max(1);
-    let interval = input.interval.clamp(1, maximum);
-    if !input.enabled || interval < 3 {
-        return interval;
+    let maximum = input.maximum.max(1);
+    let minimum = input.minimum.min(maximum);
+    let raw = input
+        .interval
+        .clamp(as_f32_u32(minimum), as_f32_u32(maximum));
+    if !input.enabled {
+        return i32::try_from(as_u32(raw.round()).clamp(minimum, maximum))
+            .unwrap_or(i32::MAX);
     }
-    let days = as_f32(interval);
-    let mut delta = 1.0_f32;
-    delta += 0.15 * (days.min(7.0) - 2.5).max(0.0);
-    delta += 0.10 * (days.min(20.0) - 7.0).max(0.0);
-    delta += 0.05 * (days - 20.0).max(0.0);
-    let low = as_i32((days - delta).round()).clamp(2, maximum);
-    let high = as_i32((days + delta).round()).clamp(low, maximum);
-    if high <= low {
-        return low;
-    }
-    let width = i64::from(high)
-        .saturating_sub(i64::from(low))
-        .saturating_add(1);
-    let span = u64::try_from(width).unwrap_or(u64::MAX);
-    let pick = hash_interval(input.card_id, input.reps, input.rating)
-        .checked_rem(span)
+    let (lower, upper) = fuzz_bounds(raw, minimum, maximum);
+    let seed = hash_interval(input.card_id, input.reps)
+        .checked_rem(1_000_000)
         .unwrap_or(0);
-    low.saturating_add(i32::try_from(pick).unwrap_or(0))
+    let factor = as_f32_u32(u32::try_from(seed).unwrap_or(0)) / 1_000_000.0;
+    let span = as_f32_u32(upper.saturating_sub(lower).saturating_add(1));
+    let picked = (as_f32_u32(lower) + factor * span).floor();
+    i32::try_from(as_u32(picked).clamp(minimum, maximum)).unwrap_or(i32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fuzz_bounds, fuzz_delta, minimum_review_fuzz_interval};
+
+    #[test]
+    fn review_fuzz_bounds_match_anki() {
+        assert_eq!(fuzz_delta(2.49), 0.0);
+        assert_eq!(fuzz_bounds(2.49, 1, 1000), (2, 2));
+        assert_eq!(fuzz_bounds(2.5, 1, 1000), (2, 4));
+        assert_eq!(fuzz_bounds(7.0, 1, 1000), (5, 9));
+        assert_eq!(fuzz_bounds(17.0, 1, 1000), (14, 20));
+        assert_eq!(fuzz_bounds(37.0, 1, 1000), (33, 41));
+    }
+
+    #[test]
+    fn previous_interval_limits_the_fuzz_range() {
+        assert_eq!(minimum_review_fuzz_interval(2.726_948_3, 4, 36_500), 4);
+        assert_eq!(minimum_review_fuzz_interval(2.726_948_3, 5, 36_500), 0);
+        assert_eq!(minimum_review_fuzz_interval(4.591_988, 4, 36_500), 5);
+    }
 }

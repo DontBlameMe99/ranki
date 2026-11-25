@@ -136,6 +136,7 @@ impl Sm2Scheduler {
                 RevLogKind::Review
             },
             step_seconds: None,
+            last_interval: None,
         }
     }
 
