@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use gpui::{
     App, ClickEvent, Context, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement, Rgba, SharedString,
-    StatefulInteractiveElement, Styled, div, px,
+    MouseDownEvent, ParentElement, Rgba, ScrollWheelEvent, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use crate::{
@@ -16,6 +16,11 @@ use crate::{
         SPACE_SECTION, Style, TABLE_COLUMNS, alpha, blend, queue_text,
     },
 };
+
+/// Rendered heights of a deck row, used to keep only nearby rows in the tree.
+const ROW_ROOT_HEIGHT: f32 = 60.0;
+const ROW_CHILD_HEIGHT: f32 = 45.0;
+const ROW_OVERSCAN: f32 = 240.0;
 
 impl Root {
     pub(crate) fn visible_deck_rows(&self, cx: &App) -> Vec<app::DeckRow> {
@@ -40,12 +45,15 @@ impl Root {
 
     pub(crate) fn render_decks(
         &mut self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = self.colors();
         let rows = self.visible_deck_rows(cx);
         let totals = leaf_deck_totals(&self.decks, &self.stats);
         let due = due_total(totals);
+        let smooth = self.motion_ms(1) > 0;
+        self.decks_scroll.advance(window, smooth);
 
         let create_click = self.action_click(UiAction::CreateDeck);
         let mut content = div()
@@ -55,8 +63,20 @@ impl Root {
             .id("decks-scroll")
             .gap(px(SPACE_SECTION))
             .overflow_scroll()
+            .track_scroll(self.decks_scroll.handle())
             .px(px(PAGE_X))
             .py(px(PAGE_Y));
+
+        if smooth {
+            content = content.on_scroll_wheel(cx.listener(
+                |this, event: &ScrollWheelEvent, window, cx| {
+                    let delta = event.delta.pixel_delta(window.line_height());
+                    this.decks_scroll.wheel(-f32::from(delta.y));
+                    window.refresh();
+                    cx.stop_propagation();
+                },
+            ));
+        }
 
         content = content.child(
             div()
@@ -139,6 +159,54 @@ impl Root {
 
         let kind = app::empty_kind(self.decks.len(), rows.len(), due);
         if !rows.is_empty() {
+            let mut row_tops = Vec::with_capacity(rows.len().saturating_add(1));
+            let mut rows_height = 0.0;
+            for row in &rows {
+                row_tops.push(rows_height);
+                rows_height += if row.depth == 0 {
+                    ROW_ROOT_HEIGHT
+                } else {
+                    ROW_CHILD_HEIGHT
+                };
+            }
+            row_tops.push(rows_height);
+            let (mut first_row, mut last_row) =
+                if self.decks_scroll.handle().children_count() > 2 {
+                    let handle = self.decks_scroll.handle();
+                    let table_top = handle
+                        .bounds_for_item(2)
+                        .map_or(0.0, |bounds| f32::from(bounds.top()));
+                    let viewport = handle.bounds();
+                    let table_scroll = self.decks_scroll.offset()
+                        - (table_top - f32::from(viewport.top()));
+                    let header_height =
+                        2.0 * SPACE_RELATED + f32::from(window.line_height());
+                    let visible_top =
+                        table_scroll - header_height - ROW_OVERSCAN;
+                    let visible_bottom = table_scroll - header_height
+                        + f32::from(viewport.size.height)
+                        + ROW_OVERSCAN;
+                    let mut first = 0;
+                    while first < rows.len()
+                        && row_tops[first + 1] <= visible_top
+                    {
+                        first += 1;
+                    }
+                    let mut last = first;
+                    while last < rows.len() && row_tops[last] < visible_bottom {
+                        last += 1;
+                    }
+                    (first, last)
+                } else {
+                    (0, rows.len())
+                };
+            if let Some(edit) = self.deck_edit.as_ref()
+                && let Some(index) =
+                    rows.iter().position(|row| row.id == Some(edit.id))
+            {
+                first_row = first_row.min(index);
+                last_row = last_row.max(index.saturating_add(1));
+            }
             let mut table = div()
                 .flex()
                 .flex_col()
@@ -170,8 +238,17 @@ impl Root {
                     ))
                     .child(header_cell("", colors.subtext, 4)),
             );
-            for row in &rows {
+            if first_row > 0 {
+                table =
+                    table.child(div().h(px(row_tops[first_row])).flex_none());
+            }
+            for row in &rows[first_row..last_row] {
                 table = table.child(self.render_deck_row(row, cx));
+            }
+            if last_row < rows.len() {
+                table = table.child(
+                    div().h(px(rows_height - row_tops[last_row])).flex_none(),
+                );
             }
             content = content.child(table);
         }
@@ -726,7 +803,11 @@ impl Root {
             .debug_selector(|| format!("deck-row-{}", row.path))
             .flex()
             .items_center()
-            .min_h(px(if row.depth == 0 { 60. } else { 45. }))
+            .h(px(if row.depth == 0 {
+                ROW_ROOT_HEIGHT
+            } else {
+                ROW_CHILD_HEIGHT
+            }))
             .px(px(SPACE_SECTION))
             .border_t_1()
             .border_color(colors.surface0)
