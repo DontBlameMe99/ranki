@@ -1744,7 +1744,10 @@ impl Root {
             return;
         }
         match self.store.create_deck(&name) {
-            Ok(_) => {
+            Ok(deck) => {
+                for (index, _) in deck.name.match_indices("::") {
+                    let _ = self.expanded.insert(deck.name[..index].to_owned());
+                }
                 self.create_field
                     .update(cx, super::text_field::TextField::clear);
                 self.clear_toast();
