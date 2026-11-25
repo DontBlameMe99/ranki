@@ -1116,6 +1116,15 @@ fn cloze_tags(number: u32) -> (String, String) {
     (format!("{{{{c{number}::"), String::from("}}"))
 }
 
+/// Buttons that wrap the selected field text in Anki markup.
+const MARKUP_BUTTONS: [(&str, &str, &str, bool); 5] = [
+    ("B", "<b>", "</b>", true),
+    ("I", "<i>", "</i>", false),
+    ("U", "<u>", "</u>", false),
+    ("Code", "<pre><code>", "</code></pre>", false),
+    ("Math", "\\[", "\\]", false),
+];
+
 /// Field formatting bar plus the keyboard hint, under the first field.
 fn formatting_toolbar(
     field: gpui::Entity<crate::text_field::TextField>,
@@ -1181,18 +1190,30 @@ fn formatting_toolbar(
         .border_t_1()
         .border_color(colors.surface1)
         .flex()
+        .flex_wrap()
         .items_center()
-        .gap(px(SPACE_INLINE))
-        .child(button(
-            "B",
-            true,
-            wrap(("<b>", "</b>"), field.clone(), handle.clone()),
-        ))
-        .child(button(
-            "I",
-            false,
-            wrap(("<i>", "</i>"), field.clone(), handle.clone()),
+        .gap(px(SPACE_INLINE));
+    for (label, open, close, bold) in MARKUP_BUTTONS {
+        toolbar = toolbar.child(button(
+            label,
+            bold,
+            wrap((open, close), field.clone(), handle.clone()),
         ));
+    }
+    let weak = cx.entity().downgrade();
+    let image_field = field.clone();
+    let image_handle = handle.clone();
+    toolbar = toolbar.child(button(
+        "Image",
+        false,
+        Box::new(move |_, window, cx| {
+            let field = image_field.clone();
+            let _ = weak.update(cx, |root, cx| {
+                root.upload_field_image(field, cx);
+            });
+            window.focus(&image_handle);
+        }),
+    ));
     if is_cloze {
         for (label, number) in CLOZE_BUTTONS {
             toolbar = toolbar.child(button(
@@ -1202,7 +1223,7 @@ fn formatting_toolbar(
             ));
         }
     }
-    toolbar.child(div().flex_1()).child(
+    toolbar.child(div().flex_1().min_w(px(120.))).child(
         div()
             .text_size(px(12.))
             .text_color(colors.overlay)
@@ -1438,5 +1459,20 @@ mod tests {
             crate::text_field::wrap_selection("France", 0..6, (&open, &close));
         assert_eq!(text, "{{c2::France}}");
         assert_eq!(caret, 14);
+    }
+
+    #[test]
+    fn formatting_markup_wraps_the_selected_text() {
+        for (label, open, close, _) in super::MARKUP_BUTTONS {
+            let (text, caret) =
+                crate::text_field::wrap_selection("word", 0..4, (open, close));
+            assert_eq!(text, format!("{open}word{close}"), "{label}");
+            assert_eq!(caret, open.len() + 4 + close.len(), "{label}");
+        }
+        let image = crate::occlusion::image_field("diagram.png");
+        let (text, caret) =
+            crate::text_field::wrap_selection("", 0..0, ("", &image));
+        assert_eq!(text, "<img src=\"diagram.png\">");
+        assert_eq!(caret, image.len());
     }
 }

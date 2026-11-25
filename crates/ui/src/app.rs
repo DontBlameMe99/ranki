@@ -1208,6 +1208,58 @@ impl Root {
         .detach();
     }
 
+    /// Copies a chosen image into the media directory and inserts its Anki
+    /// reference at the caret of the given field.
+    pub(crate) fn upload_field_image(
+        &mut self,
+        field: Entity<TextField>,
+        cx: &mut Context<Self>,
+    ) {
+        let media_dir = self.options.media_dir.clone();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose image".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let result = match receiver.await {
+                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                    Some(path) => occlusion::import_image(&path, &media_dir)
+                        .map(Some)
+                        .map_err(|error| error.to_string()),
+                    None => Ok(None),
+                },
+                Ok(Ok(None)) => Ok(None),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = this.update(cx, |root, cx| match result {
+                Ok(Some(name)) => root.insert_field_image(field, name, cx),
+                Ok(None) => {}
+                Err(error) => root.show_toast(
+                    ToastKind::Error,
+                    format!("Could not upload image: {error}"),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn insert_field_image(
+        &mut self,
+        field: Entity<TextField>,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let markup = occlusion::image_field(&name);
+        field.update(cx, |field, cx| {
+            field.wrap_markup(("", &markup), cx);
+        });
+        cx.notify();
+    }
+
     pub(crate) fn choose_occlusion_image(
         &mut self,
         name: String,
