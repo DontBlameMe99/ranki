@@ -236,23 +236,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "performance/raw/$SHARD"
-          if [ "$SHARD" != "$HEAD_SHA" ]; then
-            git fetch --depth=1 origin "$SHARD"
-            git worktree add --detach "$RUNNER_TEMP/variant-$SHARD" "$SHARD"
-          fi
           : > "$RUNNER_TEMP/measure.tsv"
           for meta in performance/build/*/meta.json; do
             [ -f "$meta" ] || continue
             dir="${meta%/meta.json}"
             sha="$(jq -r .sha "$meta")"
             chmod +x "$dir/ranki" "$dir/ranki-bench"
-            if [ "$sha" = "$HEAD_SHA" ]; then
-              source="$GITHUB_WORKSPACE"
-            else
-              source="$RUNNER_TEMP/variant-$SHARD"
-            fi
             prefix="$GITHUB_WORKSPACE/performance/raw/$SHARD/$sha"
-            printf '%s %s %s %s\n' "$sha" "$dir" "$source" "$prefix" \
+            printf '%s %s %s\n' "$sha" "$dir" "$prefix" \
               >> "$RUNNER_TEMP/measure.tsv"
           done
           if [ ! -s "$RUNNER_TEMP/measure.tsv" ]; then
@@ -260,14 +251,19 @@ jobs:
             exit 1
           fi
           for round in 1 2 3; do
-            while read -r sha dir source prefix; do
-              echo "Measuring $sha round $round in shard $SHARD"
-              (
-                cd "$source"
-                nix develop --command env RANKI_BIN="$GITHUB_WORKSPACE/$dir/ranki" \
-                  "$GITHUB_WORKSPACE/$dir/ranki-bench" measure --out "$prefix-$round.json"
-              )
-            done < "$RUNNER_TEMP/measure.tsv"
+            (
+              cd "$GITHUB_WORKSPACE"
+              # shellcheck disable=SC2016
+              nix develop --command bash -c '
+                root="$1"
+                round="$2"
+                while read -r sha dir prefix; do
+                  export RANKI_BIN="$root/$dir/ranki"
+                  echo "Measuring $sha round $round"
+                  "$root/$dir/ranki-bench" measure --out "$prefix-$round.json"
+                done < "$3"
+              ' _ "$GITHUB_WORKSPACE" "$round" "$RUNNER_TEMP/measure.tsv"
+            )
           done
 
       - uses: actions/upload-artifact@v4

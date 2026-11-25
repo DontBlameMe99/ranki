@@ -38,8 +38,8 @@ keyed by variant, `Cargo.lock`, `flake.lock`, and the GUI feature keeps warm
 builds out of the release compiler. Audit builds disable LTO and use 16 codegen
 units, so every variant uses the same faster profile.
 Each measurement shard downloads the head and one reference binary, then
-runs both inside their own Nix development shell so the build runner's store
-paths resolve on the measurement runner. Head and reference rounds alternate on
+runs both inside the head Nix development shell, which realizes the same store
+paths used by every planned variant. Head and reference rounds alternate on
 one runner. The gate stitches each workload's head result with the ceiling
 measured in that shard, so a runner's speed cancels out and a ceiling is never
 compared with a number from another runner.
