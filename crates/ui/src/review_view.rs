@@ -28,8 +28,11 @@ impl Root {
         let colors = self.colors();
         let style = self.style();
         let theme = self.theme();
-        let session =
-            queue_counts(self.review.current.as_ref(), &self.review.queue);
+        let session = queue_counts(
+            self.review.current.as_ref(),
+            &self.review.queue,
+            &self.review.pending,
+        );
         let more_due = self.review.more_due;
         let viewport_height = f32::from(window.viewport_size().height);
         let stage_height = (viewport_height
