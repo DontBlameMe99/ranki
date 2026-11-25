@@ -714,9 +714,7 @@ impl Root {
             .hover(move |style| style.bg(hover_bg))
             .active(move |style| style.bg(press_bg))
             .focus(move |style| {
-                style
-                    .bg(crate::theme::blend(hover_bg, colors.text, 0.08))
-                    .border_color(colors.mauve)
+                style.bg(crate::theme::blend(hover_bg, colors.text, 0.08))
             })
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 if let Some(index) = index {
