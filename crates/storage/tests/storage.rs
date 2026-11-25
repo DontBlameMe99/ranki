@@ -57,6 +57,8 @@ fn note(fields: &[&str], tags: &[&str]) -> NewNote {
 #[test]
 fn due_query_uses_the_queue_index_for_each_priority_branch() {
     let (_directory, path) = fixture();
+    let store = Collection::open(&path).expect("open");
+    let _ = store.due_cards(None, 1, now_secs()).expect("due");
     let conn = read_only(&path);
     let plan: Vec<String> = conn
         .prepare(

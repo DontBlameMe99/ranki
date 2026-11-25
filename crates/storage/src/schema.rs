@@ -76,7 +76,6 @@ pub const CREATE_STATEMENTS: &[&str] = &[
     "CREATE INDEX idx_notes_mid ON notes (mid)",
     "CREATE INDEX ix_cards_nid ON cards (nid)",
     "CREATE INDEX ix_cards_sched ON cards (did, queue, due)",
-    "CREATE INDEX idx_ranki_cards_queue_due ON cards (queue, due, id)",
     "CREATE INDEX ix_cards_usn ON cards (usn)",
     "CREATE INDEX idx_cards_odid ON cards (odid) WHERE odid != 0",
     "CREATE INDEX ix_revlog_cid ON revlog (cid)",
