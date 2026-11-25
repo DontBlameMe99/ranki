@@ -67,17 +67,6 @@
       "warmup": 3,
       "worst_median_ms": 0.000307
     },
-    "core/sm2/schedule": {
-      "budget_ms": 10.0,
-      "median_ms": 4.9999999999999996e-05,
-      "method": 1,
-      "repeat": 20,
-      "samples": 10,
-      "sha": "1957c2e8512920f404ad6cc0a2b4f83f0d7543b0",
-      "updated_at": "2026-11-23T05:42:51.679744+00:00",
-      "warmup": 3,
-      "worst_median_ms": 5.9999999999999995e-05
-    },
     "format/export-apkg": {
       "budget_ms": 500.0,
       "median_ms": 7.869082,
@@ -244,7 +233,7 @@
       "worst_median_ms": 0.106831
     }
   },
-  "sha": "2da8efb50fb41618800f33bcdb756cfb776cb4ed",
+  "sha": "d3764513b1c6738a0b62079ecf5f5a8f472b459a",
   "version": 1,
-  "workload_hash": "bb3b56caa290a9f6"
+  "workload_hash": "41c505710405ce82"
 }
