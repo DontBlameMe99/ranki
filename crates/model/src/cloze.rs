@@ -12,6 +12,10 @@ pub struct ClozeMarker<'a> {
     pub numbers: Vec<u32>,
     /// Text between `::` and the closing braces.
     pub body: &'a str,
+    /// Byte offset of the opening `{{` in the field text.
+    pub start: usize,
+    /// Byte offset just past the closing `}}`.
+    pub end: usize,
 }
 
 /// Finds `{{cN::...}}` markers in field HTML.
@@ -44,7 +48,12 @@ pub fn cloze_markers(text: &str) -> Vec<ClozeMarker<'_>> {
             continue;
         };
         let body = text.get(body_offset..body_end).unwrap_or("");
-        markers.push(ClozeMarker { numbers, body });
+        markers.push(ClozeMarker {
+            numbers,
+            body,
+            start: position,
+            end: body_end.saturating_add(2),
+        });
         position = body_offset;
     }
     markers
@@ -226,6 +235,14 @@ mod tests {
         assert_eq!(markers.len(), 2);
         assert_eq!(markers[0].numbers, [1]);
         assert_eq!(markers[1].numbers, [2]);
+        assert_eq!(
+            &values[0][markers[0].start..markers[0].end],
+            "{{c1::outer {{c2::inner}} end}}"
+        );
+        assert_eq!(
+            &values[0][markers[1].start..markers[1].end],
+            "{{c2::inner}}"
+        );
     }
 
     #[test]
