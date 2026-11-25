@@ -7,7 +7,7 @@ use gpui::{
 };
 
 use crate::{
-    app::{Confirmation, Root, SYNC_STATE, UiAction, View},
+    app::{Confirmation, Root, UiAction, View},
     components::{ClickHandler, brand_mark, icon, keycap, secondary_button},
     theme::{NAV_WIDTH, Style, alpha},
 };
@@ -193,7 +193,10 @@ impl Root {
                     .text_size(px(12.))
                     .text_color(colors.subtext)
                     .child(crate::components::dot(status_color, 8.))
-                    .child(crate::app::status_label(SYNC_STATE, Self::now())),
+                    .child(crate::app::status_label(
+                        self.last_sync,
+                        Self::now(),
+                    )),
             )
     }
 

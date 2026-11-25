@@ -60,6 +60,7 @@ pub struct TextField {
     last_bounds: Option<Bounds<Pixels>>,
     selecting: bool,
     edit_hook: Option<EditHook>,
+    secure: bool,
 }
 
 /// Wraps `range` in `open`/`close` and returns the new text plus the caret
@@ -101,6 +102,16 @@ fn utf16_offset_in(text: &str, offset: usize) -> usize {
     text.len()
 }
 
+fn chars_before(text: &str, byte_offset: usize) -> usize {
+    let end = byte_offset.min(text.len());
+    text.get(..end).map_or(0, |part| part.chars().count())
+}
+
+fn byte_at_char(text: &str, index: usize) -> usize {
+    text.char_indices()
+        .nth(index)
+        .map_or(text.len(), |(offset, _)| offset)
+}
 impl TextField {
     #[must_use]
     pub fn new(
@@ -119,6 +130,7 @@ impl TextField {
             last_bounds: None,
             selecting: false,
             edit_hook: None,
+            secure: false,
         }
     }
 
@@ -160,6 +172,12 @@ impl TextField {
         self.marked_range = None;
         cx.notify();
     }
+    /// Hides typed text while keeping the real value available to the owner.
+    pub fn set_secure(&mut self, secure: bool, cx: &mut Context<Self>) {
+        self.secure = secure;
+        cx.notify();
+    }
+
     pub fn set_edit_hook(&mut self, hook: EditHook) {
         self.edit_hook = Some(hook);
     }
@@ -238,6 +256,31 @@ impl TextField {
         utf16
     }
 
+    fn display_text(&self) -> SharedString {
+        if self.secure {
+            "*".repeat(self.content.chars().count()).into()
+        } else {
+            self.content.clone()
+        }
+    }
+
+    fn display_range(&self, range: &Range<usize>) -> Range<usize> {
+        if self.secure {
+            chars_before(&self.content, range.start)
+                ..chars_before(&self.content, range.end)
+        } else {
+            range.clone()
+        }
+    }
+
+    fn content_index(&self, display_index: usize) -> usize {
+        if self.secure {
+            byte_at_char(&self.content, display_index)
+        } else {
+            display_index
+        }
+    }
+
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
         cx.notify();
@@ -272,8 +315,15 @@ impl TextField {
         if point.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(point.x - bounds.left())
-            .min(self.content.len())
+        let display_len = if self.secure {
+            self.content.chars().count()
+        } else {
+            self.content.len()
+        };
+        let index = line
+            .closest_index_for_x(point.x - bounds.left())
+            .min(display_len);
+        self.content_index(index)
     }
 
     fn backspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -471,8 +521,13 @@ impl EntityInputHandler for TextField {
     ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let line = self.last_layout.as_ref()?;
-        let index = line.index_for_x(line_point.x)?.min(self.content.len());
-        Some(self.offset_to_utf16(index))
+        let display_len = if self.secure {
+            self.content.chars().count()
+        } else {
+            self.content.len()
+        };
+        let index = line.index_for_x(line_point.x)?.min(display_len);
+        Some(self.offset_to_utf16(self.content_index(index)))
     }
 }
 
@@ -484,9 +539,12 @@ impl Render for TextField {
     ) -> impl IntoElement {
         let focus = self.focus_handle.clone();
         let placeholder = self.placeholder.clone();
-        let text = self.content.clone();
-        let selected = self.selected_range.clone();
-        let marked = self.marked_range.clone();
+        let text = self.display_text();
+        let selected = self.display_range(&self.selected_range);
+        let marked = self
+            .marked_range
+            .as_ref()
+            .map(|range| self.display_range(range));
         div()
             .id("ranki-text-input")
             .track_focus(&focus)
@@ -733,8 +791,19 @@ impl Element for TextElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{key_bindings, wrap_selection};
+    use super::{byte_at_char, chars_before, key_bindings, wrap_selection};
 
+    #[test]
+    fn secure_field_offsets_map_characters_to_bytes() {
+        let text = "a日本b";
+        assert_eq!(chars_before(text, 0), 0);
+        assert_eq!(chars_before(text, 1), 1);
+        assert_eq!(chars_before(text, 7), 3);
+        assert_eq!(byte_at_char(text, 0), 0);
+        assert_eq!(byte_at_char(text, 1), 1);
+        assert_eq!(byte_at_char(text, 3), 7);
+        assert_eq!(byte_at_char(text, 4), text.len());
+    }
     #[test]
     fn input_context_defines_navigation_keys() {
         let bindings = key_bindings();

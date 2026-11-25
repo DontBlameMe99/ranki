@@ -38,6 +38,7 @@ pub mod occlusion;
 mod review_view;
 mod settings_view;
 mod statistics_view;
+mod sync_view;
 mod text_field;
 mod theme;
 
@@ -45,15 +46,24 @@ use gpui::{
     App, AppContext, Application, Bounds, WindowBounds, WindowOptions, px, size,
 };
 use ranki_model::Store;
+use std::sync::Arc;
 
 pub use bench::{BenchApp, BenchKey};
 pub use ranki_model::{SchedulerKind, Settings, ThemeChoice};
+
+/// Writes settings changed in the window back to the shared config file.
+pub type SettingsSaver =
+    Arc<dyn Fn(&Settings) -> Result<(), String> + Send + Sync>;
 
 /// Settings for the review window, shared with the command line.
 pub type Options = Settings;
 
 /// Opens the native window and runs the GPUI event loop.
-pub fn run(store: Box<dyn Store>, options: Options) {
+pub fn run(
+    store: Box<dyn Store>,
+    options: Options,
+    save_settings: SettingsSaver,
+) {
     let media_dir = options.media_dir.clone();
     Application::new()
         .with_assets(assets::Assets { media_dir })
@@ -70,7 +80,11 @@ pub fn run(store: Box<dyn Store>, options: Options) {
                 |window, cx| {
                     cx.new(|cx| {
                         let root = app::Root::new(
-                            app::Launch { store, options },
+                            app::Launch {
+                                store,
+                                options,
+                                save_settings,
+                            },
                             window,
                             cx,
                         );

@@ -42,6 +42,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
@@ -303,10 +304,11 @@ fn run_with_sync(
     } else {
         None
     };
-    let auto_sync = settings.sync.enabled
-        && settings.sync.auto
-        && (auth.is_some() || sync::has_stored_key(&settings))
-        && !manual_sync;
+    let auto_sync = auto_sync_enabled(
+        &settings,
+        auth.is_some() || sync::has_stored_key(&settings),
+        manual_sync,
+    );
 
     if auto_sync {
         match sync::sync_once(
@@ -326,9 +328,18 @@ fn run_with_sync(
     let collection_path = settings.collection.as_path();
     let media_dir = settings.media_dir.as_path();
     let command = cli.command.unwrap_or(Command::Gui);
+    let mut final_settings = settings.clone();
     let result = match command {
         Command::Mcp => mcp::serve(Some(collection_path), scheduler),
-        Command::Gui => open_gui(&settings),
+        Command::Gui => match open_gui(&settings, config) {
+            Ok(ui_settings) => {
+                if let Some(settings_from_ui) = ui_settings {
+                    final_settings = settings_from_ui;
+                }
+                Ok(())
+            }
+            Err(error) => Err(error),
+        },
         Command::Import { package } => {
             let result = import_package(collection_path, media_dir, &package);
             if result.is_ok() {
@@ -393,17 +404,55 @@ fn run_with_sync(
             )
         }
     };
-    if auto_sync {
+    let shutdown_auth =
+        if final_settings.sync.enabled && final_settings.sync.auto {
+            sync::load_auth(&final_settings, &sync::read_env())
+        } else {
+            None
+        };
+    let shutdown_sync = shutdown_sync_enabled(
+        auto_sync,
+        &final_settings,
+        shutdown_auth.is_some() || sync::has_stored_key(&final_settings),
+        manual_sync,
+    );
+    if shutdown_sync {
         match sync::sync_once(
             sync::TransportRef(transport),
-            &settings,
-            auth.as_ref(),
+            &final_settings,
+            shutdown_auth.as_ref(),
         ) {
             Ok(outcome) => sync::warn_outcome(&outcome),
             Err(error) => eprintln!("ranki: sync: {error}"),
         }
     }
     result
+}
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "sync flags map directly onto CLI switches"
+)]
+const fn auto_sync_enabled(
+    settings: &config::Settings,
+    has_credentials: bool,
+    manual: bool,
+) -> bool {
+    settings.sync.enabled && settings.sync.auto && has_credentials && !manual
+}
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    clippy::too_many_arguments,
+    reason = "startup and manual decisions map directly onto CLI switches"
+)]
+const fn shutdown_sync_enabled(
+    startup_sync: bool,
+    final_settings: &config::Settings,
+    has_credentials: bool,
+    manual: bool,
+) -> bool {
+    startup_sync && auto_sync_enabled(final_settings, has_credentials, manual)
 }
 
 fn scheduler_for(settings: &config::Settings) -> Arc<dyn Scheduler> {
@@ -589,11 +638,37 @@ fn run_store_command(
     }
 }
 
-fn open_gui(settings: &config::Settings) -> CliResult<()> {
+fn open_gui(
+    settings: &config::Settings,
+    config: &config::Config,
+) -> CliResult<Option<config::Settings>> {
     let collection = open_or_create(&settings.collection)?;
     let options = settings.clone();
-    ranki_ui::run(Box::new(collection), options);
-    Ok(())
+    let saved = Arc::new(Mutex::new(config.clone()));
+    let latest = Arc::new(Mutex::new(None::<config::Settings>));
+    let latest_for_saver = Arc::clone(&latest);
+    let save_settings: ranki_ui::SettingsSaver = Arc::new(move |current| {
+        {
+            let mut latest_guard = latest_for_saver
+                .lock()
+                .map_err(|_| String::from("settings lock poisoned"))?;
+            *latest_guard = Some(current.clone());
+        }
+        let mut config_guard = saved
+            .lock()
+            .map_err(|_| String::from("config lock poisoned"))?;
+        config_guard.sync.enabled = current.sync.enabled;
+        config_guard
+            .sync
+            .username
+            .clone_from(&current.sync.username);
+        config::save(&config_guard).map_err(|error| error.to_string())
+    });
+    ranki_ui::run(Box::new(collection), options, save_settings);
+    let latest_guard = latest.lock().map_err(|_| {
+        CliError::Message(String::from("settings lock poisoned"))
+    })?;
+    Ok(latest_guard.clone())
 }
 
 fn import_package(
@@ -957,17 +1032,33 @@ mod tests {
 
     use super::Cli;
     use super::Command;
+    use super::auto_sync_enabled;
     use super::default_collection_path;
     use super::fsrs_params;
     use super::media_dir_for;
     use super::parse_rating;
     use super::run_with_sync;
+    use super::shutdown_sync_enabled;
     use ranki_model::Rating;
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).unwrap_or_else(|error| panic!("{error}"))
     }
 
+    #[test]
+    fn shutdown_sync_uses_the_final_settings_but_keeps_the_startup_gate() {
+        let mut settings = super::config::Settings::default();
+        settings.sync.auto = true;
+        settings.sync.enabled = true;
+        assert!(shutdown_sync_enabled(true, &settings, true, false));
+        assert!(!shutdown_sync_enabled(false, &settings, true, false));
+        assert!(!shutdown_sync_enabled(true, &settings, true, true));
+
+        settings.sync.enabled = false;
+        assert!(!shutdown_sync_enabled(true, &settings, true, false));
+
+        assert!(!auto_sync_enabled(&settings, true, false));
+    }
     #[test]
     fn no_subcommand_selects_gui() {
         assert!(matches!(

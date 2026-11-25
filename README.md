@@ -111,6 +111,31 @@ ranki mcp                                      # MCP server over stdio
 
 Run `ranki COMMAND --help` for the full argument list.
 
+`ranki sync` also uploads, downloads, or checks the remote collection. Section
+[Sync](#sync) covers credentials and the optional window login.
+
+## Sync
+
+AnkiWeb sync is optional. In the review window, open Settings, turn on **Sync
+collection**, and sign in with your AnkiWeb username and password. Ranki stores
+only the resulting host key in `ranki-sync.json` beside the collection, with
+mode `0600`. The password is discarded after login. Sync runs at the next
+launch and the sidebar shows the age of the last successful sync.
+
+Command-line sync accepts a host key or a one-time login without putting a
+password in the process arguments:
+
+```bash
+export RANKI_SYNC_HKEY='your-host-key'  # or RANKI_SYNC_USERNAME + RANKI_SYNC_PASSWORD
+ranki sync --status                     # inspect remote metadata
+ranki sync                              # safe automatic direction
+ranki sync --full-upload                # explicit one-way choices
+ranki sync --full-download
+```
+
+`ranki sync` writes the same state file, so the window and the CLI share one
+sync status. Delta sync and media sync are not implemented.
+
 ## Automation
 
 `ranki connect` serves a subset of the AnkiConnect API on `127.0.0.1`. The
@@ -151,7 +176,9 @@ preserved. Schema 18 stores deck, model, and preset configuration in normalized
 protobuf tables; Ranki reconstructs the config JSON needed for its own use
 minimally rather than reproducing every Anki setting. Add-on settings and
 unused configuration keys may not survive a round trip. Anki's sync protocol
-is not implemented, and AnkiConnect support is a subset of the upstream API.
+is limited to login, metadata checks, and full collection transfers. Media sync
+and delta merges are not implemented, and AnkiConnect support is a subset of the
+upstream API.
 
 ## Testing
 
