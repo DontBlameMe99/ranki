@@ -714,7 +714,7 @@ pub(crate) fn default_collection_path(
     let home_dir = home.ok_or_else(|| {
         CliError::Message("HOME is not set; pass --collection PATH".into())
     })?;
-    Ok(Path::new(home_dir).join(".local/share/Anki2/main/collection.anki2"))
+    Ok(Path::new(home_dir).join(".local/share/ranki/collection.anki2"))
 }
 
 pub(crate) fn media_dir_for(collection: &Path) -> PathBuf {
@@ -1315,16 +1315,16 @@ mod tests {
     }
 
     #[test]
-    fn default_paths_follow_anki_layout() {
+    fn default_paths_are_separate_from_anki() {
         let collection =
             default_collection_path(Some(OsStr::new("/home/user"))).unwrap();
         assert_eq!(
             collection,
-            Path::new("/home/user/.local/share/Anki2/main/collection.anki2")
+            Path::new("/home/user/.local/share/ranki/collection.anki2")
         );
         assert_eq!(
             media_dir_for(&collection),
-            Path::new("/home/user/.local/share/Anki2/main/collection.media")
+            Path::new("/home/user/.local/share/ranki/collection.media")
         );
         assert!(default_collection_path(None).is_err());
     }
