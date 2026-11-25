@@ -419,58 +419,77 @@ fn snapshot_collection(collection: &Path) -> Result<Vec<u8>, FormatError> {
     ranki_storage::register_collations(&snapshot_db).map_err(|error| {
         FormatError::with_source("cannot register collection collations", error)
     })?;
-    for table in [
-        "notes",
-        "cards",
-        "revlog",
-        "graves",
-        "config",
-        "notetypes",
-        "templates",
-        "decks",
-        "deck_config",
-        "tags",
-        "col",
-    ] {
-        let exists: bool = snapshot_db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' \
-                 AND name = ?1)",
-                [table],
-                |row| row.get(0),
+    normalize_pending_usns(&snapshot_db)?;
+    normalize_col_metadata(&snapshot_db)?;
+    drop(snapshot_db);
+    fs::read(snapshot.path())
+        .map_err(io_error("cannot read collection snapshot"))
+}
+fn normalize_pending_usns(conn: &Connection) -> Result<(), FormatError> {
+    let mut statement = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .map_err(db_error("cannot inspect collection snapshot"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(db_error("cannot inspect collection snapshot"))?;
+    let mut tables = Vec::new();
+    for row in rows {
+        tables
+            .push(row.map_err(db_error("cannot inspect collection snapshot"))?);
+    }
+    drop(statement);
+    for table in tables {
+        if [
+            "notes",
+            "cards",
+            "revlog",
+            "graves",
+            "config",
+            "notetypes",
+            "templates",
+            "decks",
+            "deck_config",
+            "tags",
+            "col",
+        ]
+        .contains(&table.as_str())
+        {
+            conn.execute(
+                &format!("UPDATE {table} SET usn = 0 WHERE usn < 0"),
+                [],
             )
-            .map_err(db_error("cannot inspect collection snapshot"))?;
-        if exists {
-            snapshot_db
-                .execute(
-                    &format!("UPDATE {table} SET usn = 0 WHERE usn < 0"),
-                    [],
-                )
-                .map_err(db_error("cannot normalize pending sync ids"))?;
+            .map_err(db_error("cannot normalize pending sync ids"))?;
         }
     }
+    Ok(())
+}
+
+fn normalize_col_metadata(conn: &Connection) -> Result<(), FormatError> {
     for key in ["conf", "models", "decks", "dconf", "tags"] {
-        let raw: Option<String> = snapshot_db
+        let raw: Option<String> = conn
             .query_row(
                 &format!("SELECT {key} FROM col WHERE id = 1"),
                 [],
                 |row| row.get(0),
             )
             .map_err(db_error("cannot read collection metadata"))?;
-        if let Some(value) = raw {
-            let serialized = normalize_metadata(&value)?;
-            snapshot_db
-                .execute(
-                    &format!("UPDATE col SET {key} = ?1 WHERE id = 1"),
-                    [serialized],
-                )
-                .map_err(db_error("cannot normalize pending sync ids"))?;
-        }
+        let Some(value) = raw else {
+            continue;
+        };
+        let serialized = if value.contains("\"usn\":-1") {
+            normalize_metadata(&value)?
+        } else {
+            value
+        };
+        conn.execute(
+            &format!("UPDATE col SET {key} = ?1 WHERE id = 1"),
+            [serialized],
+        )
+        .map_err(db_error("cannot normalize pending sync ids"))?;
     }
-    drop(snapshot_db);
-    fs::read(snapshot.path())
-        .map_err(io_error("cannot read collection snapshot"))
+    Ok(())
 }
+
 fn normalize_metadata(raw: &str) -> Result<String, FormatError> {
     let Ok(parsed) = serde_json::from_str::<Value>(raw) else {
         return Ok(raw.to_owned());

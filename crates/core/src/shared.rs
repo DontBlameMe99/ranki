@@ -65,9 +65,17 @@ pub const fn day_number(now_secs: i64, collection_start_secs: i64) -> i64 {
 }
 
 pub fn elapsed_days(card: &Card, now_secs: i64) -> u32 {
-    let last = serde_json::from_str::<serde_json::Value>(&card.data)
-        .ok()
-        .and_then(|value| value.get("lrt").and_then(serde_json::Value::as_i64))
+    let last = card
+        .data
+        .contains("lrt")
+        .then(|| {
+            serde_json::from_str::<serde_json::Value>(&card.data)
+                .ok()
+                .and_then(|value| {
+                    value.get("lrt").and_then(serde_json::Value::as_i64)
+                })
+        })
+        .flatten()
         .unwrap_or(card.modified);
     let elapsed = now_secs.saturating_sub(last);
     u32::try_from(elapsed.div_euclid(SECONDS_PER_DAY)).unwrap_or(u32::MAX)
