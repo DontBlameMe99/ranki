@@ -289,13 +289,9 @@ impl Root {
                         .child(field.clone()),
                 );
             if index == 0 {
-                let cloze = is_cloze.then(|| {
-                    let selection = field.read(cx).selection();
-                    cloze_insert_actions(&field_values, selection.start)
-                });
                 field_box = field_box.child(formatting_toolbar(
                     field.clone(),
-                    cloze,
+                    is_cloze,
                     colors,
                     cx,
                 ));
@@ -1052,70 +1048,9 @@ pub fn has_preview_content(values: &[String]) -> bool {
     values.iter().any(|value| !value.trim().is_empty())
 }
 
-/// Cloze marker numbers the field toolbar can insert.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ClozeActions {
-    next: u32,
-    linked: Option<u32>,
-}
-
-/// Next free cloze number, plus the number linked to the caret position.
-#[must_use]
-fn cloze_insert_actions(values: &[String], caret: usize) -> ClozeActions {
-    let mut highest = 0;
-    let mut first = None;
-    for value in values {
-        for marker in ranki_model::cloze_markers(value) {
-            for number in marker.numbers {
-                if number == 0 {
-                    continue;
-                }
-                highest = highest.max(number);
-                let _ = first.get_or_insert(number);
-            }
-        }
-    }
-    let max_number = u32::from(ranki_model::cloze::MAX_CLOZE_ORDINAL) + 1;
-    ClozeActions {
-        next: highest.saturating_add(1).min(max_number),
-        linked: nearest_cloze_number(
-            values.first().map_or("", String::as_str),
-            caret,
-        )
-        .or(first),
-    }
-}
-
-fn nearest_cloze_number(text: &str, caret: usize) -> Option<u32> {
-    fn positive(marker: &ranki_model::cloze::ClozeMarker<'_>) -> Option<u32> {
-        marker.numbers.iter().copied().find(|number| *number > 0)
-    }
-
-    fn distance(
-        marker: &ranki_model::cloze::ClozeMarker<'_>,
-        caret: usize,
-    ) -> usize {
-        if caret < marker.start {
-            marker.start.saturating_sub(caret)
-        } else {
-            caret.saturating_sub(marker.end)
-        }
-    }
-
-    ranki_model::cloze_markers(text)
-        .into_iter()
-        .filter(|marker| positive(marker).is_some())
-        .min_by_key(|marker| {
-            let distance = distance(marker, caret);
-            let order = if distance == 0 {
-                usize::MAX.saturating_sub(marker.start)
-            } else {
-                marker.start
-            };
-            (distance, order)
-        })
-        .and_then(|marker| positive(&marker))
-}
+/// Cloze buttons shown for cloze notes, in the order they appear.
+const CLOZE_BUTTONS: [(&str, u32); 3] =
+    [("[…] New c1", 1), ("[…] New c2", 2), ("[…] New c3", 3)];
 
 fn cloze_tags(number: u32) -> (String, String) {
     (format!("{{{{c{number}::"), String::from("}}"))
@@ -1124,7 +1059,7 @@ fn cloze_tags(number: u32) -> (String, String) {
 /// Field formatting bar plus the keyboard hint, under the first field.
 fn formatting_toolbar(
     field: gpui::Entity<crate::text_field::TextField>,
-    cloze_actions: Option<ClozeActions>,
+    is_cloze: bool,
     colors: crate::theme::Palette,
     cx: &mut Context<Root>,
 ) -> impl IntoElement {
@@ -1164,7 +1099,7 @@ fn formatting_toolbar(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .w(px(30.))
+                    .px(px(SPACE_RELATED))
                     .h(px(30.))
                     .rounded(px(8.))
                     .text_size(px(14.))
@@ -1178,27 +1113,6 @@ fn formatting_toolbar(
             )
             .on_click(on_click);
         button.child(label)
-    };
-    let cloze_button = |label: String,
-                        number: u32,
-                        field: gpui::Entity<crate::text_field::TextField>,
-                        handle: gpui::FocusHandle| {
-        Interaction::tinted(colors, colors.mauve)
-            .apply(
-                div()
-                    .id(SharedString::from(format!("add-cloze-{label}")))
-                    .flex()
-                    .items_center()
-                    .h(px(30.))
-                    .px(px(SPACE_RELATED))
-                    .rounded(px(8.))
-                    .text_size(px(13.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(colors.mauve)
-                    .cursor_pointer(),
-            )
-            .on_click(wrap_cloze(number, field, handle))
-            .child(label)
     };
     let mut toolbar = div()
         .mt(px(SPACE_RELATED))
@@ -1218,19 +1132,12 @@ fn formatting_toolbar(
             false,
             wrap(("<i>", "</i>"), field.clone(), handle.clone()),
         ));
-    if let Some(actions) = cloze_actions {
-        toolbar = toolbar.child(cloze_button(
-            "[…] New".to_owned(),
-            actions.next,
-            field.clone(),
-            handle.clone(),
-        ));
-        if let Some(number) = actions.linked {
-            toolbar = toolbar.child(cloze_button(
-                format!("[…] Link c{number}"),
-                number,
-                field,
-                handle,
+    if is_cloze {
+        for (label, number) in CLOZE_BUTTONS {
+            toolbar = toolbar.child(button(
+                label,
+                false,
+                wrap_cloze(number, field.clone(), handle.clone()),
             ));
         }
     }
@@ -1460,44 +1367,6 @@ mod tests {
             String::from(" "),
             String::from("問い")
         ]));
-    }
-
-    #[test]
-    fn cloze_actions_start_at_one_without_markers() {
-        let actions = super::cloze_insert_actions(&[String::from("plain")], 5);
-        assert_eq!(actions.next, 1);
-        assert_eq!(actions.linked, None);
-    }
-
-    #[test]
-    fn cloze_actions_offer_next_and_nearest_linked_number() {
-        let values = [String::from("A {{c2::two}} B {{c1::one}} C")];
-        let first = super::cloze_insert_actions(&values, 0);
-        assert_eq!(first.next, 3);
-        assert_eq!(first.linked, Some(2));
-        let caret = values[0].find("one").expect("cloze body");
-        assert_eq!(super::cloze_insert_actions(&values, caret).linked, Some(1));
-        assert_eq!(
-            super::cloze_insert_actions(&values, values[0].len()).linked,
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn cloze_actions_cap_the_next_number() {
-        let values = [String::from("{{c500::last}}")];
-        assert_eq!(super::cloze_insert_actions(&values, 0).next, 500);
-    }
-
-    #[test]
-    fn link_uses_the_nearest_and_innermost_marker() {
-        let values = [String::from("{{c1::one}} B {{c2::two}}")];
-        let caret = values[0].find("B ").expect("gap") + 1;
-        assert_eq!(super::cloze_insert_actions(&values, caret).linked, Some(2));
-
-        let nested = [String::from("{{c1::outer {{c2::inner}} end}}")];
-        let caret = nested[0].find("inner").expect("nested body") + 1;
-        assert_eq!(super::cloze_insert_actions(&nested, caret).linked, Some(2));
     }
 
     #[test]
