@@ -2,17 +2,111 @@
 
 use gpui::{
     App, ClickEvent, Div, InteractiveElement, IntoElement, ParentElement, Rgba,
-    SharedString, StatefulInteractiveElement, Styled, Svg, Window, div, px,
-    svg,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, Svg, Window,
+    div, px, svg,
 };
 
 use crate::theme::{
     Palette, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED, Style,
-    alpha, keycap_ink,
+    accent_hover, accent_press, alpha, blend, keycap_ink,
 };
 
 pub type ClickHandler =
     Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+
+/// Shared rest, hover, pressed, and focus colors for one clickable element.
+/// The border is always reserved, so a focus ring never moves nearby content.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Interaction {
+    border: Rgba,
+    hover: Rgba,
+    press: Rgba,
+    focus: Rgba,
+}
+
+impl Interaction {
+    #[must_use]
+    pub const fn new(
+        border: Rgba,
+        hover: Rgba,
+        press: Rgba,
+        focus: Rgba,
+    ) -> Self {
+        Self {
+            border,
+            hover,
+            press,
+            focus,
+        }
+    }
+
+    /// Controls sitting on a dark page: menu entries, text actions, icons.
+    #[must_use]
+    pub const fn surface(colors: Palette) -> Self {
+        Self::new(
+            alpha(colors.text, 0.0),
+            colors.surface0,
+            colors.surface1,
+            colors.mauve,
+        )
+    }
+
+    /// Controls whose own fill already uses `surface0`.
+    #[must_use]
+    pub fn raised(colors: Palette) -> Self {
+        Self::new(
+            alpha(colors.text, 0.0),
+            blend(colors.surface0, colors.surface1, 0.5),
+            colors.surface1,
+            colors.mauve,
+        )
+    }
+
+    /// Filled accent buttons. The focus ring uses the button's ink so it
+    /// stays visible against the mauve fill in both themes.
+    #[must_use]
+    pub fn accent(style: Style) -> Self {
+        Self::new(
+            alpha(style.colors.text, 0.0),
+            accent_hover(style.theme),
+            accent_press(style.theme),
+            style.ink(),
+        )
+    }
+
+    /// Destructive menu entries.
+    #[must_use]
+    pub const fn danger(colors: Palette) -> Self {
+        Self::new(
+            alpha(colors.text, 0.0),
+            alpha(colors.red, 0.14),
+            alpha(colors.red, 0.26),
+            colors.red,
+        )
+    }
+
+    /// Controls tinted by a semantic hue, such as queue or rating colors.
+    #[must_use]
+    pub fn tinted(colors: Palette, hue: Rgba) -> Self {
+        Self::new(
+            alpha(colors.text, 0.0),
+            alpha(hue, 0.2),
+            alpha(hue, 0.32),
+            hue,
+        )
+    }
+
+    #[must_use]
+    pub fn apply(self, element: Stateful<Div>) -> Stateful<Div> {
+        element
+            .focusable()
+            .border_1()
+            .border_color(self.border)
+            .hover(move |style| style.bg(self.hover))
+            .active(move |style| style.bg(self.press))
+            .focus(move |style| style.border_color(self.focus))
+    }
+}
 
 /// Lucide-style icon served by the embedded asset source.
 ///
@@ -51,27 +145,29 @@ pub fn secondary_button(
 ) -> impl IntoElement {
     let label = label.into();
     let id = SharedString::from(format!("secondary-{label}"));
-    let hover = colors.surface0;
-    let press = colors.surface1;
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(SPACE_GROUP))
-        .h(px(44.))
-        .px(px(SPACE_BLOCK))
-        .rounded(px(12.))
-        .border_1()
-        .border_color(colors.surface1)
-        .text_color(colors.text)
-        .text_size(px(14.))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .cursor_pointer()
-        .hover(move |style| style.bg(hover))
-        .active(move |style| style.bg(press))
-        .on_click(on_click)
-        .child(label)
+    Interaction::new(
+        colors.surface1,
+        colors.surface0,
+        colors.surface1,
+        colors.mauve,
+    )
+    .apply(
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(SPACE_GROUP))
+            .h(px(44.))
+            .px(px(SPACE_BLOCK))
+            .rounded(px(12.))
+            .text_color(colors.text)
+            .text_size(px(14.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .cursor_pointer(),
+    )
+    .on_click(on_click)
+    .child(label)
 }
 
 #[must_use]
@@ -82,24 +178,23 @@ pub fn small_button(
 ) -> impl IntoElement {
     let label = label.into();
     let id = SharedString::from(format!("small-{label}"));
-    let hover = crate::theme::accent_hover(style.theme);
-    let press = crate::theme::accent_press(style.theme);
-    div()
-        .id(id.clone())
-        .debug_selector(|| id.to_string())
-        .flex()
-        .items_center()
-        .justify_center()
-        .h(px(30.))
-        .px(px(SPACE_RELATED))
-        .rounded(px(9.))
-        .bg(style.colors.mauve)
-        .text_color(style.ink())
-        .text_size(px(13.))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .cursor_pointer()
-        .hover(move |style| style.bg(hover))
-        .active(move |style| style.bg(press))
+    Interaction::accent(style)
+        .apply(
+            div()
+                .id(id.clone())
+                .debug_selector(|| id.to_string())
+                .flex()
+                .items_center()
+                .justify_center()
+                .h(px(30.))
+                .px(px(SPACE_RELATED))
+                .rounded(px(9.))
+                .bg(style.colors.mauve)
+                .text_color(style.ink())
+                .text_size(px(13.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .cursor_pointer(),
+        )
         .on_click(on_click)
         .child(label)
 }
@@ -191,12 +286,15 @@ pub fn removable_chip(
         .font_weight(gpui::FontWeight::MEDIUM)
         .child(label)
         .child(
-            div()
-                .id(SharedString::from(remove_id))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
+            Interaction::surface(colors)
+                .apply(
+                    div()
+                        .id(SharedString::from(remove_id))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer(),
+                )
                 .on_click(on_remove)
                 .child(icon("icon-x", 14., colors.overlay)),
         )
@@ -272,7 +370,8 @@ pub fn progress_bar(
 
 #[cfg(test)]
 mod tests {
-    use super::brand_mark;
+    use super::{Interaction, brand_mark};
+    use crate::theme::{MOCHA, Style, Theme, accent_hover, accent_press};
 
     #[test]
     fn brand_mark_fills_the_tile_at_32_px() {
@@ -281,5 +380,30 @@ mod tests {
         assert_eq!(mark.tile, 32.0);
         assert!(mark.glyph >= mark.tile * 0.55);
         assert!(mark.glyph <= mark.tile * 0.75);
+    }
+
+    #[test]
+    fn interaction_states_stay_distinct_without_reserving_extra_space() {
+        let surface = Interaction::surface(MOCHA);
+        assert_eq!(surface.border.a, 0.0);
+        assert_eq!(surface.focus, MOCHA.mauve);
+        assert_ne!(surface.hover, surface.press);
+
+        let raised = Interaction::raised(MOCHA);
+        assert_eq!(raised.border.a, 0.0);
+        assert_ne!(raised.hover, raised.press);
+
+        let accent = Interaction::accent(Style::new(MOCHA, Theme::Dark));
+        assert_eq!(accent.hover, accent_hover(Theme::Dark));
+        assert_eq!(accent.press, accent_press(Theme::Dark));
+        assert_ne!(accent.hover, accent.press);
+
+        let danger = Interaction::danger(MOCHA);
+        assert_eq!(danger.focus, MOCHA.red);
+        assert!(danger.press.a > danger.hover.a);
+
+        let tinted = Interaction::tinted(MOCHA, MOCHA.teal);
+        assert_eq!(tinted.focus, MOCHA.teal);
+        assert!(tinted.press.a > tinted.hover.a);
     }
 }

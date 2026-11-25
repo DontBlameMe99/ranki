@@ -8,7 +8,7 @@ use gpui::{
 use crate::{
     ThemeChoice,
     app::{Root, UiAction},
-    components::{icon, keycap},
+    components::{Interaction, icon, keycap},
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_INLINE, SPACE_RELATED,
         SPACE_SECTION, alpha,
@@ -38,32 +38,47 @@ impl Root {
             } else {
                 colors.subtext
             };
-            let hover = alpha(colors.mauve, 0.12);
+            let (hover, press) = if selected {
+                (alpha(colors.mauve, 0.32), alpha(colors.mauve, 0.42))
+            } else {
+                (alpha(colors.mauve, 0.12), alpha(colors.mauve, 0.28))
+            };
             let fill = if selected {
                 alpha(colors.mauve, 0.22)
             } else {
                 colors.surface0
             };
             segments = segments.child(
-                div()
-                    .id(SharedString::from(format!("theme-{choice:?}")))
-                    .flex()
-                    .flex_col()
-                    .gap(px(SPACE_INLINE))
-                    .w(px(112.))
-                    .h(px(44.))
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(9.))
-                    .bg(fill)
-                    .text_color(ink)
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .cursor_pointer()
-                    .hover(move |element| element.bg(hover))
-                    .on_click(self.action_click(UiAction::SetTheme(choice)))
-                    .child(label)
-                    .child(keycap(key, colors, false)),
+                Interaction::new(
+                    if selected {
+                        colors.mauve
+                    } else {
+                        alpha(colors.text, 0.0)
+                    },
+                    hover,
+                    press,
+                    if selected { colors.text } else { colors.mauve },
+                )
+                .apply(
+                    div()
+                        .id(SharedString::from(format!("theme-{choice:?}")))
+                        .flex()
+                        .flex_col()
+                        .gap(px(SPACE_INLINE))
+                        .w(px(112.))
+                        .h(px(44.))
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(9.))
+                        .bg(fill)
+                        .text_color(ink)
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .cursor_pointer(),
+                )
+                .on_click(self.action_click(UiAction::SetTheme(choice)))
+                .child(label)
+                .child(keycap(key, colors, false)),
             );
         }
 

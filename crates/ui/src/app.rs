@@ -9,8 +9,8 @@ use std::{
 
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
-    KeyBinding, PathPromptOptions, Pixels, Point, Render, Window,
-    WindowAppearance, actions, div, point, prelude::*, px,
+    KeyBinding, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point,
+    Render, Window, WindowAppearance, actions, div, point, prelude::*, px,
 };
 use ranki_core::{
     FsrsParams, FsrsPreset, FsrsScheduler, Scheduler, from_settings,
@@ -310,6 +310,7 @@ pub struct Root {
     pub(crate) rename_field: Entity<TextField>,
     pub(crate) deck_edit: Option<DeckEdit>,
     pub(crate) deck_menu: Option<DeckMenu>,
+    pub(crate) deck_menu_dismissed_press: Option<MouseDownEvent>,
     pub(crate) confirmation: Option<Confirmation>,
     pub(crate) review: ReviewState,
     pub(crate) add: AddState,
@@ -473,6 +474,7 @@ impl Root {
             rename_field,
             deck_edit: None,
             deck_menu: None,
+            deck_menu_dismissed_press: None,
             confirmation: None,
             review: ReviewState::default(),
             add: AddState {
@@ -1982,6 +1984,10 @@ impl Root {
         cx: &mut Context<Self>,
     ) {
         self.tick_focus(window);
+        if self.deck_menu.take().is_some() {
+            self.deck_menu_dismissed_press = None;
+            cx.notify();
+        }
         let had_dialog = self.confirmation.is_some();
         match action {
             UiAction::Reveal => self.reveal(cx),
@@ -2418,6 +2424,19 @@ impl Render for Root {
             .text_color(colors.text)
             .font_family(self.font_family)
             .track_focus(&self.focus)
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                if this.deck_menu_dismissed_press.take().is_some() {
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.deck_menu_dismissed_press.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .on_action(cx.listener(|this, action: &Reveal, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))

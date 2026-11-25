@@ -8,7 +8,9 @@ use gpui::{
 
 use crate::{
     app::{Confirmation, Root, UiAction, View},
-    components::{ClickHandler, brand_mark, icon, keycap, secondary_button},
+    components::{
+        ClickHandler, Interaction, brand_mark, icon, keycap, secondary_button,
+    },
     theme::{
         NAV_WIDTH, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED,
         SPACE_SECTION, Style, alpha,
@@ -27,30 +29,30 @@ impl Root {
         } else {
             colors.subtext
         };
-        let mut add = div()
-            .id("nav-add")
-            .flex()
-            .items_center()
-            .gap(px(SPACE_GROUP))
-            .h(px(44.))
-            .px(px(SPACE_RELATED))
-            .rounded(px(12.))
-            .text_size(px(14.))
-            .text_color(add_ink)
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .cursor_pointer()
-            .on_click(self.action_click(UiAction::OpenAdd))
-            .hover(move |row| {
-                row.bg(if add_selected {
-                    colors.mauve
-                } else {
-                    crate::theme::alpha(colors.mauve, 0.12)
-                })
-            })
-            .child(icon("icon-plus", 18., add_ink))
-            .child("Add card")
-            .child(div().flex_1())
-            .child(keycap("A", colors, add_selected));
+        let mut add = if add_selected {
+            Interaction::accent(style)
+        } else {
+            Interaction::tinted(colors, colors.mauve)
+        }
+        .apply(
+            div()
+                .id("nav-add")
+                .flex()
+                .items_center()
+                .gap(px(SPACE_GROUP))
+                .h(px(44.))
+                .px(px(SPACE_RELATED))
+                .rounded(px(12.))
+                .text_size(px(14.))
+                .text_color(add_ink)
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .cursor_pointer(),
+        )
+        .on_click(self.action_click(UiAction::OpenAdd))
+        .child(icon("icon-plus", 18., add_ink))
+        .child("Add card")
+        .child(div().flex_1())
+        .child(keycap("A", colors, add_selected));
         if add_selected {
             add = add.bg(colors.mauve).text_color(style.ink());
         }
@@ -84,11 +86,8 @@ impl Root {
                 row = row.bg(alpha(colors.mauve, 0.16));
             }
             if enabled {
-                row = row
-                    .cursor_pointer()
-                    .hover(move |style| {
-                        style.bg(crate::theme::alpha(colors.mauve, 0.12))
-                    })
+                row = Interaction::tinted(colors, colors.mauve)
+                    .apply(row.cursor_pointer())
                     .on_click(self.action_click(action));
             }
             row.child(icon(icon_name, 18., ink))
@@ -293,17 +292,19 @@ impl Root {
                 )
                 .child(toast.text.clone())
                 .child(
-                    div()
-                        .id("toast-dismiss")
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(24.))
-                        .h(px(24.))
-                        .flex_none()
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .hover(move |style| style.bg(colors.surface1))
+                    Interaction::surface(colors)
+                        .apply(
+                            div()
+                                .id("toast-dismiss")
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .w(px(24.))
+                                .h(px(24.))
+                                .flex_none()
+                                .rounded(px(6.))
+                                .cursor_pointer(),
+                        )
                         .on_click(dismiss)
                         .child(icon("icon-x", 14., colors.subtext)),
                 );
@@ -339,6 +340,17 @@ impl Root {
                     .child(
                         div()
                             .id("deck-actions-menu")
+                            .on_mouse_down_out(cx.listener(
+                                move |this,
+                                      event: &gpui::MouseDownEvent,
+                                      _,
+                                      cx| {
+                                    this.deck_menu = None;
+                                    this.deck_menu_dismissed_press =
+                                        Some(event.clone());
+                                    cx.notify();
+                                },
+                            ))
                             .flex_col()
                             .w(px(160.))
                             .gap(px(SPACE_INLINE))
@@ -348,33 +360,37 @@ impl Root {
                             .border_1()
                             .border_color(colors.surface1)
                             .child(
-                                div()
-                                    .id("decks-rename")
-                                    .w_full()
-                                    .px(px(SPACE_RELATED))
-                                    .py(px(SPACE_GROUP))
-                                    .rounded(px(8.))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(colors.surface0))
-                                    .text_size(px(13.))
+                                Interaction::surface(colors)
+                                    .apply(
+                                        div()
+                                            .id("decks-rename")
+                                            .w_full()
+                                            .px(px(SPACE_RELATED))
+                                            .py(px(SPACE_GROUP))
+                                            .rounded(px(8.))
+                                            .cursor_pointer(),
+                                    )
                                     .on_click(cx.listener(
                                         move |this, _: &ClickEvent, _, cx| {
                                             this.deck_menu = None;
                                             this.start_rename(&rename_deck, cx);
                                         },
                                     ))
+                                    .text_size(px(13.))
                                     .child("Rename"),
                             )
                             .child(
-                                div()
-                                    .id("decks-remove")
-                                    .w_full()
-                                    .px(px(SPACE_RELATED))
-                                    .py(px(SPACE_GROUP))
-                                    .rounded(px(8.))
-                                    .cursor_pointer()
-                                    .text_size(px(13.))
-                                    .text_color(colors.red)
+                                Interaction::danger(colors)
+                                    .apply(
+                                        div()
+                                            .id("decks-remove")
+                                            .w_full()
+                                            .px(px(SPACE_RELATED))
+                                            .py(px(SPACE_GROUP))
+                                            .rounded(px(8.))
+                                            .cursor_pointer()
+                                            .text_color(colors.red),
+                                    )
                                     .on_click(cx.listener(
                                         move |this, _: &ClickEvent, _, cx| {
                                             this.deck_menu = None;
@@ -389,6 +405,7 @@ impl Root {
                                             cx.notify();
                                         },
                                     ))
+                                    .text_size(px(13.))
                                     .child("Remove"),
                             ),
                     )
@@ -509,12 +526,15 @@ impl Root {
                     .child(help_row("T", "Statistics / Scheduler", colors))
                     .child(help_row("?", "This sheet", colors))
                     .child(
-                        div()
-                            .id("auto-nav-2")
-                            .mt(px(SPACE_GROUP))
-                            .text_size(px(12.))
-                            .text_color(colors.mauve)
-                            .cursor_pointer()
+                        Interaction::surface(colors)
+                            .apply(
+                                div()
+                                    .id("help-close")
+                                    .mt(px(SPACE_GROUP))
+                                    .text_size(px(12.))
+                                    .text_color(colors.mauve)
+                                    .cursor_pointer(),
+                            )
                             .on_click(close)
                             .child("Close"),
                     )
@@ -538,17 +558,20 @@ fn primary(
     style: Style,
     cx: &Context<Root>,
 ) -> impl IntoElement {
-    div()
-        .id("confirm-primary")
-        .h(px(40.))
-        .px(px(SPACE_BLOCK))
-        .rounded(px(12.))
-        .bg(style.colors.mauve)
-        .text_color(style.ink())
-        .text_size(px(14.))
-        .flex()
-        .items_center()
-        .cursor_pointer()
+    Interaction::accent(style)
+        .apply(
+            div()
+                .id("confirm-primary")
+                .h(px(40.))
+                .px(px(SPACE_BLOCK))
+                .rounded(px(12.))
+                .bg(style.colors.mauve)
+                .text_color(style.ink())
+                .text_size(px(14.))
+                .flex()
+                .items_center()
+                .cursor_pointer(),
+        )
         .on_click(cx.listener(|_, _: &ClickEvent, window, cx| {
             crate::app::dispatch_app_action(window, cx, UiAction::Confirm);
         }))

@@ -12,7 +12,7 @@ use gpui::{
 use crate::{
     app::{Root, UiAction, note_type_name, resolve_model},
     card_view::{self, Side},
-    components::{ClickHandler, icon, keycap, removable_chip},
+    components::{ClickHandler, Interaction, icon, keycap, removable_chip},
     occlusion::{self, OcclusionMask},
     theme::{
         ADD_CONTENT_WIDTH, ADD_FORM_WIDTH, ADD_GAP, NAV_WIDTH, PAGE_X,
@@ -100,15 +100,12 @@ impl Root {
 
         column = column
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(28.))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("New card"),
-                    )
+                div().flex().items_center().child(
+                    div()
+                        .text_size(px(28.))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child("New card"),
+                ),
             )
             .child(div().h(px(20.)))
             .child(
@@ -135,23 +132,41 @@ impl Root {
                                     .child("DECK"),
                             )
                             .child(
-                                div()
-                                    .id("add-deck-picker")
-                                    .cursor_pointer()
+                                Interaction::raised(colors)
+                                    .apply(
+                                        div()
+                                            .id("add-deck-picker")
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(SPACE_GROUP))
+                                            .text_size(px(14.))
+                                            .font_weight(
+                                                gpui::FontWeight::SEMIBOLD,
+                                            )
+                                            .cursor_pointer(),
+                                    )
                                     .on_click(cx.listener(
                                         |this, _: &ClickEvent, window, cx| {
-                                            this.toggle_add_deck_picker(window, cx);
+                                            this.toggle_add_deck_picker(
+                                                window, cx,
+                                            );
                                         },
                                     ))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(SPACE_GROUP))
-                                    .text_size(px(14.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(self.add_deck_index().and_then(|index| decks.get(index)).map_or_else(
-                                        || String::from("Choose a deck"),
-                                        |deck| deck.name.replace("::", " › "),
-                                    ))
+                                    .child(
+                                        self.add_deck_index()
+                                            .and_then(|index| decks.get(index))
+                                            .map_or_else(
+                                                || {
+                                                    String::from(
+                                                        "Choose a deck",
+                                                    )
+                                                },
+                                                |deck| {
+                                                    deck.name
+                                                        .replace("::", " › ")
+                                                },
+                                            ),
+                                    )
                                     .child(icon(
                                         "icon-chevron-down",
                                         16.,
@@ -168,45 +183,48 @@ impl Root {
                             .p(px(SPACE_INLINE))
                             .rounded(px(12.))
                             .bg(colors.surface0)
-                            .children(
-                                note_type_tabs(&models).into_iter().map(
-                                    |(label, index)| {
-                                        let selected =
-                                            index == self.add.model_index;
-                                        div()
-                                            .id(SharedString::from(format!(
-                                                "add-model-tab-{index}"
-                                            )))
-                                            .h(px(32.))
-                                            .px(px(SPACE_RELATED))
-                                            .flex()
-                                            .items_center()
-                                            .rounded(px(9.))
-                                            .bg(if selected {
-                                                alpha(colors.mauve, 0.22)
-                                            } else {
-                                                alpha(colors.surface0, 0.0)
-                                            })
-                                            .text_size(px(13.))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(if selected {
-                                                colors.mauve
-                                            } else {
-                                                colors.subtext
-                                            })
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(
-                                                move |this,
-                                                      _: &ClickEvent,
-                                                      _,
-                                                      cx| {
-                                                    this.select_model(index, cx);
-                                                },
-                                            ))
-                                            .child(label)
-                                    },
-                                ),
-                            ),
+                            .children(note_type_tabs(&models).into_iter().map(
+                                |(label, index)| {
+                                    let selected =
+                                        index == self.add.model_index;
+                                    Interaction::tinted(colors, colors.mauve)
+                                        .apply(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "add-model-tab-{index}"
+                                                )))
+                                                .h(px(32.))
+                                                .px(px(SPACE_RELATED))
+                                                .flex()
+                                                .items_center()
+                                                .rounded(px(9.))
+                                                .bg(if selected {
+                                                    alpha(colors.mauve, 0.22)
+                                                } else {
+                                                    alpha(colors.surface0, 0.0)
+                                                })
+                                                .text_size(px(13.))
+                                                .font_weight(
+                                                    gpui::FontWeight::SEMIBOLD,
+                                                )
+                                                .text_color(if selected {
+                                                    colors.mauve
+                                                } else {
+                                                    colors.subtext
+                                                })
+                                                .cursor_pointer(),
+                                        )
+                                        .on_click(cx.listener(
+                                            move |this,
+                                                  _: &ClickEvent,
+                                                  _,
+                                                  cx| {
+                                                this.select_model(index, cx);
+                                            },
+                                        ))
+                                        .child(label)
+                                },
+                            )),
                     ),
             );
         if self.add.deck_picker {
@@ -328,6 +346,7 @@ impl Root {
                         cx.notify();
                     });
                     window.focus(&handle);
+                    cx.stop_propagation();
                 }),
             ));
         }
@@ -346,6 +365,7 @@ impl Root {
             )
             .child(
                 tags_row
+                    .hover(move |style| style.bg(colors.surface0))
                     .on_click(cx.listener(
                         move |_, _: &ClickEvent, window, _| {
                             window.focus(&click_handle);
@@ -492,19 +512,22 @@ impl Root {
                 .border_color(colors.surface1)
                 .child(div().flex_1())
                 .child(
-                    div()
-                        .id("add-save")
-                        .h(px(48.))
-                        .px(px(SPACE_SECTION))
-                        .flex()
-                        .items_center()
-                        .gap(px(SPACE_GROUP))
-                        .rounded(px(14.))
-                        .bg(colors.mauve)
-                        .text_color(style.ink())
-                        .text_size(px(15.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .cursor_pointer()
+                    Interaction::accent(style)
+                        .apply(
+                            div()
+                                .id("add-save")
+                                .h(px(48.))
+                                .px(px(SPACE_SECTION))
+                                .flex()
+                                .items_center()
+                                .gap(px(SPACE_GROUP))
+                                .rounded(px(14.))
+                                .bg(colors.mauve)
+                                .text_color(style.ink())
+                                .text_size(px(15.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .cursor_pointer(),
+                        )
                         .on_click(save)
                         .child(icon("icon-plus", 18., style.ink()))
                         .child("Add card")
@@ -562,7 +585,14 @@ impl Root {
                 ))
                 .child(label);
             if enabled {
-                element = element.cursor_pointer().on_click(on_click);
+                element = Interaction::new(
+                    colors.surface1,
+                    colors.surface0,
+                    colors.surface1,
+                    colors.mauve,
+                )
+                .apply(element.cursor_pointer())
+                .on_click(on_click);
             }
             element
         };
@@ -728,46 +758,56 @@ impl Root {
         for (index, mask) in masks.iter().enumerate() {
             let active = selected == Some(index);
             let ordinal = index.saturating_add(1);
+            let (hover, press) = if active {
+                (alpha(colors.mauve, 0.26), alpha(colors.mauve, 0.38))
+            } else {
+                (colors.surface0, colors.surface1)
+            };
             list = list.child(
-                div()
-                    .id(SharedString::from(format!("io-mask-{index}")))
-                    .flex()
-                    .items_center()
-                    .gap(px(SPACE_GROUP))
-                    .h(px(32.))
-                    .px(px(SPACE_RELATED))
-                    .rounded(px(9.))
-                    .bg(if active {
-                        alpha(colors.mauve, 0.16)
-                    } else {
-                        colors.base
-                    })
-                    .text_size(px(13.))
-                    .text_color(if active {
-                        colors.mauve
-                    } else {
-                        colors.subtext
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            this.select_occlusion_mask(index, cx);
-                        },
-                    ))
-                    .child(format!("c{ordinal}"))
-                    .child(mask.shape.label())
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(colors.overlay)
-                            .child(format!(
-                                "{}, {} · {} × {}",
-                                occlusion::ratio(mask.rect.left),
-                                occlusion::ratio(mask.rect.top),
-                                occlusion::ratio(mask.rect.width),
-                                occlusion::ratio(mask.rect.height),
-                            )),
+                Interaction::new(
+                    alpha(colors.text, 0.0),
+                    hover,
+                    press,
+                    colors.mauve,
+                )
+                .apply(
+                    div()
+                        .id(SharedString::from(format!("io-mask-{index}")))
+                        .flex()
+                        .items_center()
+                        .gap(px(SPACE_GROUP))
+                        .h(px(32.))
+                        .px(px(SPACE_RELATED))
+                        .rounded(px(9.))
+                        .bg(if active {
+                            alpha(colors.mauve, 0.16)
+                        } else {
+                            colors.base
+                        })
+                        .text_size(px(13.))
+                        .text_color(if active {
+                            colors.mauve
+                        } else {
+                            colors.subtext
+                        })
+                        .cursor_pointer(),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.select_occlusion_mask(index, cx);
+                }))
+                .child(format!("c{ordinal}"))
+                .child(mask.shape.label())
+                .child(
+                    div().text_size(px(12.)).text_color(colors.overlay).child(
+                        format!(
+                            "{}, {} · {} × {}",
+                            occlusion::ratio(mask.rect.left),
+                            occlusion::ratio(mask.rect.top),
+                            occlusion::ratio(mask.rect.width),
+                            occlusion::ratio(mask.rect.height),
+                        ),
                     ),
+                ),
             );
         }
 
@@ -817,11 +857,13 @@ impl Root {
                                 String::from("Upload an image")
                             }));
                         if image.is_none() {
-                            label.cursor_pointer().on_click(cx.listener(
-                                |this, _: &ClickEvent, _, cx| {
-                                    this.upload_occlusion_image(cx);
-                                },
-                            ))
+                            Interaction::tinted(colors, colors.mauve)
+                                .apply(label.cursor_pointer())
+                                .on_click(cx.listener(
+                                    |this, _: &ClickEvent, _, cx| {
+                                        this.upload_occlusion_image(cx);
+                                    },
+                                ))
                         } else {
                             label
                         }
@@ -876,47 +918,60 @@ impl Root {
                     .saturating_add(stats.learning_cards)
                     .saturating_add(stats.review_cards)
             });
+            let (hover, press) = if selected {
+                (alpha(colors.mauve, 0.28), alpha(colors.mauve, 0.4))
+            } else {
+                (colors.surface0, colors.surface1)
+            };
             list = list.child(
-                div()
-                    .id(SharedString::from(format!("add-deck-{index}")))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(38.))
-                    .flex_none()
-                    .px(px(SPACE_RELATED))
-                    .rounded(px(10.))
-                    .bg(if selected {
-                        alpha(colors.mauve, 0.18)
-                    } else {
-                        colors.base
-                    })
-                    .text_color(if selected {
-                        colors.mauve
-                    } else {
-                        colors.text
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(
-                        move |this, _: &ClickEvent, window, cx| {
-                            this.select_add_deck(index, cx);
-                            window.focus(&this.focus);
-                        },
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(SPACE_GROUP))
-                            .child(icon("icon-book", 16., colors.subtext))
-                            .child(deck.name.replace("::", " › ")),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(colors.subtext)
-                            .child(format!("{due} due")),
-                    ),
+                Interaction::new(
+                    alpha(colors.text, 0.0),
+                    hover,
+                    press,
+                    colors.mauve,
+                )
+                .apply(
+                    div()
+                        .id(SharedString::from(format!("add-deck-{index}")))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .h(px(38.))
+                        .flex_none()
+                        .px(px(SPACE_RELATED))
+                        .rounded(px(10.))
+                        .bg(if selected {
+                            alpha(colors.mauve, 0.18)
+                        } else {
+                            colors.base
+                        })
+                        .text_color(if selected {
+                            colors.mauve
+                        } else {
+                            colors.text
+                        })
+                        .cursor_pointer(),
+                )
+                .on_click(cx.listener(
+                    move |this, _: &ClickEvent, window, cx| {
+                        this.select_add_deck(index, cx);
+                        window.focus(&this.focus);
+                    },
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(SPACE_GROUP))
+                        .child(icon("icon-book", 16., colors.subtext))
+                        .child(deck.name.replace("::", " › ")),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(colors.subtext)
+                        .child(format!("{due} due")),
+                ),
             );
         }
         if matches == 0 {
@@ -1102,40 +1157,46 @@ fn formatting_toolbar(
         handler
     };
     let button = |label: &'static str, bold: bool, on_click: ClickHandler| {
-        let mut button = div()
-            .id("add-format")
-            .flex()
-            .items_center()
-            .justify_center()
-            .w(px(30.))
-            .h(px(30.))
-            .rounded(px(8.))
-            .text_size(px(14.))
-            .text_color(colors.subtext)
-            .cursor_pointer()
+        let button = Interaction::surface(colors)
+            .apply(
+                div()
+                    .id(SharedString::from(format!("add-format-{label}")))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(30.))
+                    .h(px(30.))
+                    .rounded(px(8.))
+                    .text_size(px(14.))
+                    .text_color(colors.subtext)
+                    .font_weight(if bold {
+                        gpui::FontWeight::BOLD
+                    } else {
+                        gpui::FontWeight::MEDIUM
+                    })
+                    .cursor_pointer(),
+            )
             .on_click(on_click);
-        button = if bold {
-            button.font_weight(gpui::FontWeight::BOLD)
-        } else {
-            button.font_weight(gpui::FontWeight::MEDIUM)
-        };
         button.child(label)
     };
     let cloze_button = |label: String,
                         number: u32,
                         field: gpui::Entity<crate::text_field::TextField>,
                         handle: gpui::FocusHandle| {
-        div()
-            .id(SharedString::from(format!("add-cloze-{label}")))
-            .flex()
-            .items_center()
-            .h(px(30.))
-            .px(px(SPACE_RELATED))
-            .rounded(px(8.))
-            .text_size(px(13.))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(colors.mauve)
-            .cursor_pointer()
+        Interaction::tinted(colors, colors.mauve)
+            .apply(
+                div()
+                    .id(SharedString::from(format!("add-cloze-{label}")))
+                    .flex()
+                    .items_center()
+                    .h(px(30.))
+                    .px(px(SPACE_RELATED))
+                    .rounded(px(8.))
+                    .text_size(px(13.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(colors.mauve)
+                    .cursor_pointer(),
+            )
             .on_click(wrap_cloze(number, field, handle))
             .child(label)
     };

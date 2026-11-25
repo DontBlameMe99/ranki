@@ -9,7 +9,9 @@ use ranki_model::{CardType, Note, NoteModel};
 use crate::{
     app::{Phase, Root, UiAction, duration_label, queue_counts, rating_name},
     card_view,
-    components::{ClickHandler, chip, fade_in, icon, keycap, progress_bar},
+    components::{
+        ClickHandler, Interaction, chip, fade_in, icon, keycap, progress_bar,
+    },
     theme::{
         CONTROL_HEIGHT, FOOTER_HEIGHT, MOTION_PROGRESS_MS, MOTION_QUICK_MS,
         PROGRESS_WIDTH, RATING_GAP, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER,
@@ -140,8 +142,12 @@ impl Root {
                         .text_size(px(14.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .cursor_pointer()
+                        .focusable()
+                        .border_1()
+                        .border_color(alpha(colors.text, 0.0))
                         .hover(move |row| row.bg(colors.surface1))
                         .active(move |row| row.bg(alpha(colors.text, 0.08)))
+                        .focus(move |row| row.border_color(colors.mauve))
                         .on_click(end)
                         .child(icon("icon-arrow-left", 18., colors.text))
                         .child("End session")
@@ -544,8 +550,12 @@ impl Root {
                         .text_size(px(17.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .cursor_pointer()
+                        .focusable()
+                        .border_1()
+                        .border_color(alpha(colors.text, 0.0))
                         .hover(move |button| button.bg(accent_hover(theme)))
                         .active(move |button| button.bg(accent_press(theme)))
+                        .focus(move |button| button.border_color(style.ink()))
                         .on_click(reveal)
                         .child("Show answer")
                         .child(keycap("Space", colors, true))
@@ -764,12 +774,14 @@ fn rating_row(
                 .border_1()
                 .border_color(alpha(hue, 0.4))
                 .cursor_pointer()
+                .focusable()
                 .hover(move |button| {
                     button.bg(hover_fill).border_color(hover_border)
                 })
                 .active(move |button| {
                     button.bg(press_fill).border_color(press_border)
                 })
+                .focus(move |button| button.border_color(hue))
                 .on_click(cx.listener(
                     move |this, _: &ClickEvent, window, cx| {
                         this.dispatch(action.clone(), window, cx);
@@ -828,7 +840,6 @@ fn footer_action(
     } else {
         alpha(colors.subtext, 0.4)
     };
-    let hover = colors.surface0;
     let mut row = div()
         .id(SharedString::from(format!("footer-{label}")))
         .flex()
@@ -843,9 +854,8 @@ fn footer_action(
         .child(label.to_owned())
         .children(enabled.then(|| keycap(key.to_owned(), colors, false)));
     if enabled {
-        row = row
-            .cursor_pointer()
-            .hover(move |style| style.bg(hover))
+        row = Interaction::surface(colors)
+            .apply(row.cursor_pointer())
             .on_click(on_click);
     }
     row
@@ -869,28 +879,43 @@ fn footer_button(
     } else {
         colors.surface0
     };
-    div()
-        .id(SharedString::from(format!("summary-{label}")))
-        .flex()
-        .items_center()
-        .justify_center()
-        .h(px(44.))
-        .px(px(SPACE_SECTION))
-        .rounded(px(14.))
-        .bg(bg)
-        .border_1()
-        .border_color(if primary {
-            colors.mauve
+    let border = if primary {
+        colors.mauve
+    } else {
+        colors.surface1
+    };
+    let press = if primary {
+        accent_press(theme)
+    } else {
+        colors.surface1
+    };
+    Interaction::new(
+        border,
+        hover,
+        press,
+        if primary {
+            crate::theme::accent_ink(theme)
         } else {
-            colors.surface1
-        })
-        .text_color(ink)
-        .text_size(px(15.))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .cursor_pointer()
-        .hover(move |style| style.bg(hover))
-        .on_click(on_click)
-        .child(label)
+            colors.mauve
+        },
+    )
+    .apply(
+        div()
+            .id(SharedString::from(format!("summary-{label}")))
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(px(44.))
+            .px(px(SPACE_SECTION))
+            .rounded(px(14.))
+            .bg(bg)
+            .text_color(ink)
+            .text_size(px(15.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .cursor_pointer(),
+    )
+    .on_click(on_click)
+    .child(label)
 }
 
 #[cfg(test)]
