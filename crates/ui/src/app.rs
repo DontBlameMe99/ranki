@@ -295,6 +295,7 @@ pub struct AddState {
     pub deck_filter: Entity<TextField>,
     pub deck_picker: bool,
     pub deck_picker_anchor: Point<Pixels>,
+    pub deck_picker_dismissed_press: Option<MouseDownEvent>,
     pub occlusion: OcclusionState,
 }
 
@@ -519,6 +520,7 @@ impl Root {
                 deck_filter,
                 deck_picker: false,
                 deck_picker_anchor: point(px(0.), px(0.)),
+                deck_picker_dismissed_press: None,
                 occlusion: OcclusionState::default(),
             },
             toast: None,
@@ -1162,6 +1164,7 @@ impl Root {
         self.add.deck_picker = !self.add.deck_picker;
         if self.add.deck_picker {
             self.add.deck_picker_anchor = anchor;
+            self.add.deck_picker_dismissed_press = None;
             let filter = self.add.deck_filter.read(cx).focus_handle().clone();
             window.focus(&filter);
         } else {
@@ -2519,14 +2522,20 @@ impl Render for Root {
             .font_family(self.font_family)
             .track_focus(&self.focus)
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                if this.deck_menu_dismissed_press.take().is_some() {
+                let menu = this.deck_menu_dismissed_press.take().is_some();
+                let picker =
+                    this.add.deck_picker_dismissed_press.take().is_some();
+                if menu || picker {
                     cx.notify();
                 }
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    if this.deck_menu_dismissed_press.take().is_some() {
+                    let menu = this.deck_menu_dismissed_press.take().is_some();
+                    let picker =
+                        this.add.deck_picker_dismissed_press.take().is_some();
+                    if menu || picker {
                         cx.notify();
                     }
                 }),
@@ -3630,6 +3639,131 @@ mod tests {
         });
         assert!(!picker_open, "selecting a deck must close the picker");
         assert_eq!(text, "untouched");
+    }
+
+    fn click_test_point(
+        cx: &mut gpui::VisualTestContext,
+        at: gpui::Point<gpui::Pixels>,
+    ) {
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+        cx.simulate_mouse_down(
+            at,
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_up(
+            at,
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn deck_picker_dismisses_on_outside_click(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(ModalStore),
+                    options: Options::default(),
+                    save_settings: std::sync::Arc::new(|_| Ok(())),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        cx.update_entity(&root, |root, cx| {
+            root.view = super::View::AddCard;
+            cx.notify();
+        });
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(1280.), px(800.)),
+            |_, _| root.clone(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let button = cx
+            .debug_bounds("add-deck-picker")
+            .expect("deck picker button bounds")
+            .center();
+
+        click_test_point(cx, button);
+        assert!(cx.read_entity(&root, |root, _| root.add.deck_picker));
+
+        click_test_point(cx, point(px(1100.), px(600.)));
+        assert!(!cx.read_entity(&root, |root, _| root.add.deck_picker));
+
+        click_test_point(cx, button);
+        assert!(cx.read_entity(&root, |root, _| root.add.deck_picker));
+
+        click_test_point(cx, button);
+        assert!(
+            !cx.read_entity(&root, |root, _| root.add.deck_picker),
+            "the dismissing press must not reopen the picker"
+        );
+    }
+
+    #[gpui::test]
+    fn deck_picker_closes_when_the_form_scrolls(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(ModalStore),
+                    options: Options::default(),
+                    save_settings: std::sync::Arc::new(|_| Ok(())),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        cx.update_entity(&root, |root, cx| {
+            root.view = super::View::AddCard;
+            root.add.deck_picker = true;
+            root.add.deck_picker_anchor = point(px(270.), px(224.));
+            cx.notify();
+        });
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(1280.), px(800.)),
+            |_, _| root.clone(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let popup = cx
+            .debug_bounds("add-deck-picker-popup")
+            .expect("deck picker popup bounds");
+        let scroll = |cx: &mut gpui::VisualTestContext, at| {
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: at,
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-20.))),
+                modifiers: gpui::Modifiers::none(),
+                touch_phase: gpui::TouchPhase::Moved,
+            });
+            cx.run_until_parked();
+        };
+
+        scroll(
+            cx,
+            point(popup.origin.x + px(160.), popup.origin.y + px(70.)),
+        );
+        assert!(
+            cx.read_entity(&root, |root, _| root.add.deck_picker),
+            "scrolling the deck list must keep the picker open"
+        );
+
+        scroll(cx, point(px(1100.), px(600.)));
+        assert!(!cx.read_entity(&root, |root, _| root.add.deck_picker));
     }
 
     #[test]

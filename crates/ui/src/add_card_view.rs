@@ -90,6 +90,14 @@ impl Root {
             .flex()
             .flex_col()
             .overflow_scroll()
+            .on_scroll_wheel(cx.listener(
+                |this, _: &gpui::ScrollWheelEvent, _, cx| {
+                    if this.add.deck_picker {
+                        this.add.deck_picker = false;
+                        cx.notify();
+                    }
+                },
+            ))
             .px(px(PAGE_X))
             .pt(px(SPACE_GUTTER));
         let mut column = div()
@@ -150,9 +158,33 @@ impl Root {
                                     )
                                     .on_click(cx.listener(
                                         |this, event: &ClickEvent, window, cx| {
-                                            this.toggle_add_deck_picker(
-                                                event.position(), window, cx,
-                                            );
+                                            let same_press = match event {
+                                                ClickEvent::Mouse(click) => this
+                                                    .add
+                                                    .deck_picker_dismissed_press
+                                                    .as_ref()
+                                                    .is_some_and(|down| {
+                                                        down.button
+                                                            == click.down.button
+                                                            && down.position
+                                                                == click.down.position
+                                                            && down.click_count
+                                                                == click.down.click_count
+                                                            && down.first_mouse
+                                                                == click.down.first_mouse
+                                                    }),
+                                                ClickEvent::Keyboard(_) => false,
+                                            };
+                                            this.add
+                                                .deck_picker_dismissed_press =
+                                                None;
+                                            if !same_press {
+                                                this.toggle_add_deck_picker(
+                                                    event.position(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
                                         },
                                     ))
                                     .child(
@@ -913,7 +945,8 @@ impl Root {
             .gap(px(SPACE_INLINE))
             .max_h(px(220.))
             .id("add-deck-list")
-            .overflow_scroll();
+            .overflow_scroll()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
         let mut matches = 0;
         for (index, deck) in self.decks.iter().enumerate() {
             if !needle.is_empty() && !deck.name.to_lowercase().contains(&needle)
@@ -999,6 +1032,14 @@ impl Root {
             .debug_selector(|| "add-deck-picker-popup".to_owned())
             .w(px(320.))
             .occlude()
+            .on_mouse_down_out(cx.listener(
+                |this, event: &MouseDownEvent, window, cx| {
+                    this.add.deck_picker = false;
+                    this.add.deck_picker_dismissed_press = Some(event.clone());
+                    window.focus(&this.focus);
+                    cx.notify();
+                },
+            ))
             .flex()
             .flex_col()
             .gap(px(SPACE_GROUP))
