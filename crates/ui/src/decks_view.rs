@@ -3,8 +3,9 @@
 use std::collections::HashSet;
 
 use gpui::{
-    App, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement,
-    Rgba, SharedString, StatefulInteractiveElement, Styled, div, px,
+    App, ClickEvent, Context, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, Rgba, SharedString, StatefulInteractiveElement, Styled, div,
+    px,
 };
 
 use crate::{
@@ -493,6 +494,9 @@ impl Root {
                                 "decks-chevron-{}",
                                 row.path
                             )))
+                            .debug_selector(|| {
+                                format!("decks-chevron-{}", row.path)
+                            })
                             .flex()
                             .items_center()
                             .justify_center()
@@ -503,6 +507,7 @@ impl Root {
                     )
                     .on_click(cx.listener(
                         move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
                             this.toggle_deck(path.clone(), cx);
                         },
                     ))
@@ -564,20 +569,31 @@ impl Root {
             && let Some(edit) = self.deck_edit.clone()
             && edit.id == deck_id
         {
-            name_cell = name_cell.child(self.rename_field.clone()).child(
-                Interaction::surface(colors)
-                    .apply(
-                        div()
-                            .id("decks-save-rename")
-                            .text_size(px(13.))
-                            .text_color(colors.mauve)
-                            .cursor_pointer(),
-                    )
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.apply_rename(cx);
-                    }))
-                    .child("Save"),
-            );
+            name_cell = name_cell
+                .child(
+                    div()
+                        .debug_selector(|| String::from("deck-rename-field"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                        )
+                        .child(self.rename_field.clone()),
+                )
+                .child(
+                    Interaction::surface(colors)
+                        .apply(
+                            div()
+                                .id("decks-save-rename")
+                                .text_size(px(13.))
+                                .text_color(colors.mauve)
+                                .cursor_pointer(),
+                        )
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.apply_rename(cx);
+                        }))
+                        .child("Save"),
+                );
         }
         let count = |value: usize, color: Rgba| {
             div()
@@ -619,6 +635,7 @@ impl Root {
                         )
                         .on_click(cx.listener(
                             move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
                                 this.study_deck(target, cx);
                             },
                         ))
@@ -645,6 +662,7 @@ impl Root {
                 .apply(
                     div()
                         .id(SharedString::from(format!("decks-menu-{id}")))
+                        .debug_selector(|| format!("decks-menu-{id}"))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -674,6 +692,7 @@ impl Root {
                                 }),
                             gpui::ClickEvent::Keyboard(_) => false,
                         };
+                        cx.stop_propagation();
                         this.deck_menu_dismissed_press = None;
                         if !same_press {
                             this.deck_menu = if menu_open {
@@ -703,6 +722,7 @@ impl Root {
         };
         div()
             .id(SharedString::from(format!("deck-row-{}", row.path)))
+            .debug_selector(|| format!("deck-row-{}", row.path))
             .flex()
             .items_center()
             .min_h(px(if row.depth == 0 { 60. } else { 45. }))
@@ -718,9 +738,7 @@ impl Root {
             })
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 if let Some(index) = index {
-                    this.selected = Some(index);
-                    this.rebuild_deck_rows();
-                    cx.notify();
+                    this.study_deck(index, cx);
                 }
             }))
             .bg(if is_selected {

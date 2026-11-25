@@ -534,6 +534,17 @@ impl Root {
             }
             _ => {}
         }
+        if let Ok(path) = env::var("RANKI_UI_DEV_STUDY_DECK")
+            && let Some(id) = root
+                .deck_rows
+                .iter()
+                .find(|row| row.path == path)
+                .and_then(|row| row.id)
+            && let Some(index) =
+                root.decks.iter().position(|deck| deck.id == id)
+        {
+            root.study_deck(index, cx);
+        }
         if let Ok(theme) = env::var("RANKI_UI_DEV_THEME") {
             let choice = match theme.as_str() {
                 "light" => Some(ThemeChoice::Light),
@@ -3299,6 +3310,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use ranki_model::Store as _;
     use ranki_model::{
         Card, CardQueue, CardTemplate, CardType, Deck, Id, NewNote, Note,
         NoteKind, NoteModel, ReviewDecision, SchedulerKind, StoreError,
@@ -4138,5 +4150,195 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(names, ["Click Deck"]);
+    }
+    #[gpui::test]
+    fn clicking_a_deck_row_studies_that_deck(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("collection.anki2");
+        let mut store =
+            ranki_storage::Collection::create(&path).expect("collection");
+        let cards = store
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![
+                    String::from("Question?"),
+                    String::from("Answer!"),
+                ],
+                tags: Vec::new(),
+            })
+            .expect("note");
+        assert_eq!(cards.len(), 1);
+        let options = Options {
+            collection: path,
+            ..Options::default()
+        };
+        let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(store),
+                    options,
+                    save_settings,
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(1280.), px(800.)),
+            |_, _| root.clone(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let row = cx
+            .debug_bounds("deck-row-Default")
+            .expect("deck row bounds");
+        cx.simulate_click(row.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let state = cx.read_entity(&root, |root, _| {
+            (
+                root.view,
+                root.selected,
+                root.review.scope_all,
+                root.review.session_total,
+                root.review.current.is_some(),
+            )
+        });
+        assert_eq!(state.0, View::Review);
+        assert_eq!(state.1, Some(0));
+        assert!(!state.2);
+        assert_eq!(state.3, 1);
+        assert!(state.4);
+    }
+
+    #[gpui::test]
+    fn deck_row_controls_do_not_start_a_session(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("collection.anki2");
+        let mut store =
+            ranki_storage::Collection::create(&path).expect("collection");
+        let _ = store.create_deck("Topic::Child").expect("deck");
+        let _ = store
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![
+                    String::from("Question?"),
+                    String::from("Answer!"),
+                ],
+                tags: Vec::new(),
+            })
+            .expect("note");
+        let options = Options {
+            collection: path,
+            ..Options::default()
+        };
+        let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(store),
+                    options,
+                    save_settings,
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(1280.), px(800.)),
+            |_, _| root.clone(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let chevron = cx
+            .debug_bounds("decks-chevron-Topic")
+            .expect("chevron bounds");
+        cx.simulate_click(chevron.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let (view, expanded) = cx.read_entity(&root, |root, _| {
+            (root.view, root.expanded.contains("Topic"))
+        });
+        assert_eq!(view, View::Decks);
+        assert!(expanded);
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let menu = cx.debug_bounds("decks-menu-1").expect("menu bounds");
+        cx.simulate_click(menu.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let (view, menu_open) = cx.read_entity(&root, |root, _| {
+            (root.view, root.deck_menu.is_some())
+        });
+        assert_eq!(view, View::Decks);
+        assert!(menu_open);
+    }
+    #[gpui::test]
+    fn clicking_the_rename_field_keeps_the_decks_view(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("collection.anki2");
+        let mut store =
+            ranki_storage::Collection::create(&path).expect("collection");
+        let _ = store
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![
+                    String::from("Question?"),
+                    String::from("Answer!"),
+                ],
+                tags: Vec::new(),
+            })
+            .expect("note");
+        let options = Options {
+            collection: path,
+            ..Options::default()
+        };
+        let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(store),
+                    options,
+                    save_settings,
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+        cx.update_entity(&root, |root, cx| {
+            let deck = root.decks[0].clone();
+            root.start_rename(&deck, cx);
+        });
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(1280.), px(800.)),
+            |_, _| root.clone(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let field = cx
+            .debug_bounds("deck-rename-field")
+            .expect("rename field bounds");
+        cx.simulate_click(field.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let (view, editing) = cx.read_entity(&root, |root, _| {
+            (root.view, root.deck_edit.is_some())
+        });
+        assert_eq!(view, View::Decks);
+        assert!(editing);
     }
 }
