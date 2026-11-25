@@ -102,25 +102,25 @@
     },
     "gui/frame/idle": {
       "budget_ms": 100.0,
-      "median_ms": 0.21969,
+      "median_ms": 0.136577,
       "method": 1,
       "repeat": 1,
       "samples": 10,
-      "sha": "b6a792a6df2395ccd4a3f7fc5702ce4d1321709f",
-      "updated_at": "2026-11-25T02:35:38.843612+00:00",
+      "sha": "a5ba2208a31d9be65ff898104cbf4ef34f7ee8e1",
+      "updated_at": "2026-11-25T03:37:44.682812+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.224709
+      "worst_median_ms": 0.16705
     },
     "gui/frame/reveal": {
       "budget_ms": 100.0,
-      "median_ms": 0.568318,
+      "median_ms": 0.327867,
       "method": 1,
       "repeat": 1,
       "samples": 10,
-      "sha": "b6a792a6df2395ccd4a3f7fc5702ce4d1321709f",
-      "updated_at": "2026-11-25T02:35:38.843612+00:00",
+      "sha": "a5ba2208a31d9be65ff898104cbf4ef34f7ee8e1",
+      "updated_at": "2026-11-25T03:37:44.682812+00:00",
       "warmup": 2,
-      "worst_median_ms": 0.688774
+      "worst_median_ms": 0.43828999999999996
     },
     "mcp/roundtrip/list-decks": {
       "budget_ms": 100.0,
@@ -212,39 +212,39 @@
     },
     "storage/search/common": {
       "budget_ms": 50.0,
-      "median_ms": 0.399096,
+      "median_ms": 0.355839,
       "method": 1,
       "repeat": 2,
       "samples": 10,
-      "sha": "d6904cdef94421f7453c9f2a1cd5aaaea34e9718",
-      "updated_at": "2026-11-23T10:24:31.873598+00:00",
+      "sha": "a5ba2208a31d9be65ff898104cbf4ef34f7ee8e1",
+      "updated_at": "2026-11-25T03:37:44.682812+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.40335000000000004
+      "worst_median_ms": 0.365753
     },
     "storage/search/missing": {
       "budget_ms": 20.0,
-      "median_ms": 0.277006,
+      "median_ms": 0.258511,
       "method": 1,
       "repeat": 5,
       "samples": 10,
-      "sha": "d6904cdef94421f7453c9f2a1cd5aaaea34e9718",
-      "updated_at": "2026-11-23T10:24:31.873598+00:00",
+      "sha": "a5ba2208a31d9be65ff898104cbf4ef34f7ee8e1",
+      "updated_at": "2026-11-25T03:37:44.682812+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.279391
+      "worst_median_ms": 0.26392899999999997
     },
     "storage/stats": {
       "budget_ms": 20.0,
-      "median_ms": 0.120372,
+      "median_ms": 0.110437,
       "method": 1,
       "repeat": 5,
       "samples": 10,
-      "sha": "d6904cdef94421f7453c9f2a1cd5aaaea34e9718",
-      "updated_at": "2026-11-23T10:24:31.873598+00:00",
+      "sha": "a5ba2208a31d9be65ff898104cbf4ef34f7ee8e1",
+      "updated_at": "2026-11-25T03:37:44.682812+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.12108200000000001
+      "worst_median_ms": 0.117608
     }
   },
-  "sha": "b6a792a6df2395ccd4a3f7fc5702ce4d1321709f",
+  "sha": "a5ba2208a31d9be65ff898104cbf4ef34f7ee8e1",
   "version": 1,
   "workload_hash": "bb3b56caa290a9f6"
 }
