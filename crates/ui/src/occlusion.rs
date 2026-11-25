@@ -67,6 +67,44 @@ impl NormalizedRect {
         (rect.width >= MIN_MASK_SIZE && rect.height >= MIN_MASK_SIZE)
             .then_some(rect)
     }
+
+    /// True when an image-relative point falls inside the mask.
+    #[must_use]
+    pub fn contains(&self, point: (f32, f32)) -> bool {
+        point.0 >= self.left
+            && point.0 <= self.left + self.width
+            && point.1 >= self.top
+            && point.1 <= self.top + self.height
+    }
+}
+
+/// Rectangle an image occupies when contained inside a larger box.
+#[must_use]
+pub fn contain_rect(
+    image: (f32, f32),
+    container: (f32, f32),
+) -> NormalizedRect {
+    if image.0 <= 0.0
+        || image.1 <= 0.0
+        || container.0 <= 0.0
+        || container.1 <= 0.0
+    {
+        return NormalizedRect {
+            left: 0.0,
+            top: 0.0,
+            width: 1.0,
+            height: 1.0,
+        };
+    }
+    let scale = (container.0 / image.0).min(container.1 / image.1);
+    let width = image.0 * scale;
+    let height = image.1 * scale;
+    NormalizedRect {
+        left: ((container.0 - width) / 2.0 / container.0).clamp(0.0, 1.0),
+        top: ((container.1 - height) / 2.0 / container.1).clamp(0.0, 1.0),
+        width: (width / container.0).clamp(0.0, 1.0),
+        height: (height / container.1).clamp(0.0, 1.0),
+    }
 }
 
 /// One drawn occlusion shape.
@@ -265,9 +303,9 @@ pub fn ratio(value: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MaskShape, NormalizedRect, OcclusionMask, default_mask, image_field,
-        image_occlusion_fields, import_image, is_image_name, occlusion_field,
-        ratio, relative_position,
+        MaskShape, NormalizedRect, OcclusionMask, contain_rect, default_mask,
+        image_field, image_occlusion_fields, import_image, is_image_name,
+        occlusion_field, ratio, relative_position,
     };
     use ranki_model::parse_image_occlusion_field;
     use std::fs;
@@ -361,6 +399,15 @@ mod tests {
     }
 
     #[test]
+    fn mask_bounds_include_their_edges() {
+        let box_ = rect(0.2, 0.3, 0.4, 0.5);
+        assert!(box_.contains((0.2, 0.3)));
+        assert!(box_.contains((0.6, 0.8)));
+        assert!(!box_.contains((0.19, 0.5)));
+        assert!(!box_.contains((0.4, 0.81)));
+    }
+
+    #[test]
     fn field_values_follow_the_stock_model_order() {
         let masks = [OcclusionMask {
             shape: MaskShape::Rect,
@@ -399,6 +446,22 @@ mod tests {
             relative_position((400.0, -40.0), (100.0, 10.0), (200.0, 100.0)),
             (1.0, 0.0)
         );
+    }
+
+    #[test]
+    fn contained_images_keep_their_aspect_ratio_and_center() {
+        let rect = contain_rect((200.0, 100.0), (400.0, 400.0));
+        assert_eq!(
+            rect,
+            NormalizedRect {
+                left: 0.0,
+                top: 0.25,
+                width: 1.0,
+                height: 0.5,
+            }
+        );
+        let portrait = contain_rect((100.0, 200.0), (400.0, 400.0));
+        assert_eq!((portrait.left, portrait.width), (0.25, 0.5));
     }
 
     #[test]

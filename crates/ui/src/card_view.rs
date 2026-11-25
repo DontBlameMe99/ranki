@@ -56,6 +56,19 @@ pub enum MediaKind {
     Sound,
 }
 
+/// Media references that appear on the answer but not on the question.
+#[must_use]
+pub fn answer_only_media(
+    question: &[MediaRef],
+    answer: &[MediaRef],
+) -> Vec<MediaRef> {
+    answer
+        .iter()
+        .filter(|media| !question.contains(media))
+        .cloned()
+        .collect()
+}
+
 /// One rendered cloze span.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClozeSegment {
@@ -1013,6 +1026,36 @@ pub fn media_image(
         .into_any_element()
 }
 
+/// Image with its occlusion masks aligned to the rendered picture.
+#[must_use]
+pub fn occlusion_media(
+    media_dir: &std::path::Path,
+    name: &str,
+    masks: &[MaskOverlay],
+    colors: Palette,
+    answer: bool,
+    height: f32,
+) -> Div {
+    let path = media_path(media_dir, name);
+    let (width, fitted_height) = path
+        .as_ref()
+        .and_then(|path| image::image_dimensions(path).ok())
+        .map_or((520.0, height), |(width, height_px)| {
+            let width = f32::from(u16::try_from(width).unwrap_or(u16::MAX));
+            let natural_height =
+                f32::from(u16::try_from(height_px).unwrap_or(u16::MAX))
+                    .max(1.0);
+            let scale = (520.0 / width.max(1.0)).min(height / natural_height);
+            (width * scale, natural_height * scale)
+        });
+    div()
+        .relative()
+        .w(px(width))
+        .h(px(fitted_height))
+        .child(media_image(path, colors, fitted_height))
+        .child(occlusion_layer(masks, colors, answer))
+}
+
 fn unavailable_media(colors: Palette, height: f32) -> AnyElement {
     div()
         .flex()
@@ -1112,9 +1155,9 @@ pub fn preview_card(
 #[cfg(test)]
 mod tests {
     use super::{
-        CardRequest, ClozeKind, MediaKind, Side, TemplateNode, cloze_text,
-        media_refs, occlusion_overlays, parse_template, preview_card,
-        render_card, strip_tags,
+        CardRequest, ClozeKind, MediaKind, MediaRef, Side, TemplateNode,
+        answer_only_media, cloze_text, media_refs, occlusion_overlays,
+        parse_template, preview_card, render_card, strip_tags,
     };
     use ranki_model::{CardTemplate, Note, NoteKind};
 
@@ -1306,6 +1349,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn answer_media_skips_images_already_shown_on_the_question() {
+        let shared = MediaRef {
+            kind: MediaKind::Image,
+            name: "diagram.png".into(),
+        };
+        let extra = MediaRef {
+            kind: MediaKind::Sound,
+            name: "hint.mp3".into(),
+        };
+        let shown = [shared.clone()];
+        let rendered = [shared, extra.clone()];
+        assert_eq!(answer_only_media(&shown, &rendered), [extra]);
+    }
     #[test]
     fn occlusion_masks_use_normalized_coordinates() {
         let text = "{{c1::image-occlusion:rect:left=.2:top=.3:width=.4:height=.1}}<br>{{c2::image-occlusion:ellipse:left=.1:top=.1:width=.2:height=.2:oi=1}}";

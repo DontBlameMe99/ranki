@@ -4616,6 +4616,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "gpui",
+ "image",
  "ranki-core",
  "ranki-model",
  "ranki-storage",
