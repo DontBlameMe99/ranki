@@ -136,6 +136,9 @@ impl Root {
                                     .apply(
                                         div()
                                             .id("add-deck-picker")
+                                            .debug_selector(|| {
+                                                "add-deck-picker".to_owned()
+                                            })
                                             .flex()
                                             .items_center()
                                             .gap(px(SPACE_GROUP))
@@ -146,9 +149,9 @@ impl Root {
                                             .cursor_pointer(),
                                     )
                                     .on_click(cx.listener(
-                                        |this, _: &ClickEvent, window, cx| {
+                                        |this, event: &ClickEvent, window, cx| {
                                             this.toggle_add_deck_picker(
-                                                window, cx,
+                                                event.position(), window, cx,
                                             );
                                         },
                                     ))
@@ -227,9 +230,6 @@ impl Root {
                             )),
                     ),
             );
-        if self.add.deck_picker {
-            column = column.child(self.render_deck_picker(colors, cx));
-        }
 
         if let Some(error) = errors.get("deck") {
             column = column.child(validation(error, colors));
@@ -899,11 +899,11 @@ impl Root {
     }
 }
 impl Root {
-    fn render_deck_picker(
-        &mut self,
+    pub(crate) fn render_deck_picker(
+        &self,
         colors: crate::theme::Palette,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let query = self.add.deck_filter.read(cx).text();
         let needle = query.trim().to_lowercase();
         let filter = self.add.deck_filter.clone();
@@ -943,6 +943,7 @@ impl Root {
                 .apply(
                     div()
                         .id(SharedString::from(format!("add-deck-{index}")))
+                        .debug_selector(move || format!("add-deck-{index}"))
                         .flex()
                         .items_center()
                         .justify_between()
@@ -994,6 +995,10 @@ impl Root {
             );
         }
         div()
+            .id("add-deck-picker-popup")
+            .debug_selector(|| "add-deck-picker-popup".to_owned())
+            .w(px(320.))
+            .occlude()
             .flex()
             .flex_col()
             .gap(px(SPACE_GROUP))
@@ -1110,6 +1115,7 @@ fn formatting_toolbar(
             .apply(
                 div()
                     .id(SharedString::from(format!("add-format-{label}")))
+                    .debug_selector(move || format!("add-format-{label}"))
                     .flex()
                     .items_center()
                     .justify_center()

@@ -294,6 +294,7 @@ pub struct AddState {
     pub media_filter: Entity<TextField>,
     pub deck_filter: Entity<TextField>,
     pub deck_picker: bool,
+    pub deck_picker_anchor: Point<Pixels>,
     pub occlusion: OcclusionState,
 }
 
@@ -517,6 +518,7 @@ impl Root {
                 media_filter,
                 deck_filter,
                 deck_picker: false,
+                deck_picker_anchor: point(px(0.), px(0.)),
                 occlusion: OcclusionState::default(),
             },
             toast: None,
@@ -600,6 +602,14 @@ impl Root {
                 id: deck.id,
                 anchor: point(viewport.width - px(79.), px(423.)),
             });
+        }
+        if env::var("RANKI_UI_DEV_DECK_PICKER").is_ok_and(|value| value == "1")
+        {
+            root.view = View::AddCard;
+            root.add.deck_picker = true;
+            root.add.deck_picker_anchor =
+                point(px(theme::NAV_WIDTH + theme::PAGE_X + 12.), px(172.));
+            window.focus(root.add.deck_filter.read(cx).focus_handle());
         }
         if let Ok(seed) = env::var("RANKI_UI_DEV_OCCLUSION") {
             root.seed_occlusion(&seed, cx);
@@ -1145,11 +1155,13 @@ impl Root {
 
     pub(crate) fn toggle_add_deck_picker(
         &mut self,
+        anchor: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.add.deck_picker = !self.add.deck_picker;
         if self.add.deck_picker {
+            self.add.deck_picker_anchor = anchor;
             let filter = self.add.deck_filter.read(cx).focus_handle().clone();
             window.focus(&filter);
         } else {
@@ -3388,7 +3400,7 @@ mod tests {
         }
 
         fn models(&self) -> Result<Vec<NoteModel>, StoreError> {
-            Ok(Vec::new())
+            Ok(ranki_model::stock_models())
         }
 
         fn find_cards(&self, _: &str) -> Result<Vec<Id>, StoreError> {
@@ -3481,6 +3493,145 @@ mod tests {
             "clicking outside the modal must close it"
         );
     }
+    #[gpui::test]
+    fn deck_picker_floats_above_the_form(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(ModalStore),
+                    options: Options::default(),
+                    save_settings: std::sync::Arc::new(|_| Ok(())),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+        cx.update_entity(&root, |root, cx| {
+            root.view = super::View::AddCard;
+            cx.notify();
+        });
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(1280.), px(800.)),
+            |_, _| root.clone(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let button = cx
+            .debug_bounds("add-deck-picker")
+            .expect("deck picker button bounds");
+
+        let center = button.center();
+        cx.simulate_mouse_move(center, None, gpui::Modifiers::none());
+        cx.simulate_mouse_down(
+            center,
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_up(
+            center,
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let after = cx
+            .debug_bounds("add-deck-picker")
+            .expect("deck picker button bounds after opening");
+        assert_eq!(button.origin, after.origin);
+        assert_eq!(button.size, after.size);
+
+        let popup = cx
+            .debug_bounds("add-deck-picker-popup")
+            .expect("deck picker popup bounds");
+        assert!(
+            popup.size.width <= px(360.),
+            "popup was {} wide",
+            popup.size.width
+        );
+        assert!(popup.origin.y >= after.bottom());
+    }
+    #[gpui::test]
+    fn deck_picker_clicks_do_not_reach_the_editor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(ModalStore),
+                    options: Options::default(),
+                    save_settings: std::sync::Arc::new(|_| Ok(())),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+        cx.update_entity(&root, |root, cx| {
+            root.view = super::View::AddCard;
+            root.seed_fields("untouched", cx);
+            root.add.deck_picker = true;
+            root.add.deck_picker_anchor = point(px(270.), px(224.));
+            cx.notify();
+        });
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(1280.), px(800.)),
+            |_, _| root.clone(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let row = cx
+            .debug_bounds("add-deck-0")
+            .expect("first deck row bounds");
+        let bold = cx.debug_bounds("add-format-B").expect("bold button bounds");
+        assert!(
+            row.intersects(&bold),
+            "row {row:?} must overlap bold {bold:?}"
+        );
+        let click = point(
+            px(f32::midpoint(
+                f32::from(row.origin.x.max(bold.origin.x)),
+                f32::from(row.bottom_right().x.min(bold.bottom_right().x)),
+            )),
+            px(f32::midpoint(
+                f32::from(row.origin.y.max(bold.origin.y)),
+                f32::from(row.bottom_right().y.min(bold.bottom_right().y)),
+            )),
+        );
+        cx.simulate_mouse_move(click, None, gpui::Modifiers::none());
+        cx.simulate_mouse_down(
+            click,
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_up(
+            click,
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+
+        let (text, picker_open) = cx.read_entity(&root, |root, cx| {
+            (root.add.fields[0].read(cx).text(), root.add.deck_picker)
+        });
+        assert!(!picker_open, "selecting a deck must close the picker");
+        assert_eq!(text, "untouched");
+    }
+
     #[test]
     fn session_progress_never_fills_an_empty_queue() {
         assert_eq!(session_progress(0, 0), 0.0);
