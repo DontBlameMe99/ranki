@@ -306,6 +306,7 @@ pub struct Root {
     pub(crate) deck_search: Entity<TextField>,
     pub(crate) browse: BrowseState,
     pub(crate) create_field: Entity<TextField>,
+    pub(crate) create_open: bool,
     pub(crate) rename_field: Entity<TextField>,
     pub(crate) deck_edit: Option<DeckEdit>,
     pub(crate) deck_menu: Option<DeckMenu>,
@@ -468,6 +469,7 @@ impl Root {
                 loading: false,
             },
             create_field,
+            create_open: false,
             rename_field,
             deck_edit: None,
             deck_menu: None,
@@ -546,6 +548,7 @@ impl Root {
         if root.view == View::Decks
             && env::var("RANKI_UI_DEV_CREATE").is_ok_and(|value| value == "1")
         {
+            root.create_open = true;
             window.focus(root.create_field.read(cx).focus_handle());
         }
         if env::var("RANKI_UI_DEV_MENU").is_ok_and(|value| value == "1") {
@@ -1792,6 +1795,7 @@ impl Root {
                 for (index, _) in deck.name.match_indices("::") {
                     let _ = self.expanded.insert(deck.name[..index].to_owned());
                 }
+                self.create_open = false;
                 self.create_field
                     .update(cx, super::text_field::TextField::clear);
                 self.clear_toast();
@@ -1812,6 +1816,7 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.create_open = false;
         self.create_field.update(cx, TextField::clear);
         window.focus(&self.focus);
         cx.notify();
@@ -2057,6 +2062,7 @@ impl Root {
                 self.set_theme(choice, cx);
             }
             UiAction::CreateDeck => {
+                self.create_open = true;
                 self.view = View::Decks;
                 window.focus(self.create_field.read(cx).focus_handle());
                 cx.notify();
@@ -2394,7 +2400,7 @@ impl Render for Root {
         let colors = self.colors();
         let view = self.view;
         let main = match view {
-            View::Decks => self.render_decks(window, cx).into_any_element(),
+            View::Decks => self.render_decks(cx).into_any_element(),
             View::Browse => self.render_browse(window, cx).into_any_element(),
             View::Review => self.render_review(window, cx).into_any_element(),
             View::AddCard => {
@@ -3269,7 +3275,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 
 #[cfg(test)]
 mod tests {
+    use gpui::AppContext as _;
     use std::collections::VecDeque;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use ranki_model::{
@@ -3940,5 +3948,75 @@ mod tests {
             now + super::LEARN_AHEAD_SECS,
         );
         assert_eq!(picked.map(|card| card.id), Some(4));
+    }
+
+    #[gpui::test]
+    fn clicking_create_button_saves_the_deck(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("collection.anki2");
+        let store = Box::new(
+            ranki_storage::Collection::create(&path).expect("collection"),
+        );
+        let options = Options {
+            collection: path,
+            ..Options::default()
+        };
+        let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store,
+                    options,
+                    save_settings,
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+        cx.update_entity(&root, |root, cx| {
+            root.create_open = true;
+            root.create_field.update(cx, |field, cx| {
+                field.set_text("Click Deck", cx);
+            });
+            cx.notify();
+        });
+        let focus = cx.read_entity(&root, |root, cx| {
+            root.create_field.read(cx).focus_handle().clone()
+        });
+        cx.update(|window, _| window.focus(&focus));
+        cx.draw(
+            gpui::point(gpui::px(0.), gpui::px(0.)),
+            gpui::size(gpui::px(1280.), gpui::px(800.)),
+            |_, _| root.clone(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let button = cx
+            .debug_bounds("small-Create")
+            .expect("create button bounds");
+        cx.simulate_mouse_move(button.center(), None, gpui::Modifiers::none());
+        cx.simulate_mouse_down(
+            button.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_up(
+            button.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        let names = cx.read_entity(&root, |root, _| {
+            root.decks
+                .iter()
+                .map(|deck| deck.name.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(names, ["Click Deck"]);
     }
 }

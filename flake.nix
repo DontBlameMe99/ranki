@@ -66,6 +66,7 @@
             pkgs.libxkbcommon.dev
             pkgs.vulkan-loader
             pkgs.fontconfig
+            pkgs.libxcb
           ];
         };
 
