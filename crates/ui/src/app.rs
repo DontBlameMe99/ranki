@@ -4770,6 +4770,77 @@ mod tests {
         assert!(menu_open);
     }
     #[gpui::test]
+    fn right_clicking_a_deck_opens_its_actions_menu(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("collection.anki2");
+        let mut store =
+            ranki_storage::Collection::create(&path).expect("collection");
+        let cards = store
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![
+                    String::from("Question?"),
+                    String::from("Answer!"),
+                ],
+                tags: Vec::new(),
+            })
+            .expect("note");
+        assert_eq!(cards.len(), 1);
+        let options = Options {
+            collection: path,
+            ..Options::default()
+        };
+        let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(store),
+                    options,
+                    save_settings,
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(1280.), px(800.)),
+            |_, _| root.clone(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let row = cx
+            .debug_bounds("deck-row-Default")
+            .expect("deck row bounds");
+        cx.simulate_mouse_down(
+            row.center(),
+            gpui::MouseButton::Right,
+            gpui::Modifiers::none(),
+        );
+        cx.simulate_mouse_up(
+            row.center(),
+            gpui::MouseButton::Right,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let state = cx.read_entity(&root, |root, _| {
+            (root.view, root.deck_menu.map(|menu| menu.id))
+        });
+        assert_eq!(state.0, View::Decks);
+        assert_eq!(state.1, Some(1));
+        assert!(cx.debug_bounds("deck-actions-menu").is_some());
+    }
+    #[gpui::test]
     fn clicking_the_rename_field_keeps_the_decks_view(
         cx: &mut gpui::TestAppContext,
     ) {

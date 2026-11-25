@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use gpui::{
     App, ClickEvent, Context, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Rgba, SharedString, StatefulInteractiveElement, Styled, div,
-    px,
+    MouseDownEvent, ParentElement, Rgba, SharedString,
+    StatefulInteractiveElement, Styled, div, px,
 };
 
 use crate::{
@@ -467,8 +467,8 @@ impl Root {
     ) -> impl IntoElement {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
-        let index = row
-            .id
+        let deck_id = row.id;
+        let index = deck_id
             .and_then(|id| self.decks.iter().position(|deck| deck.id == id));
         let is_selected = index.is_some() && index == self.selected;
         let has_due = due_total(row.stats) > 0;
@@ -736,6 +736,18 @@ impl Root {
             .focus(move |style| {
                 style.bg(crate::theme::blend(hover_bg, colors.text, 0.08))
             })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    if let Some(id) = deck_id {
+                        this.deck_menu = Some(app::DeckMenu {
+                            id,
+                            anchor: event.position,
+                        });
+                        cx.notify();
+                    }
+                }),
+            )
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 if let Some(index) = index {
                     this.study_deck(index, cx);
