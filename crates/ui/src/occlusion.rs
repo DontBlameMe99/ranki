@@ -30,15 +30,6 @@ impl MaskShape {
             Self::Ellipse => "ellipse",
         }
     }
-
-    /// Label for the shape list.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Rect => "Rectangle",
-            Self::Ellipse => "Ellipse",
-        }
-    }
 }
 
 /// Mask geometry, relative to the image: all values are `0..=1`.
@@ -138,7 +129,7 @@ impl OcclusionMask {
     }
 }
 
-/// A staggered mask for the "Add rectangle" button.
+/// A staggered rectangle mask for occlusion fixtures.
 #[must_use]
 pub fn default_mask(count: usize) -> OcclusionMask {
     let index = count % 8;
