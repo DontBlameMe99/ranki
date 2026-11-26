@@ -40,6 +40,9 @@ actions!(
         ClearBrowseSearch,
         ToggleSync,
         SyncSignIn,
+        SyncNow,
+        SyncKeepLocal,
+        SyncKeepRemote,
     ]
 );
 
@@ -72,6 +75,9 @@ pub enum UiAction {
     ClearBrowseSearch,
     ToggleSync,
     SyncSignIn,
+    SyncNow,
+    SyncKeepLocal,
+    SyncKeepRemote,
 }
 
 impl From<&Reveal> for UiAction {
@@ -300,5 +306,32 @@ pub fn dispatch_app_action(
         UiAction::SyncSignIn => {
             window.dispatch_action(Box::new(SyncSignIn), cx);
         }
+        UiAction::SyncNow => {
+            window.dispatch_action(Box::new(SyncNow), cx);
+        }
+        UiAction::SyncKeepLocal => {
+            window.dispatch_action(Box::new(SyncKeepLocal), cx);
+        }
+        UiAction::SyncKeepRemote => {
+            window.dispatch_action(Box::new(SyncKeepRemote), cx);
+        }
+    }
+}
+
+impl From<&SyncNow> for UiAction {
+    fn from(_: &SyncNow) -> Self {
+        Self::SyncNow
+    }
+}
+
+impl From<&SyncKeepLocal> for UiAction {
+    fn from(_: &SyncKeepLocal) -> Self {
+        Self::SyncKeepLocal
+    }
+}
+
+impl From<&SyncKeepRemote> for UiAction {
+    fn from(_: &SyncKeepRemote) -> Self {
+        Self::SyncKeepRemote
     }
 }

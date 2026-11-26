@@ -54,6 +54,9 @@ Collection endpoints, all under `sync/`:
 | `upload` | raw collection bytes | bare `OK` or error text |
 | `download` | `{}` | raw collection bytes |
 
+`cv` must follow Anki's `anki,<version>,<platform>` shape. AnkiWeb returns HTTP
+400 with body `400` otherwise. Ranki reports `anki,ranki-0.1.0,linux`.
+
 Media endpoints under `msync/`: `begin`, `mediaChanges`, `uploadChanges`,
 `downloadFiles`, `mediaSanity`. Most media responses use a JSON wrapper with `data`
 and `err` fields. Source files are listed in section 9.
@@ -246,10 +249,11 @@ redacted from diagnostics.
 2. POST `meta`. Follow at most 3 redirects. Persist a new endpoint.
 3. Reject `cont = false` by surfacing `msg`. Reject `|ts - now| > 300`.
 4. If `mod` equals `last_mod` and `scm` equals `last_scm`, return `NoChanges`.
-5. Decide direction. Upload when remote `empty` and local has cards. Download
-   when local is empty and remote is not. If `last_mod` is known, upload when
-   only local changed, download when only remote changed. Otherwise return
-   `Conflict`. `scm` changes always require the same one-way decision.
+5. Decide direction. Download when the local collection is empty and the remote
+   one is not. If `last_mod` is known, download when only the remote changed.
+   Every other case, including a first sync with data on both sides, returns
+   `Conflict` for the user to resolve. `scm` changes always require the same
+   decision.
 6. For upload, checkpoint and close the collection, clear pending local sync
    state, increment `usn`, set `scm`, set `ls`, read the file, check the 300 MiB
    limit, and POST `upload`.
