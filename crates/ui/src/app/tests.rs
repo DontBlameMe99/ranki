@@ -3234,6 +3234,13 @@ fn color_picker_applies_markup_to_the_editor_field(
                 window,
                 cx,
             );
+            root.apply_color(
+                crate::add_card_view::ColorTarget::Text,
+                root.add.fields[0].clone(),
+                "cba6f7",
+                window,
+                cx,
+            );
             assert!(
                 root.add.fields[0]
                     .read(cx)
@@ -3249,7 +3256,10 @@ fn color_picker_applies_markup_to_the_editor_field(
             root.add.color_picker.is_some(),
         )
     });
-    assert_eq!(text, "Paris<span style=\"color: #f38ba8\"></span>");
+    assert_eq!(
+        text,
+        "Paris<span style=\"color: #f38ba8\"><span style=\"color: #cba6f7\"></span></span>"
+    );
     assert!(!open, "applying a color closes the picker");
 }
 
