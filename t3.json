@@ -3,7 +3,7 @@
   "scripts": [
     {
       "name": "Cleanup",
-      "command": "rm -rf .tmp target scripts/__pycache__",
+      "command": "command rm -rf .tmp target scripts/__pycache__",
       "icon": "play",
       "runOnWorktreeCreate": false,
       "runOnSettle": true
