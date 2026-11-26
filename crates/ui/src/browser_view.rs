@@ -25,9 +25,6 @@ use gpui::{
 };
 use ranki_model::{Card, CardQueue, Deck, Id, Note, NoteModel};
 
-/// Keeps the result table responsive on large collections.
-pub const BROWSE_LIMIT: usize = 200;
-
 /// One search result, with both sides rendered once for the table and preview.
 #[derive(Clone, Debug)]
 pub struct BrowserRow {
@@ -338,7 +335,7 @@ impl Root {
             }
         };
         let total = ids.len();
-        let mut rows = Vec::with_capacity(total.min(BROWSE_LIMIT));
+        let mut rows = Vec::with_capacity(total);
         for id in ids {
             let Ok(Some(card)) = self.store.card(id) else {
                 continue;
@@ -350,9 +347,6 @@ impl Root {
                 browser_row(&card, &note, &self.decks, &self.models)
             {
                 rows.push(row);
-            }
-            if rows.len() >= BROWSE_LIMIT {
-                break;
             }
         }
         sort_browser_rows(&mut rows);
