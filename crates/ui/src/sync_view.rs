@@ -435,9 +435,8 @@ impl Root {
     }
 
     fn reopen_collection(&mut self, cx: &mut Context<Self>) {
-        self.store = Box::new(ReopeningCollection::new(
-            &self.options.paths.collection,
-        ));
+        self.store =
+            Box::new(ReopeningCollection::new(&self.options.paths.collection));
         self.reload_collection(cx);
     }
 
