@@ -135,6 +135,83 @@ fn create_writes_anki_schema_and_default_json() {
 }
 
 #[test]
+fn deck_list_ignores_huge_or_malformed_models_column() {
+    let (_directory, path) = fixture();
+    {
+        let conn = Connection::open(&path).expect("open");
+        conn.execute(
+            "UPDATE col SET models = ?1 WHERE id = 1",
+            [format!("{{{}", "x".repeat(5_000_000))],
+        )
+        .expect("inflate models");
+    }
+    let store = Collection::open(&path).expect("open");
+    let decks = store.decks().expect("decks");
+    assert_eq!(decks.len(), 1);
+    assert_eq!(decks[0].name, "Default");
+}
+
+#[test]
+fn model_list_ignores_huge_or_malformed_decks_column() {
+    let (_directory, path) = fixture();
+    {
+        let conn = Connection::open(&path).expect("open");
+        conn.execute(
+            "UPDATE col SET decks = ?1 WHERE id = 1",
+            [format!("{{{}", "x".repeat(5_000_000))],
+        )
+        .expect("inflate decks");
+    }
+    let store = Collection::open(&path).expect("open");
+    let models = store.models().expect("models");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].name, "Basic");
+}
+
+#[test]
+fn unused_columns_still_use_the_same_text_conversion() {
+    let (_directory, path) = fixture();
+    {
+        let conn = Connection::open(&path).expect("open");
+        conn.execute_batch(
+            "UPDATE col SET decks = CAST('{\"1\":{\"name\":\"Blob Deck\"}}' AS BLOB), \
+             models = 123 WHERE id = 1",
+        )
+        .expect("convert columns");
+    }
+    let store = Collection::open(&path).expect("open");
+    assert_eq!(store.decks().expect("decks")[0].name, "Blob Deck");
+    assert!(store.models().is_err());
+}
+#[test]
+fn deck_and_model_lists_keep_id_order() {
+    let (_directory, path) = fixture();
+    {
+        let conn = Connection::open(&path).expect("open");
+        conn.execute_batch(
+            "UPDATE col SET decks = '{\"9\":{\"name\":\"Nine\"},\"2\":{\"name\":\"Two\"}}', \
+             models = '{\"9\":{\"name\":\"Nine\"},\"2\":{\"name\":\"Two\"}}' WHERE id = 1",
+        )
+        .expect("reorder JSON");
+    }
+    let store = Collection::open(&path).expect("open");
+    let decks: Vec<i64> = store
+        .decks()
+        .expect("decks")
+        .into_iter()
+        .map(|deck| deck.id)
+        .collect();
+    let models: Vec<i64> = store
+        .models()
+        .expect("models")
+        .into_iter()
+        .map(|model| model.id)
+        .collect();
+    assert_eq!(decks, [2, 9]);
+    assert_eq!(models, [2, 9]);
+}
+
+#[test]
 fn created_collection_declares_its_legacy_schema_version() {
     let (_directory, path) = fixture();
     let conn = read_only(&path);

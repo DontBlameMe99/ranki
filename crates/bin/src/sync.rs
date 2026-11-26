@@ -22,6 +22,8 @@ use ranki_model::Config;
 use ranki_model::Settings;
 use ranki_sync::Credentials;
 use ranki_sync::HttpTransport;
+#[cfg(test)]
+use ranki_sync::MockTransport;
 use ranki_sync::RetryPolicy;
 use ranki_sync::SyncClient;
 use ranki_sync::SyncError;
@@ -30,6 +32,10 @@ use ranki_sync::SyncResponse;
 use ranki_sync::SyncState;
 use ranki_sync::SyncTransport;
 use ranki_sync::TransportConfig;
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 
 const PRIVATE_BITS: u32 = 0o077;
 const STATE_MODE: u32 = 0o600;
@@ -47,17 +53,80 @@ pub(super) struct SyncEnv {
     pub hkey: Option<String>,
 }
 
-/// Builds an HTTP transport with the configured retry settings.
+/// Transport that builds its HTTP client on the first sync request.
+pub(super) struct LazyTransport<T> {
+    factory: Box<dyn FnMut() -> T + Send>,
+    transport: Option<T>,
+    retry_policy: RetryPolicy,
+}
+
+impl<T> LazyTransport<T> {
+    fn new(
+        factory: impl FnMut() -> T + Send + 'static,
+        retry_policy: RetryPolicy,
+    ) -> Self {
+        Self {
+            factory: Box::new(factory),
+            transport: None,
+            retry_policy,
+        }
+    }
+
+    fn transport(&mut self) -> &mut T {
+        let factory = &mut self.factory;
+        self.transport.get_or_insert_with(factory)
+    }
+}
+
+/// HTTP transport with the configured retry settings, built lazily.
 #[must_use]
-pub(super) fn http_transport(config: &Config) -> HttpTransport {
+pub(super) fn lazy_http_transport(
+    config: &Config,
+) -> LazyTransport<HttpTransport> {
+    let retry_policy = RetryPolicy {
+        retries: config.sync.retries,
+        backoff: Duration::from_millis(config.sync.backoff_ms),
+    };
     let transport = TransportConfig {
-        retry_policy: RetryPolicy {
-            retries: config.sync.retries,
-            backoff: Duration::from_millis(config.sync.backoff_ms),
-        },
+        retry_policy,
         ..TransportConfig::default()
     };
-    HttpTransport::with_config(ranki_sync::DEFAULT_ENDPOINT, transport)
+    LazyTransport::new(
+        move || {
+            HttpTransport::with_config(ranki_sync::DEFAULT_ENDPOINT, transport)
+        },
+        retry_policy,
+    )
+}
+
+impl<T: SyncTransport> SyncTransport for LazyTransport<T> {
+    fn host_key(&mut self, body: &[u8]) -> ranki_sync::Result<SyncResponse> {
+        self.transport().host_key(body)
+    }
+
+    fn meta(&mut self, body: &[u8]) -> ranki_sync::Result<SyncResponse> {
+        self.transport().meta(body)
+    }
+
+    fn upload(&mut self, body: &[u8]) -> ranki_sync::Result<SyncResponse> {
+        self.transport().upload(body)
+    }
+
+    fn download(&mut self, body: &[u8]) -> ranki_sync::Result<SyncResponse> {
+        self.transport().download(body)
+    }
+
+    fn set_endpoint(&mut self, endpoint: &str) -> ranki_sync::Result<()> {
+        self.transport().set_endpoint(endpoint)
+    }
+
+    fn set_host_key(&mut self, key: &str) {
+        self.transport().set_host_key(key);
+    }
+
+    fn retry_policy(&self) -> RetryPolicy {
+        self.retry_policy
+    }
 }
 
 /// Reads the credential environment variables without ever echoing them.
@@ -105,6 +174,40 @@ pub(super) fn load_auth(
         return None;
     }
     Some(SyncAuth { host_key, login })
+}
+
+/// Loads sync credentials only when a command can actually sync.
+///
+/// Disabled sync and ordinary commands never read the environment or the
+/// state file. Auto sync is enabled only with credentials, stored or supplied.
+pub(super) fn startup_credentials(
+    settings: &Settings,
+    manual: bool,
+) -> (Option<SyncAuth>, bool) {
+    credentials_for(settings, manual, read_env, || has_stored_key(settings))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "settings, mode and both input seams stay explicit for tests"
+)]
+fn credentials_for<F, G>(
+    settings: &Settings,
+    manual: bool,
+    env: F,
+    stored_key: G,
+) -> (Option<SyncAuth>, bool)
+where
+    F: FnOnce() -> SyncEnv,
+    G: FnOnce() -> bool,
+{
+    let auto_enabled = settings.sync.enabled && settings.sync.auto;
+    if !manual && !auto_enabled {
+        return (None, false);
+    }
+    let auth = load_auth(settings, &env());
+    let automatic = auto_enabled && !manual && (auth.is_some() || stored_key());
+    (auth, automatic)
 }
 
 /// Path of the sync state file beside a collection.
@@ -288,23 +391,70 @@ fn store_host_key(path: &Path, key: &str) -> io::Result<()> {
 }
 
 #[cfg(test)]
+#[derive(Clone)]
+struct SharedMock(Arc<Mutex<MockTransport>>);
+
+#[cfg(test)]
+impl SyncTransport for SharedMock {
+    fn host_key(&mut self, body: &[u8]) -> ranki_sync::Result<SyncResponse> {
+        self.0.lock().unwrap().host_key(body)
+    }
+
+    fn meta(&mut self, body: &[u8]) -> ranki_sync::Result<SyncResponse> {
+        self.0.lock().unwrap().meta(body)
+    }
+
+    fn upload(&mut self, body: &[u8]) -> ranki_sync::Result<SyncResponse> {
+        self.0.lock().unwrap().upload(body)
+    }
+
+    fn download(&mut self, body: &[u8]) -> ranki_sync::Result<SyncResponse> {
+        self.0.lock().unwrap().download(body)
+    }
+
+    fn set_endpoint(&mut self, endpoint: &str) -> ranki_sync::Result<()> {
+        self.0.lock().unwrap().set_endpoint(endpoint)
+    }
+
+    fn set_host_key(&mut self, key: &str) {
+        self.0.lock().unwrap().set_host_key(key);
+    }
+
+    fn retry_policy(&self) -> RetryPolicy {
+        self.0.lock().unwrap().retry_policy()
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
 
     use ranki_model::NewNote;
     use ranki_sync::MockResponse;
     use ranki_sync::MockTransport;
+    use ranki_sync::RetryPolicy;
     use ranki_sync::SyncMethod;
+    use ranki_sync::SyncTransport;
 
+    use super::LazyTransport;
+    use super::SharedMock;
     use super::SyncAuth;
     use super::SyncEnv;
     use super::SyncMode;
     use super::TransportRef;
+    use super::credentials_for;
+    use super::lazy_http_transport;
     use super::load_auth;
     use super::manual_sync;
     use super::outcome_text;
@@ -620,5 +770,168 @@ mod tests {
         assert!(!super::has_stored_key(&settings));
         seed_state(&settings);
         assert!(super::has_stored_key(&settings));
+    }
+
+    #[test]
+    fn lazy_http_transport_reports_the_configured_retry_policy() {
+        let mut config = ranki_model::Config::default();
+        config.sync.retries = 5;
+        config.sync.backoff_ms = 250;
+        let transport = lazy_http_transport(&config);
+        let policy = transport.retry_policy();
+        assert_eq!(policy.retries, 5);
+        assert_eq!(policy.backoff, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn lazy_transport_builds_once_and_forwards_every_request() {
+        let mock = MockTransport::new()
+            .with_response(SyncMethod::HostKey, MockResponse::error(200, "ok"))
+            .with_response(SyncMethod::Meta, MockResponse::error(200, "ok"))
+            .with_response(SyncMethod::Upload, MockResponse::error(200, "ok"))
+            .with_response(
+                SyncMethod::Download,
+                MockResponse::error(200, "ok"),
+            );
+        let shared = Arc::new(Mutex::new(mock));
+        let builds = Arc::new(AtomicUsize::new(0));
+        let stored = Arc::clone(&shared);
+        let counter = Arc::clone(&builds);
+        let policy = RetryPolicy {
+            retries: 4,
+            backoff: Duration::ZERO,
+        };
+        let mut transport = LazyTransport::new(
+            move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+                SharedMock(Arc::clone(&stored))
+            },
+            policy,
+        );
+        assert_eq!(transport.retry_policy(), policy);
+        assert_eq!(builds.load(Ordering::Relaxed), 0);
+        transport.set_endpoint("https://example.invalid/").unwrap();
+        transport.set_host_key("key");
+        transport.host_key(b"host-key").unwrap();
+        transport.meta(b"meta").unwrap();
+        transport.upload(b"upload").unwrap();
+        transport.download(b"download").unwrap();
+        assert_eq!(builds.load(Ordering::Relaxed), 1);
+        drop(transport);
+        let mock = shared.lock().unwrap();
+        assert_eq!(mock.request_count(), 4);
+        let methods: Vec<SyncMethod> = mock
+            .requests()
+            .iter()
+            .map(|request| request.method)
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                SyncMethod::HostKey,
+                SyncMethod::Meta,
+                SyncMethod::Upload,
+                SyncMethod::Download
+            ]
+        );
+        for request in mock.requests() {
+            assert_eq!(request.endpoint, "https://example.invalid/");
+            assert_eq!(request.host_key, "key");
+        }
+    }
+
+    #[test]
+    fn disabled_sync_does_not_read_credentials_or_state() {
+        let mut template = settings(Path::new("/tmp/ranki-disabled"));
+        template.sync.enabled = false;
+        let env_reads = Cell::new(0);
+        let state_reads = Cell::new(0);
+        let (auth, automatic) = credentials_for(
+            &template,
+            false,
+            || {
+                env_reads.set(env_reads.get() + 1);
+                SyncEnv {
+                    username: Some(String::from("alice")),
+                    password: Some(String::from("secret")),
+                    hkey: None,
+                }
+            },
+            || {
+                state_reads.set(state_reads.get() + 1);
+                true
+            },
+        );
+        assert!(auth.is_none());
+        assert!(!automatic);
+        assert_eq!(env_reads.get(), 0);
+        assert_eq!(state_reads.get(), 0);
+    }
+
+    #[test]
+    fn auto_sync_reads_state_only_without_supplied_credentials() {
+        let template = settings(Path::new("/tmp/ranki-auto"));
+        let env_reads = Cell::new(0);
+        let state_reads = Cell::new(0);
+        let (auth, automatic) = credentials_for(
+            &template,
+            false,
+            || {
+                env_reads.set(env_reads.get() + 1);
+                SyncEnv {
+                    username: None,
+                    password: None,
+                    hkey: Some(String::from("env-hkey")),
+                }
+            },
+            || {
+                state_reads.set(state_reads.get() + 1);
+                false
+            },
+        );
+        assert!(auth.is_some());
+        assert!(automatic);
+        assert_eq!(env_reads.get(), 1);
+        assert_eq!(state_reads.get(), 0);
+
+        let state_reads = Cell::new(0);
+        let (auth, automatic) = credentials_for(
+            &template,
+            false,
+            || SyncEnv {
+                username: None,
+                password: None,
+                hkey: None,
+            },
+            || {
+                state_reads.set(state_reads.get() + 1);
+                true
+            },
+        );
+        assert!(auth.is_none());
+        assert!(automatic);
+        assert_eq!(state_reads.get(), 1);
+    }
+
+    #[test]
+    fn manual_sync_never_starts_an_automatic_round_trip() {
+        let template = settings(Path::new("/tmp/ranki-manual"));
+        let state_reads = Cell::new(0);
+        let (auth, automatic) = credentials_for(
+            &template,
+            true,
+            || SyncEnv {
+                username: Some(String::from("alice")),
+                password: Some(String::from("secret")),
+                hkey: None,
+            },
+            || {
+                state_reads.set(state_reads.get() + 1);
+                true
+            },
+        );
+        assert!(auth.is_some());
+        assert!(!automatic);
+        assert_eq!(state_reads.get(), 0);
     }
 }
