@@ -242,8 +242,6 @@ impl Root {
         let style = Style::new(colors, self.theme());
         let query = self.browse.search.read(cx).text();
         let selected = self.browse.selected;
-        let total = self.browse.total;
-        let loading = self.browse.loading;
         let error = self.browse.error.clone();
         let search_focused = self
             .browse
@@ -308,25 +306,6 @@ impl Root {
                                     .min_w(px(0.))
                                     .child(self.browse.search.clone()),
                             ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_size(px(12.))
-                    .text_color(colors.subtext)
-                    .child(browse_status(
-                        loading,
-                        error.as_deref(),
-                        self.browse.rows.len(),
-                        total,
-                    ))
-                    .child(
-                        div()
-                            .child("Try deck:Default, tag:review, or is:new")
-                            .font_family(self.font_family),
                     ),
             );
 
@@ -581,24 +560,6 @@ impl Root {
     }
 }
 
-fn browse_status(
-    loading: bool,
-    error: Option<&str>,
-    shown: usize,
-    total: usize,
-) -> String {
-    if loading {
-        return String::from("Searching...");
-    }
-    if let Some(error) = error {
-        return error.to_owned();
-    }
-    if total > shown {
-        return format!("Showing {shown} of {total} cards");
-    }
-    format!("{total} cards")
-}
-
 fn browse_cell(
     text: impl Into<SharedString>,
     column: usize,
@@ -645,8 +606,7 @@ mod tests {
     };
 
     use super::{
-        browse_status, browser_row, due_label, preview_line, queue_label,
-        sort_browser_rows,
+        browser_row, due_label, preview_line, queue_label, sort_browser_rows,
     };
 
     fn card_with_id(id: Id, queue: CardQueue, interval: i32) -> Card {
@@ -742,14 +702,6 @@ mod tests {
         assert_eq!(rows[0].front, "Apple");
         assert_eq!(rows[0].back, "Answer");
         assert_eq!(rows[0].deck, "Default");
-    }
-
-    #[test]
-    fn status_reports_loading_errors_and_truncated_results() {
-        assert_eq!(browse_status(true, None, 0, 0), "Searching...");
-        assert_eq!(browse_status(false, Some("bad query"), 0, 0), "bad query");
-        assert_eq!(browse_status(false, None, 3, 10), "Showing 3 of 10 cards");
-        assert_eq!(browse_status(false, None, 3, 3), "3 cards");
     }
 
     #[test]
