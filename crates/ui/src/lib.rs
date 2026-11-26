@@ -79,6 +79,13 @@ pub fn run(
                     ..Default::default()
                 },
                 |window, cx| {
+                    // Stop the loop before GPUI removes the window. A frame
+                    // callback still queued during close would otherwise log
+                    // "window not found" after the window is gone.
+                    window.on_window_should_close(cx, |_, app| {
+                        app.quit();
+                        true
+                    });
                     let root = cx.new(|cx| {
                         let root = app::Root::new(
                             app::Launch {
