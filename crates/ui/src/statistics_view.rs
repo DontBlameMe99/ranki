@@ -2,6 +2,7 @@
 
 use std::{collections::HashMap, time::Duration};
 
+use chrono::{Datelike, NaiveDate};
 use gpui::{
     Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
     Rgba, StatefulInteractiveElement, Styled, div, px,
@@ -126,6 +127,19 @@ pub fn weekday(day: i64, collection_start_secs: i64) -> &'static str {
         .get(weekday_index(day, collection_start_secs))
         .copied()
         .unwrap_or("Sun")
+}
+
+/// ISO calendar week for an Anki day.
+#[must_use]
+pub fn calendar_week(day: i64, collection_start_secs: i64) -> u32 {
+    let epoch_day = collection_start_secs
+        .div_euclid(SECONDS_PER_DAY)
+        .saturating_add(day);
+    NaiveDate::from_ymd_opt(1970, 1, 1)
+        .and_then(|epoch| {
+            epoch.checked_add_signed(chrono::Duration::days(epoch_day))
+        })
+        .map_or(1, |date| date.iso_week().week())
 }
 
 /// Calendar label for a heatmap day.
@@ -317,8 +331,12 @@ impl Root {
                 .child("More"),
         );
 
-        let mut labels =
-            div().flex().flex_col().gap(px(HEATMAP_GAP)).w(px(32.));
+        let mut labels = div()
+            .flex()
+            .flex_col()
+            .gap(px(HEATMAP_GAP))
+            .w(px(32.))
+            .child(div().h(px(14.)));
         for label in WEEKDAYS {
             labels = labels.child(
                 div()
@@ -334,6 +352,25 @@ impl Root {
         let mut columns = div().flex().gap(px(HEATMAP_GAP));
         for week in 0..HEATMAP_COLUMNS {
             let mut column = div().flex().flex_col().gap(px(HEATMAP_GAP));
+            let week_start =
+                start.saturating_add(i64::try_from(week * 7).unwrap_or(0));
+            column = column.child(
+                div()
+                    .w(px(HEATMAP_CELL))
+                    .h(px(14.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .text_color(colors.subtext)
+                    .child(format!(
+                        "W{:02}",
+                        calendar_week(
+                            week_start.saturating_add(1),
+                            collection_start
+                        )
+                    )),
+            );
             for row in 0..7 {
                 let index = week * 7 + row;
                 let day =
@@ -703,8 +740,8 @@ mod tests {
 
     use super::{
         ForecastDay, HEATMAP_COLUMNS, HEATMAP_DAYS, build_statistics,
-        day_label, day_number, forecast_days, heatmap_start, weekday,
-        weekday_index,
+        calendar_week, day_label, day_number, forecast_days, heatmap_start,
+        weekday, weekday_index,
     };
 
     const START: i64 = 1_700_000_000;
@@ -728,6 +765,13 @@ mod tests {
         assert_eq!(day_number(START + 86_401, START), 1);
         assert_eq!(day_number(START - 86_399, START), -1);
         assert_eq!(weekday(0, START), "Tue");
+    }
+
+    #[test]
+    fn heatmap_week_labels_follow_iso_weeks() {
+        assert_eq!(calendar_week(0, START), 46);
+        assert_eq!(calendar_week(6, START), 47);
+        assert_eq!(calendar_week(-162, START), 23);
     }
 
     #[test]
