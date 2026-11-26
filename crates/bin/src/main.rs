@@ -24,6 +24,7 @@ use ranki_model::StockModelKind;
 use ranki_model::Store;
 use ranki_model::parse_image_occlusion_field;
 use ranki_storage::Collection;
+use ranki_storage::ReopeningCollection;
 use ranki_sync::SyncOutcome;
 use ranki_sync::SyncTransport;
 use ranki_ui::occlusion::{
@@ -585,6 +586,8 @@ fn open_gui(
     config: &config::Config,
 ) -> CliResult<Option<config::Settings>> {
     let collection = open_or_create(&settings.collection)?;
+    drop(collection);
+    let store = ReopeningCollection::new(&settings.collection);
     let options = settings.clone();
     let saved = Arc::new(Mutex::new(config.clone()));
     let latest = Arc::new(Mutex::new(None::<config::Settings>));
@@ -606,7 +609,7 @@ fn open_gui(
             .clone_from(&current.sync.username);
         config::save(&config_guard).map_err(|error| error.to_string())
     });
-    ranki_ui::run(Box::new(collection), options, save_settings);
+    ranki_ui::run(Box::new(store), options, save_settings);
     let latest_guard = latest.lock().map_err(|_| {
         CliError::Message(String::from("settings lock poisoned"))
     })?;

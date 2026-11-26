@@ -10,7 +10,7 @@ use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     Styled, div, px,
 };
-use ranki_storage::Collection;
+use ranki_storage::ReopeningCollection;
 
 use ranki_sync::{
     Credentials, HttpTransport, RetryPolicy, SyncClient, SyncOutcome,
@@ -415,17 +415,9 @@ impl Root {
     }
 
     fn reopen_collection(&mut self, cx: &mut Context<Self>) {
-        match Collection::open(&self.options.collection) {
-            Ok(collection) => {
-                self.store = Box::new(collection);
-                self.reload_collection(cx);
-            }
-            Err(error) => self.show_toast(
-                ToastKind::Error,
-                format!("Downloaded the collection, but could not reopen it: {error}"),
-                cx,
-            ),
-        }
+        self.store =
+            Box::new(ReopeningCollection::new(&self.options.collection));
+        self.reload_collection(cx);
     }
 
     pub(crate) fn render_sync(&self) -> impl IntoElement {

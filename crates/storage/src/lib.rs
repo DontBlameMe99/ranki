@@ -19,6 +19,7 @@
 
 mod anki;
 mod records;
+mod reopening;
 mod schema;
 mod search;
 
@@ -37,6 +38,7 @@ pub use ranki_model::stock_models;
 pub use anki::decode_deck_name;
 pub use anki::encode_deck_name;
 pub use anki::normal_deck_kind;
+pub use reopening::ReopeningCollection;
 
 pub use records::models_from_tables_with_prefix;
 pub use records::models_to_json;
@@ -237,9 +239,7 @@ params![stamp.modified, stamp.scm, json],
         }
         let busy: i64 = self
             .conn
-            .pragma_query_value(None, "wal_checkpoint(TRUNCATE)", |row| {
-                row.get(0)
-            })
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
             .map_err(backend)?;
         if busy != 0 {
             return Err(invalid("checkpoint blocked by another writer"));
