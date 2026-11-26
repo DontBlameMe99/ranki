@@ -1126,6 +1126,48 @@ fn study_bindings_stay_out_of_text_input() {
     assert_eq!(outside.len(), 1);
 }
 
+#[gpui::test]
+fn typing_in_settings_input_does_not_change_view(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|app| app.bind_keys(super::key_bindings()));
+    let mut options = Options::default();
+    options.sync.enabled = true;
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options,
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update_entity(&root, |root, cx| {
+        root.view = super::View::Settings;
+        cx.notify();
+    });
+    let focus = cx.read_entity(&root, |root, cx| {
+        root.sync.username.read(cx).focus_handle().clone()
+    });
+    cx.update(|window, _| window.focus(&focus));
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    cx.simulate_keystrokes("a");
+
+    let (view, text) = cx.read_entity(&root, |root, cx| {
+        (root.view, root.sync.username.read(cx).text())
+    });
+    assert_eq!(view, super::View::Settings);
+    assert_eq!(text, "a");
+}
+
 #[test]
 fn theme_has_no_number_shortcuts() {
     let mut keymap = gpui::Keymap::default();
