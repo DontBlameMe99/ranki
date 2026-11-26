@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -750,7 +750,7 @@ fn deck_name(value: &Value) -> Option<String> {
 }
 
 struct DeckRemapper<'a> {
-    used: BTreeSet<i64>,
+    used: HashSet<i64>,
     state: &'a mut MergeState,
     dconf_map: BTreeMap<i64, i64>,
     mapping: BTreeMap<i64, i64>,
@@ -930,8 +930,8 @@ fn remap_number(
     }
 }
 
-fn collect_ids(map: &Map<String, Value>) -> BTreeSet<i64> {
-    let mut ids = BTreeSet::new();
+fn collect_ids(map: &Map<String, Value>) -> HashSet<i64> {
+    let mut ids = HashSet::new();
     for (key, value) in map {
         if let Ok(id) = key.parse::<i64>() {
             let _ = ids.insert(id);
@@ -961,7 +961,7 @@ fn set_id(value: &mut Value, id: i64, label: &str) -> Result<(), FormatError> {
 }
 
 fn allocate(
-    used: &mut BTreeSet<i64>,
+    used: &mut HashSet<i64>,
     state: &mut MergeState,
 ) -> Result<i64, FormatError> {
     loop {
@@ -973,7 +973,7 @@ fn allocate(
 }
 
 fn claim_id(
-    used: &mut BTreeSet<i64>,
+    used: &mut HashSet<i64>,
     state: &mut MergeState,
     preferred: i64,
 ) -> Result<i64, FormatError> {
@@ -1036,7 +1036,7 @@ fn rewrite_incoming_notes(
 fn all_ids(
     connection: &Connection,
     table: &str,
-) -> Result<BTreeSet<i64>, FormatError> {
+) -> Result<HashSet<i64>, FormatError> {
     let sql = format!("SELECT id FROM {table}");
     let mut statement = connection
         .prepare(&sql)
@@ -1051,7 +1051,7 @@ fn all_ids(
 
 fn existing_guids(
     connection: &Connection,
-) -> Result<BTreeSet<String>, FormatError> {
+) -> Result<HashSet<String>, FormatError> {
     let mut statement = connection
         .prepare("SELECT guid FROM main.notes")
         .map_err(db_error("cannot read existing note guids"))?;
