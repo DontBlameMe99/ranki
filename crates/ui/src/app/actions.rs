@@ -38,8 +38,8 @@ actions!(
         NextDeck,
         ClearSearch,
         ClearBrowseSearch,
-        ToggleSync,
         SyncSignIn,
+        SyncSignOut,
         SyncNow,
         SyncKeepLocal,
         SyncKeepRemote,
@@ -73,8 +73,8 @@ pub enum UiAction {
     NextDeck,
     ClearSearch,
     ClearBrowseSearch,
-    ToggleSync,
     SyncSignIn,
+    SyncSignOut,
     SyncNow,
     SyncKeepLocal,
     SyncKeepRemote,
@@ -300,11 +300,11 @@ pub fn dispatch_app_action(
         UiAction::ClearBrowseSearch => {
             window.dispatch_action(Box::new(ClearBrowseSearch), cx);
         }
-        UiAction::ToggleSync => {
-            window.dispatch_action(Box::new(ToggleSync), cx);
-        }
         UiAction::SyncSignIn => {
             window.dispatch_action(Box::new(SyncSignIn), cx);
+        }
+        UiAction::SyncSignOut => {
+            window.dispatch_action(Box::new(SyncSignOut), cx);
         }
         UiAction::SyncNow => {
             window.dispatch_action(Box::new(SyncNow), cx);

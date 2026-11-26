@@ -26,6 +26,21 @@ use crate::{
 pub fn read_state(collection: &Path) -> Option<SyncState> {
     SyncState::load(&state_path(collection)).ok()
 }
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "busy and signed in describe separate states"
+)]
+fn sync_status(busy: bool, signed_in: bool) -> Option<&'static str> {
+    if busy {
+        Some("Syncing with AnkiWeb")
+    } else if signed_in {
+        Some("Signed in")
+    } else {
+        None
+    }
+}
+
 /// Exchanges the password for a host key, then runs one sync immediately.
 fn login_and_sync<T: SyncTransport>(
     client: &mut SyncClient<T>,
@@ -129,16 +144,38 @@ fn build_client(
 }
 
 impl Root {
-    pub(crate) fn set_sync_enabled(
-        &mut self,
-        enabled: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.options.sync.enabled = enabled;
+    pub(crate) fn sign_out(&mut self, cx: &mut Context<Self>) {
+        if self.sync.busy {
+            return;
+        }
+        if let Err(error) = ranki_sync::clear_host_key(&self.options.collection)
+        {
+            self.show_toast(
+                ToastKind::Error,
+                format!("Could not sign out: {error}"),
+                cx,
+            );
+            return;
+        }
+        self.sync.signed_in = false;
+        self.options.sync.enabled = false;
+        self.options.sync.username = None;
+        self.sync
+            .username
+            .update(cx, crate::text_field::TextField::clear);
+        self.sync
+            .password
+            .update(cx, crate::text_field::TextField::clear);
         if let Err(error) = (self.save_settings)(&self.options) {
             self.show_toast(
-                crate::app::ToastKind::Error,
-                format!("Could not save sync setting: {error}"),
+                ToastKind::Error,
+                format!("Signed out, but could not save settings: {error}"),
+                cx,
+            );
+        } else {
+            self.show_toast(
+                ToastKind::Success,
+                String::from("Signed out of AnkiWeb"),
                 cx,
             );
         }
@@ -334,27 +371,16 @@ impl Root {
         let colors = self.colors();
         let enabled = self.options.sync.enabled;
         let signed_in = self.sync.signed_in;
-        let status = if self.sync.busy {
-            Some(String::from("Syncing with AnkiWeb"))
-        } else if signed_in {
-            Some(format!(
-                "Signed in{}",
-                self.options
-                    .sync
-                    .username
-                    .as_deref()
-                    .map_or_else(String::new, |name| format!(" as {name}"))
-            ))
-        } else {
-            None
-        };
-        let note = if enabled {
+        let status = sync_status(self.sync.busy, signed_in);
+        let note = if !signed_in {
+            "Optional. Sign in only if you want to sync with AnkiWeb."
+        } else if enabled {
             "AnkiWeb sync is on. Passwords are used once and never stored."
         } else {
-            "Optional. Sign in only if you want to sync with AnkiWeb."
+            "Sync is off. Sign out and sign in again to resume."
         };
-        let toggle = self.action_click(crate::app::UiAction::ToggleSync);
         let sign_in = self.action_click(crate::app::UiAction::SyncSignIn);
+        let sign_out = self.action_click(crate::app::UiAction::SyncSignOut);
         let sync_now = self.action_click(crate::app::UiAction::SyncNow);
         let keep_local = self.action_click(crate::app::UiAction::SyncKeepLocal);
         let keep_remote =
@@ -374,7 +400,7 @@ impl Root {
                 sync_now,
             ));
         }
-        if enabled && !signed_in {
+        if !signed_in {
             fields = fields
                 .child(labeled_input(
                     "Username",
@@ -442,17 +468,15 @@ impl Root {
                                     .child(note),
                             ),
                     )
-                    .child(action_button(
-                        "sync-toggle",
-                        if enabled { "Turn off" } else { "Turn on" },
-                        if enabled {
-                            ButtonTone::Neutral
-                        } else {
-                            ButtonTone::Primary
-                        },
-                        self.style(),
-                        toggle,
-                    )),
+                    .when(signed_in, |this| {
+                        this.child(action_button(
+                            "sync-sign-out",
+                            "Sign out",
+                            ButtonTone::Neutral,
+                            self.style(),
+                            sign_out,
+                        ))
+                    }),
             )
             .when_some(status, |this, status| {
                 this.child(
@@ -550,13 +574,13 @@ fn labeled_input(
 mod tests {
     use ranki_sync::{
         MockResponse, MockTransport, SyncClient, SyncMethod, SyncOutcome,
-        SyncState, state_path,
+        SyncState, clear_host_key, state_path,
     };
     use serde_json::json;
 
     use super::{
         login_and_sync, read_state, refresh_message, retained_conflict,
-        sync_message,
+        sync_message, sync_status,
     };
     #[test]
     fn footer_reads_the_last_sync_from_the_state_file() {
@@ -684,5 +708,37 @@ mod tests {
             retained_conflict(&failed, fallback).as_deref(),
             Some("both collections changed")
         );
+    }
+
+    #[test]
+    fn signed_in_status_shows_no_account() {
+        assert_eq!(sync_status(false, true), Some("Signed in"));
+        assert_eq!(sync_status(true, true), Some("Syncing with AnkiWeb"));
+        assert_eq!(sync_status(false, false), None);
+    }
+
+    #[test]
+    fn sign_out_clears_the_cached_host_key() {
+        let Ok(directory) = tempfile::tempdir() else {
+            return;
+        };
+        let collection = directory.path().join("collection.anki2");
+        let path = state_path(&collection);
+        let state = SyncState {
+            host_key: String::from("stored-key"),
+            last_mod: Some(7),
+            last_scm: Some(8),
+            ..SyncState::default()
+        };
+        let Ok(text) = serde_json::to_string(&state) else {
+            return;
+        };
+        assert!(std::fs::write(&path, text).is_ok());
+        assert!(clear_host_key(&collection).is_ok());
+        let saved = read_state(&collection).unwrap_or_default();
+        assert_eq!(saved.host_key, "");
+        assert_eq!(saved.last_mod, Some(7));
+        assert_eq!(saved.last_scm, Some(8));
+        assert!(clear_host_key(&collection).is_ok());
     }
 }
