@@ -39,6 +39,8 @@ pub struct BrowserRow {
     pub preview: SharedString,
     pub due: SharedString,
     pub key: SharedString,
+    /// Prepared element key for the row's actions menu.
+    pub menu_key: SharedString,
 }
 
 /// Search state. The generation drops results from an older query.
@@ -86,6 +88,7 @@ pub fn browser_row(
         preview: SharedString::from(preview_line(&front)),
         due: SharedString::from(due_label(card)),
         key: SharedString::from(format!("browse-row-{}", card.id)),
+        menu_key: SharedString::from(format!("browse-menu-{}", card.id)),
         front,
         front_media: front_rendered.media,
         back,
@@ -367,6 +370,7 @@ impl Root {
         for row in &self.browse.rows {
             let id = row.card.id;
             let key = row.key.clone();
+            let menu_key = row.menu_key.clone();
             let active = selected == Some(id);
             let state = queue_label(row.card.queue);
             let color = crate::theme::queue_color(
@@ -456,8 +460,8 @@ impl Root {
                     )
                     .apply(
                         div()
-                            .id(SharedString::from(format!("browse-menu-{id}")))
-                            .debug_selector(|| format!("browse-menu-{id}"))
+                            .id(menu_key.clone())
+                            .debug_selector(|| menu_key.to_string())
                             .flex()
                             .items_center()
                             .justify_center()
@@ -808,6 +812,54 @@ mod tests {
         assert_eq!(rows[0].preview, "Apple");
         assert_eq!(rows[0].due, "Today");
         assert_eq!(rows[0].key.as_str(), "browse-row-1");
+        assert_eq!(rows[0].menu_key.as_str(), "browse-menu-1");
+    }
+
+    #[test]
+    fn browser_rows_prepare_unique_element_keys() {
+        let deck = Deck {
+            id: DEFAULT_DECK_ID,
+            name: "Default".to_owned(),
+            description: String::new(),
+        };
+        let model = model();
+        let mut rows = Vec::new();
+        for id in [7, 3, 11] {
+            let note = Note {
+                id,
+                guid: String::new(),
+                model_id: DEFAULT_MODEL_ID,
+                modified: 0,
+                usn: 0,
+                tags: Vec::new(),
+                fields: vec![format!("Question {id}"), "Answer".to_owned()],
+                sort_field: String::new(),
+                checksum: 0,
+                flags: 0,
+                data: String::new(),
+            };
+            rows.push(
+                browser_row(
+                    &card_with_id(id, CardQueue::New, 0),
+                    &note,
+                    std::slice::from_ref(&deck),
+                    std::slice::from_ref(&model),
+                )
+                .expect("browser row"),
+            );
+        }
+        sort_browser_rows(&mut rows);
+        let row_keys =
+            rows.iter().map(|row| row.key.as_str()).collect::<Vec<_>>();
+        let menu_keys = rows
+            .iter()
+            .map(|row| row.menu_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(row_keys, ["browse-row-11", "browse-row-3", "browse-row-7"]);
+        assert_eq!(
+            menu_keys,
+            ["browse-menu-11", "browse-menu-3", "browse-menu-7"]
+        );
     }
 
     #[test]

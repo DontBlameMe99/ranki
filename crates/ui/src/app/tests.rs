@@ -20,7 +20,7 @@ use super::{
     next_due_deck, next_view, prepare_deck_rows, queue_counts, refreshed_card,
     session_progress, sum_leaf_counts, validate_draft, validate_occlusion,
 };
-use gpui::{point, px, size};
+use gpui::{SharedString, point, px, size};
 
 struct ModalStore;
 
@@ -1440,6 +1440,10 @@ fn row(id: i64, path: &str, depth: usize) -> DeckRow {
         meta: String::new(),
         child_count: 0,
         deck_index: None,
+        key: SharedString::default(),
+        chevron_key: SharedString::default(),
+        study_key: SharedString::default(),
+        menu_key: SharedString::default(),
     }
 }
 
@@ -1561,6 +1565,10 @@ fn deck_meta_counts_children_and_cards() {
         meta: String::new(),
         child_count: 0,
         deck_index: None,
+        key: SharedString::default(),
+        chevron_key: SharedString::default(),
+        study_key: SharedString::default(),
+        menu_key: SharedString::default(),
     };
     let child = DeckRow {
         id: Some(2),
@@ -1574,6 +1582,10 @@ fn deck_meta_counts_children_and_cards() {
         meta: String::new(),
         child_count: 0,
         deck_index: None,
+        key: SharedString::default(),
+        chevron_key: SharedString::default(),
+        study_key: SharedString::default(),
+        menu_key: SharedString::default(),
     };
     assert_eq!(
         deck_meta(&[row.clone(), child], &row),
@@ -1614,6 +1626,113 @@ fn deck_rows_cache_display_metadata() {
     assert_eq!(filtered[0].child_count, rows[0].child_count);
     assert_eq!(filtered[0].deck_index, rows[0].deck_index);
     assert_eq!(filtered[1].meta, rows[1].meta);
+}
+
+#[test]
+fn deck_element_keys_stay_stable_through_tree_changes() {
+    let prepare = |decks: &[Deck],
+                   stats: &[ranki_model::DeckStats],
+                   expanded: &[&str]| {
+        let expanded = expanded
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<std::collections::HashSet<_>>();
+        let mut rows = build_deck_rows(decks, stats, &expanded);
+        prepare_deck_rows(decks, &mut rows);
+        rows
+    };
+    let check_unique = |rows: &[DeckRow]| {
+        let mut paths = std::collections::HashSet::new();
+        let mut chevrons = std::collections::HashSet::new();
+        let mut studies = std::collections::HashSet::new();
+        let mut menus = std::collections::HashSet::new();
+        for row in rows {
+            assert!(paths.insert(row.key.as_str()), "duplicate row key");
+            assert!(
+                chevrons.insert(row.chevron_key.as_str()),
+                "duplicate chevron key"
+            );
+            assert!(
+                studies.insert(row.study_key.as_str()),
+                "duplicate study key"
+            );
+            if row.deck_index.is_some() {
+                assert!(
+                    menus.insert(row.menu_key.as_str()),
+                    "duplicate menu key"
+                );
+            }
+        }
+    };
+    let key = |rows: &[DeckRow], path: &str| {
+        rows.iter()
+            .find(|row| row.path == path)
+            .expect("deck row")
+            .key
+            .to_string()
+    };
+
+    let entries = [
+        deck(1, "Topic", 0, 0, 2),
+        deck(2, "Topic::Child", 0, 0, 3),
+        deck(3, "Zed", 0, 0, 1),
+    ];
+    let decks = entries
+        .iter()
+        .map(|(deck, _)| deck.clone())
+        .collect::<Vec<_>>();
+    let stats = entries.iter().map(|(_, stats)| *stats).collect::<Vec<_>>();
+    let collapsed = prepare(&decks, &stats, &[]);
+    let expanded = prepare(&decks, &stats, &["Topic"]);
+    check_unique(&collapsed);
+    check_unique(&expanded);
+    assert_eq!(key(&collapsed, "Topic"), key(&expanded, "Topic"));
+    assert_eq!(key(&collapsed, "Zed"), key(&expanded, "Zed"));
+
+    let visible = compute_visible_deck_rows(&decks, &stats, &expanded, "Child");
+    check_unique(&visible);
+    let paths = visible
+        .iter()
+        .map(|row| row.path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(paths, ["Topic", "Topic::Child"]);
+    assert_eq!(key(&visible, "Topic"), key(&expanded, "Topic"));
+    assert_eq!(
+        key(&visible, "Topic::Child"),
+        key(&expanded, "Topic::Child")
+    );
+
+    let renamed_entries = [
+        deck(1, "Topic", 0, 0, 2),
+        deck(2, "Topic::Renamed", 0, 0, 3),
+        deck(3, "Zed", 0, 0, 1),
+    ];
+    let renamed_decks = renamed_entries
+        .iter()
+        .map(|(deck, _)| deck.clone())
+        .collect::<Vec<_>>();
+    let renamed_stats = renamed_entries
+        .iter()
+        .map(|(_, stats)| *stats)
+        .collect::<Vec<_>>();
+    let renamed = prepare(&renamed_decks, &renamed_stats, &["Topic"]);
+    check_unique(&renamed);
+    assert_eq!(key(&renamed, "Zed"), key(&expanded, "Zed"));
+    assert_eq!(key(&renamed, "Topic"), key(&expanded, "Topic"));
+    assert_ne!(
+        key(&renamed, "Topic::Renamed"),
+        key(&expanded, "Topic::Child")
+    );
+    assert_eq!(key(&renamed, "Topic::Renamed"), "deck-row-Topic::Renamed");
+    assert_eq!(
+        renamed
+            .iter()
+            .find(|row| row.path == "Topic::Renamed")
+            .expect("renamed row")
+            .menu_key
+            .as_str(),
+        "decks-menu-2"
+    );
 }
 
 #[test]
