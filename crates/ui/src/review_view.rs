@@ -13,6 +13,7 @@ use crate::{
         ClickHandler, Interaction, chip, fade_in, icon, keycap, progress_bar,
     },
     theme::{
+        BUTTON_HEIGHT, BUTTON_PADDING_X, BUTTON_RADIUS, BUTTON_TEXT_SIZE,
         CONTROL_HEIGHT, FOOTER_HEIGHT, MOTION_PROGRESS_MS, MOTION_QUICK_MS,
         PROGRESS_WIDTH, RATING_GAP, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER,
         SPACE_INLINE, SPACE_RELATED, SPACE_SECTION, STAGE_HEIGHT,
@@ -914,12 +915,12 @@ fn footer_button(
             .flex()
             .items_center()
             .justify_center()
-            .h(px(44.))
-            .px(px(SPACE_SECTION))
-            .rounded(px(14.))
+            .h(px(BUTTON_HEIGHT))
+            .px(px(BUTTON_PADDING_X))
+            .rounded(px(BUTTON_RADIUS))
             .bg(bg)
             .text_color(ink)
-            .text_size(px(15.))
+            .text_size(px(BUTTON_TEXT_SIZE))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .cursor_pointer(),
     )
