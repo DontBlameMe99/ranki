@@ -109,6 +109,13 @@ fn seeded_state(host_key: &str) -> SyncState {
 fn meta_response(
     (mod_time, scm, empty, ts): MetaValues,
 ) -> crate::Result<MockResponse> {
+    meta_response_with_media((mod_time, scm, empty, ts), 0)
+}
+
+fn meta_response_with_media(
+    (mod_time, scm, empty, ts): MetaValues,
+    media_usn: i32,
+) -> crate::Result<MockResponse> {
     MockResponse::ok_json(&json!({
         "mod": mod_time,
         "scm": scm,
@@ -116,7 +123,7 @@ fn meta_response(
         "ts": ts,
         "empty": empty,
         "cont": true,
-        "media_usn": 3,
+        "media_usn": media_usn,
     }))
 }
 
@@ -598,6 +605,77 @@ fn full_download_restores_remote_media() -> TestResult {
     let begin_body = decode_request(begin)?;
     let begin_json: serde_json::Value = serde_json::from_slice(&begin_body)?;
     assert_eq!(begin_json.get("v"), Some(&json!(META_CLIENT_VERSION)));
+    Ok(())
+}
+
+#[test]
+fn unchanged_collection_still_syncs_new_media() -> TestResult {
+    let directory = TempDir::new()?;
+    let collection = directory.path().join("collection.anki2");
+    let media = directory.path().join("media");
+    let state_path = directory.path().join("sync.json");
+    make_collection(&collection, (100, 100, 1))?;
+    write_state(
+        &state_path,
+        &SyncState {
+            host_key: fixture_key(&directory),
+            last_mod: Some(100),
+            last_scm: Some(100),
+            ..SyncState::default()
+        },
+    )?;
+    let transport = MockTransport::new()
+        .with_response(
+            SyncMethod::Meta,
+            meta_response_with_media((100, 100, false, now_secs()?), 1)?,
+        )
+        .with_response(SyncMethod::MediaBegin, media_begin(1)?)
+        .with_response(
+            SyncMethod::MediaChanges,
+            MockResponse::ok_json(&json!({
+                "data": [[
+                    "Afghanistan.png",
+                    1,
+                    "b297e6188e634a5e3ec2d366d8ec7cf3564af58a"
+                ]],
+                "err": ""
+            }))?,
+        )
+        .with_response(
+            SyncMethod::MediaDownload,
+            MockResponse::ok_bytes(media_zip(
+                "Afghanistan.png",
+                b"flag bytes",
+            )?)?,
+        )
+        .with_response(
+            SyncMethod::Meta,
+            meta_response_with_media((100, 100, false, now_secs()?), 1)?,
+        );
+    let mut client =
+        SyncClient::new(transport, &collection, &media, &state_path)?;
+
+    assert_eq!(client.sync(None)?, SyncOutcome::NoChanges);
+    assert_eq!(fs::read(media.join("Afghanistan.png"))?, b"flag bytes");
+    assert_eq!(client.state().last_media_usn, 1);
+
+    assert_eq!(client.sync(None)?, SyncOutcome::NoChanges);
+    let methods: Vec<SyncMethod> = client
+        .transport()
+        .requests()
+        .iter()
+        .map(|request| request.method)
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            SyncMethod::Meta,
+            SyncMethod::MediaBegin,
+            SyncMethod::MediaChanges,
+            SyncMethod::MediaDownload,
+            SyncMethod::Meta,
+        ]
+    );
     Ok(())
 }
 
