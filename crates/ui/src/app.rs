@@ -1335,7 +1335,8 @@ impl Root {
                     build_statistics(&history, now, self.collection_start);
             }
             Err(error) => {
-                self.statistics = Statistics::default();
+                self.statistics =
+                    build_statistics(&[], now, self.collection_start);
                 self.show_toast(
                     ToastKind::Error,
                     format!("Could not load review history: {error}"),
@@ -2704,6 +2705,7 @@ impl Root {
             }
             UiAction::OpenStatistics => {
                 self.view = next_view(self.view, View::Statistics);
+                self.refresh_stats();
                 self.refresh_statistics(cx);
                 cx.notify();
             }

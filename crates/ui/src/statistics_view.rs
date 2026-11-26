@@ -1,4 +1,4 @@
-//! Statistics screen: today's reviews, the last seven days, and card counts.
+//! Statistics screen: today's reviews, a seven-day forecast, and card counts.
 
 use std::{collections::HashMap, time::Duration};
 
@@ -71,6 +71,41 @@ pub fn weekday(day: i64, collection_start_secs: i64) -> &'static str {
         .saturating_add(day);
     let index = absolute.saturating_add(4).rem_euclid(7);
     WEEKDAYS[usize::try_from(index).unwrap_or(0)]
+}
+
+/// One bar in the forecast chart: past reviews or upcoming dues.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ForecastDay {
+    pub day: i64,
+    pub reviews: usize,
+    pub due: Option<usize>,
+}
+
+/// Joins seven days of reviews with seven days of scheduled dues. Both halves
+/// include today, so the last history bar and the first forecast bar share a
+/// day but show different counts.
+#[must_use]
+pub fn forecast_days(
+    stats: &Statistics,
+    due: &[usize],
+) -> [ForecastDay; DAYS * 2] {
+    let mut days = [ForecastDay::default(); DAYS * 2];
+    for (index, history) in stats.days.iter().enumerate() {
+        days[index] = ForecastDay {
+            day: history.day,
+            reviews: history.reviews,
+            due: None,
+        };
+    }
+    let today = stats.days.last().map_or(0, |day| day.day);
+    for index in 0..DAYS {
+        days[DAYS + index] = ForecastDay {
+            day: today.saturating_add(i64::try_from(index).unwrap_or(0)),
+            reviews: 0,
+            due: due.get(index).copied(),
+        };
+    }
+    days
 }
 
 /// Aggregates a full review log. Manual log entries are scheduling changes,
@@ -294,24 +329,31 @@ impl Root {
     ) -> impl IntoElement {
         let colors = style.colors;
         let collection_start = self.collection_start;
-        let peak = stats
-            .days
+        let days = forecast_days(stats, &self.forecast);
+        let peak = days
             .iter()
-            .map(|day| day.reviews)
+            .map(|day| day.due.unwrap_or(day.reviews))
             .max()
             .unwrap_or_default();
         let mut bars = div().flex().flex_1().items_end().gap(px(SPACE_BLOCK));
-        for (index, day) in stats.days.iter().enumerate() {
-            let height = if peak == 0 || day.reviews == 0 {
+        for (index, day) in days.iter().enumerate() {
+            let future = index >= DAYS;
+            let count = if future { day.due } else { Some(day.reviews) };
+            let value = count.unwrap_or_default();
+            let height = if peak == 0 || value == 0 {
                 6.0
             } else {
-                20.0 + 100.0 * day.reviews as f32 / peak as f32
+                20.0 + 100.0 * value as f32 / peak as f32
             };
-            let hue = if index == DAYS - 1 {
-                colors.mauve
-            } else {
+            let hue = if value == 0 {
                 colors.surface1
+            } else if future {
+                colors.green
+            } else {
+                colors.mauve
             };
+            let label = count
+                .map_or_else(|| String::from("-"), |value| value.to_string());
             bars = bars.child(
                 div()
                     .flex()
@@ -324,8 +366,12 @@ impl Root {
                         div()
                             .text_size(px(12.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(colors.text)
-                            .child(format!("{}", day.reviews)),
+                            .text_color(if count.is_none() {
+                                colors.overlay
+                            } else {
+                                colors.text
+                            })
+                            .child(label),
                     )
                     .child(
                         div().w(px(48.)).h(px(height)).rounded(px(8.)).bg(hue),
@@ -335,6 +381,8 @@ impl Root {
                             .text_size(px(12.))
                             .text_color(if index == DAYS - 1 {
                                 colors.mauve
+                            } else if index == DAYS {
+                                colors.green
                             } else {
                                 colors.subtext
                             })
@@ -352,7 +400,7 @@ impl Root {
                         div()
                             .text_size(px(16.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Last 7 days"),
+                            .child("Forecast"),
                     )
                     .child(
                         div()
@@ -365,6 +413,31 @@ impl Root {
                                     stats.total_millis,
                                 ))
                             )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(SPACE_SECTION))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(SPACE_GROUP))
+                            .text_size(px(12.))
+                            .text_color(colors.subtext)
+                            .child(crate::components::dot(colors.mauve, 8.))
+                            .child("Reviews, last 7 days"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(SPACE_GROUP))
+                            .text_size(px(12.))
+                            .text_color(colors.subtext)
+                            .child(crate::components::dot(colors.green, 8.))
+                            .child("Due, next 7 days"),
                     ),
             )
             .child(bars.h(px(150.)))
@@ -433,7 +506,9 @@ impl Root {
 mod tests {
     use ranki_model::{Rating, RevLog, RevLogKind};
 
-    use super::{build_statistics, day_number, weekday};
+    use super::{
+        ForecastDay, build_statistics, day_number, forecast_days, weekday,
+    };
 
     const START: i64 = 1_700_000_000;
 
@@ -505,5 +580,58 @@ mod tests {
         let stats = build_statistics(&[entry], START, START);
         assert_eq!(stats.total_reviews, 0);
         assert_eq!(stats.reviews_today, 0);
+    }
+
+    #[test]
+    fn forecast_days_join_last_week_with_next_week() {
+        let stats = build_statistics(
+            &[log(0, Rating::Good, 100), log(6, Rating::Good, 100)],
+            START + 6 * 86_400,
+            START,
+        );
+        let days = forecast_days(&stats, &[2, 3, 4, 5, 6, 7, 8]);
+
+        assert_eq!(days.len(), 14);
+        assert_eq!(
+            days[0],
+            ForecastDay {
+                day: 0,
+                reviews: 1,
+                due: None
+            }
+        );
+        assert_eq!(
+            days[6],
+            ForecastDay {
+                day: 6,
+                reviews: 1,
+                due: None
+            }
+        );
+        assert_eq!(
+            days[7],
+            ForecastDay {
+                day: 6,
+                reviews: 0,
+                due: Some(2)
+            }
+        );
+        assert_eq!(
+            days[13],
+            ForecastDay {
+                day: 12,
+                reviews: 0,
+                due: Some(8)
+            }
+        );
+    }
+
+    #[test]
+    fn forecast_days_without_due_data_are_unavailable() {
+        let stats = build_statistics(&[], START + 6 * 86_400, START);
+        let days = forecast_days(&stats, &[]);
+        let upcoming: Vec<_> = days[7..].iter().map(|day| day.day).collect();
+        assert_eq!(upcoming, [6, 7, 8, 9, 10, 11, 12]);
+        assert!(days[7..].iter().all(|day| day.due.is_none()));
     }
 }
