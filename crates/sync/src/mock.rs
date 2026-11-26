@@ -227,6 +227,18 @@ impl SyncTransport for MockTransport {
         self.dispatch(SyncMethod::Download, body)
     }
 
+    fn media_begin(&mut self, body: &[u8]) -> Result<SyncResponse> {
+        self.dispatch(SyncMethod::MediaBegin, body)
+    }
+
+    fn media_changes(&mut self, body: &[u8]) -> Result<SyncResponse> {
+        self.dispatch(SyncMethod::MediaChanges, body)
+    }
+
+    fn media_download(&mut self, body: &[u8]) -> Result<SyncResponse> {
+        self.dispatch(SyncMethod::MediaDownload, body)
+    }
+
     fn set_endpoint(&mut self, endpoint: &str) -> Result<()> {
         self.endpoint = normalize_endpoint(endpoint)?;
         Ok(())

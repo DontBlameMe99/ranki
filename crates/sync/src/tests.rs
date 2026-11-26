@@ -1,16 +1,18 @@
 use crate::{
-    Credentials, MockResponse, MockTransport, ORIGINAL_SIZE_HEADER,
-    RemoteStatus, RetryPolicy, SyncClient, SyncError, SyncMethod, SyncOutcome,
-    SyncResponse, SyncState, wire,
+    Credentials, META_CLIENT_VERSION, MockResponse, MockTransport,
+    ORIGINAL_SIZE_HEADER, RemoteStatus, RetryPolicy, SyncClient, SyncError,
+    SyncMethod, SyncOutcome, SyncResponse, SyncState, wire,
 };
 use rusqlite::{Connection, params};
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::io::{Cursor, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
+use zip::write::FileOptions;
 
 type TestResult<T = ()> = crate::Result<T>;
 type CollectionValues = (i64, i64, u32);
@@ -116,6 +118,27 @@ fn meta_response(
         "cont": true,
         "media_usn": 3,
     }))
+}
+
+fn media_begin(usn: i32) -> TestResult<MockResponse> {
+    MockResponse::ok_json(&json!({
+        "data": { "usn": usn, "sk": "host-key" },
+        "err": ""
+    }))
+}
+
+fn media_zip(name: &str, bytes: &[u8]) -> TestResult<Vec<u8>> {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options: FileOptions<'_, '_, ()> = FileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored);
+    let mut map = HashMap::new();
+    map.insert("0".to_owned(), name.to_owned());
+    zip.start_file("0", options).expect("start file");
+    zip.write_all(bytes)?;
+    let meta = serde_json::to_vec(&map)?;
+    zip.start_file("_meta", options).expect("start meta");
+    zip.write_all(&meta)?;
+    Ok(zip.finish().expect("finish zip").into_inner())
 }
 
 fn decode_request(request: &crate::RecordedRequest) -> TestResult<Vec<u8>> {
@@ -260,10 +283,12 @@ fn full_download_replaces_collection_and_keeps_media() -> TestResult {
     fs::create_dir_all(&media)?;
     fs::write(media.join("image.png"), b"image")?;
     write_state(&state_path, &seeded_state(&fixture_key(&directory)))?;
-    let transport = MockTransport::new().with_response(
-        SyncMethod::Download,
-        MockResponse::ok_bytes(fs::read(&source)?)?,
-    );
+    let transport = MockTransport::new()
+        .with_response(
+            SyncMethod::Download,
+            MockResponse::ok_bytes(fs::read(&source)?)?,
+        )
+        .with_response(SyncMethod::MediaBegin, media_begin(0)?);
     let mut client =
         SyncClient::new(transport, &collection, &media, &state_path)?;
 
@@ -496,7 +521,8 @@ fn empty_local_collection_downloads_a_populated_remote() -> TestResult {
         .with_response(
             SyncMethod::Download,
             MockResponse::ok_bytes(fs::read(&source)?)?,
-        );
+        )
+        .with_response(SyncMethod::MediaBegin, media_begin(0)?);
     let mut client =
         SyncClient::new(transport, &collection, &media, &state_path)?;
 
@@ -508,6 +534,70 @@ fn empty_local_collection_downloads_a_populated_remote() -> TestResult {
         connection
             .query_row("SELECT count(*) FROM cards", [], |row| row.get(0))?;
     assert_eq!(cards, 1);
+    Ok(())
+}
+
+#[test]
+fn full_download_restores_remote_media() -> TestResult {
+    let directory = TempDir::new()?;
+    let source = directory.path().join("source.anki2");
+    let collection = directory.path().join("collection.anki2");
+    let media = directory.path().join("media");
+    let state_path = directory.path().join("sync.json");
+    make_collection(&source, (900, 200, 1))?;
+    make_collection(&collection, (100, 100, 0))?;
+    write_state(&state_path, &seeded_state(&fixture_key(&directory)))?;
+    let transport = MockTransport::new()
+        .with_response(
+            SyncMethod::Download,
+            MockResponse::ok_bytes(fs::read(&source)?)?,
+        )
+        .with_response(SyncMethod::MediaBegin, media_begin(1)?)
+        .with_response(
+            SyncMethod::MediaChanges,
+            MockResponse::ok_json(&json!({
+                "data": [[
+                    "flag.png",
+                    1,
+                    "b297e6188e634a5e3ec2d366d8ec7cf3564af58a"
+                ]],
+                "err": ""
+            }))?,
+        )
+        .with_response(
+            SyncMethod::MediaDownload,
+            MockResponse::ok_bytes(media_zip("flag.png", b"flag bytes")?)?,
+        );
+    let mut client =
+        SyncClient::new(transport, &collection, &media, &state_path)?;
+
+    client.full_download()?;
+
+    assert_eq!(fs::read(media.join("flag.png"))?, b"flag bytes");
+    let methods: Vec<SyncMethod> = client
+        .transport()
+        .requests()
+        .iter()
+        .map(|request| request.method)
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            SyncMethod::Download,
+            SyncMethod::MediaBegin,
+            SyncMethod::MediaChanges,
+            SyncMethod::MediaDownload,
+        ]
+    );
+    let begin = client
+        .transport()
+        .requests()
+        .iter()
+        .find(|request| request.method == SyncMethod::MediaBegin)
+        .expect("begin request");
+    let begin_body = decode_request(begin)?;
+    let begin_json: serde_json::Value = serde_json::from_slice(&begin_body)?;
+    assert_eq!(begin_json.get("v"), Some(&json!(META_CLIENT_VERSION)));
     Ok(())
 }
 

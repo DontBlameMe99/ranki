@@ -1,4 +1,5 @@
 use crate::error::{Result, SyncError};
+use crate::media;
 use crate::state::SyncState;
 use crate::transport::{
     META_CLIENT_VERSION, SyncMethod, SyncResponse, SyncTransport,
@@ -94,7 +95,7 @@ pub enum SyncOutcome {
 /// Minimal `AnkiWeb` v11 collection sync client.
 ///
 /// The client stores only the host key and sync metadata in its state file.
-/// Media files are never deleted or rewritten.
+/// Full download adds or replaces local media files. Media is never deleted.
 pub struct SyncClient<T: SyncTransport> {
     transport: T,
     state: SyncState,
@@ -151,7 +152,8 @@ impl<T: SyncTransport> SyncClient<T> {
         &self.collection
     }
 
-    /// Media directory supplied by the caller. It is never modified.
+    /// Media directory supplied by the caller. Full download adds or replaces
+    /// files here; it never deletes them.
     #[must_use]
     pub fn media_dir(&self) -> &Path {
         &self.media_dir
@@ -249,7 +251,7 @@ impl<T: SyncTransport> SyncClient<T> {
     /// # Errors
     ///
     /// Returns an error when the download fails, the temporary collection is
-    /// invalid, or the atomic replacement fails.
+    /// invalid, the media download fails, or the atomic replacement fails.
     pub fn full_download(&mut self) -> Result<()> {
         self.require_host_key()?;
         let body = wire::frame(b"{}")?;
@@ -276,12 +278,86 @@ impl<T: SyncTransport> SyncClient<T> {
         }
         let info = validate_download(file.path())?;
         file.as_file().sync_all()?;
+        self.sync_media()?;
         self.backup_collection()?;
         file.persist(&self.collection)
             .map_err(|error| SyncError::Io(error.to_string()))?;
         self.state.last_mod = Some(info.mod_time);
         self.state.last_scm = Some(info.scm);
         self.record_success()?;
+        Ok(())
+    }
+
+    /// Downloads the media referenced by the remote collection.
+    ///
+    /// The media manifest is fetched from the start on every full download so
+    /// files from another account or a removed local copy are restored. Files
+    /// already present with the server's hash are left untouched.
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "media batches keep request and extraction state local"
+    )]
+    fn sync_media(&mut self) -> Result<()> {
+        let body = wire::frame_json(&media::BeginRequest {
+            v: META_CLIENT_VERSION.to_owned(),
+        })?;
+        let response = self.send(SyncMethod::MediaBegin, &body)?;
+        let server_usn = media::parse_begin(&wire::decode(&response)?)?;
+        if server_usn <= 0 {
+            return Ok(());
+        }
+        fs::create_dir_all(&self.media_dir)?;
+
+        let mut last_usn = 0_i32;
+        loop {
+            let request = media::ChangesRequest { last_usn };
+            let body = wire::frame_json(&request)?;
+            let response = self.send(SyncMethod::MediaChanges, &body)?;
+            let batch = media::parse_changes(&wire::decode(&response)?)?;
+            if batch.is_empty() {
+                break;
+            }
+            let highest = batch
+                .iter()
+                .map(|change| change.usn)
+                .max()
+                .unwrap_or_default();
+            if highest <= last_usn {
+                return Err(SyncError::Decode(
+                    "media changes did not advance".to_owned(),
+                ));
+            }
+            last_usn = highest;
+
+            let mut missing = Vec::new();
+            for change in &batch {
+                if change.sha1.is_empty() {
+                    continue;
+                }
+                let Some(name) = media::safe_media_name(&change.fname) else {
+                    continue;
+                };
+                if !media::local_matches_sha1(
+                    &self.media_dir,
+                    name,
+                    &change.sha1,
+                )? {
+                    missing.push(name.to_owned());
+                }
+            }
+            for names in missing.chunks(media::DOWNLOAD_BATCH) {
+                let request = media::DownloadRequest {
+                    files: names.to_vec(),
+                };
+                let body = wire::frame_json(&request)?;
+                let response = self.send(SyncMethod::MediaDownload, &body)?;
+                let zip = wire::decode(&response)?;
+                media::extract_files(&self.media_dir, &zip)?;
+            }
+            if last_usn >= server_usn {
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -447,6 +523,11 @@ impl<T: SyncTransport> SyncClient<T> {
                 SyncMethod::Meta => self.transport.meta(body),
                 SyncMethod::Upload => self.transport.upload(body),
                 SyncMethod::Download => self.transport.download(body),
+                SyncMethod::MediaBegin => self.transport.media_begin(body),
+                SyncMethod::MediaChanges => self.transport.media_changes(body),
+                SyncMethod::MediaDownload => {
+                    self.transport.media_download(body)
+                }
             };
             let retry = is_retryable_result(&result, method)
                 && attempt < policy.retries;

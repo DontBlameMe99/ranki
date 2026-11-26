@@ -402,13 +402,16 @@ impl Root {
                 ));
             let (question_size, answer_size) =
                 stage_text_sizes(question, answer, stage_height, phase);
+            let stage_media = question.is_some_and(|card| {
+                !card.media.is_empty() || !card.masks.is_empty()
+            });
+            let content_height =
+                stage_content_height(stage_height, image_height, stage_media);
             let center = div()
                 .id("review-stage-scroll")
                 .flex_1()
                 .min_h(px(0.))
                 .overflow_scroll();
-            let content_height =
-                (stage_height - 2.0 * STAGE_PADDING - 56.0).max(120.0);
             let mut content = div()
                 .min_h(px(content_height))
                 .flex()
@@ -604,6 +607,18 @@ impl Root {
     }
 }
 
+/// Height available to the scrolling text block above a stage media column.
+const fn stage_content_height(
+    stage_height: f32,
+    image_height: f32,
+    stage_media: bool,
+) -> f32 {
+    (stage_height
+        - 2.0 * STAGE_PADDING
+        - 56.0
+        - if stage_media { image_height } else { 0.0 })
+    .max(0.0)
+}
 fn card_text_size(
     card: &card_view::RenderedCard,
     stage_height: f32,
@@ -1020,6 +1035,17 @@ mod tests {
             .clamp(220.0, crate::theme::STAGE_HEIGHT);
         assert!(stage <= 322.0);
         assert!(stage + 72.0 + 64.0 + 76.0 + 48.0 + 18.0 <= 600.0);
+    }
+
+    #[test]
+    fn stage_media_leaves_room_for_the_text_block() {
+        let plain = super::stage_content_height(440.0, 180.0, false);
+        let with_media = super::stage_content_height(440.0, 180.0, true);
+        assert_eq!(plain - with_media, 180.0);
+        assert_eq!(
+            with_media,
+            440.0 - 2.0 * super::STAGE_PADDING - 56.0 - 180.0
+        );
     }
 
     #[test]

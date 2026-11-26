@@ -35,6 +35,12 @@ pub enum SyncMethod {
     Upload,
     /// Replace the local collection with the remote one.
     Download,
+    /// Begin a media download session.
+    MediaBegin,
+    /// Read the remote media manifest changes.
+    MediaChanges,
+    /// Download a batch of media files.
+    MediaDownload,
 }
 
 impl fmt::Display for SyncMethod {
@@ -44,6 +50,9 @@ impl fmt::Display for SyncMethod {
             Self::Meta => "sync/meta",
             Self::Upload => "sync/upload",
             Self::Download => "sync/download",
+            Self::MediaBegin => "msync/begin",
+            Self::MediaChanges => "msync/mediaChanges",
+            Self::MediaDownload => "msync/downloadFiles",
         };
         formatter.write_str(name)
     }
@@ -144,6 +153,24 @@ pub trait SyncTransport: Send {
     ///
     /// Returns a transport error on a network or HTTP failure.
     fn download(&mut self, body: &[u8]) -> Result<SyncResponse>;
+    /// Call `msync/begin`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport error on a network or HTTP failure.
+    fn media_begin(&mut self, body: &[u8]) -> Result<SyncResponse>;
+    /// Call `msync/mediaChanges`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport error on a network or HTTP failure.
+    fn media_changes(&mut self, body: &[u8]) -> Result<SyncResponse>;
+    /// Call `msync/downloadFiles`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport error on a network or HTTP failure.
+    fn media_download(&mut self, body: &[u8]) -> Result<SyncResponse>;
     /// Replace the endpoint after a server redirect.
     ///
     /// # Errors
@@ -173,6 +200,18 @@ impl<T: SyncTransport + ?Sized> SyncTransport for Box<T> {
 
     fn download(&mut self, body: &[u8]) -> Result<SyncResponse> {
         (**self).download(body)
+    }
+
+    fn media_begin(&mut self, body: &[u8]) -> Result<SyncResponse> {
+        (**self).media_begin(body)
+    }
+
+    fn media_changes(&mut self, body: &[u8]) -> Result<SyncResponse> {
+        (**self).media_changes(body)
+    }
+
+    fn media_download(&mut self, body: &[u8]) -> Result<SyncResponse> {
+        (**self).media_download(body)
     }
 
     fn set_endpoint(&mut self, endpoint: &str) -> Result<()> {
@@ -312,6 +351,18 @@ impl SyncTransport for HttpTransport {
 
     fn download(&mut self, body: &[u8]) -> Result<SyncResponse> {
         self.request(SyncMethod::Download, body)
+    }
+
+    fn media_begin(&mut self, body: &[u8]) -> Result<SyncResponse> {
+        self.request(SyncMethod::MediaBegin, body)
+    }
+
+    fn media_changes(&mut self, body: &[u8]) -> Result<SyncResponse> {
+        self.request(SyncMethod::MediaChanges, body)
+    }
+
+    fn media_download(&mut self, body: &[u8]) -> Result<SyncResponse> {
+        self.request(SyncMethod::MediaDownload, body)
     }
 
     fn set_endpoint(&mut self, endpoint: &str) -> Result<()> {
