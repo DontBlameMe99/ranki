@@ -14,11 +14,11 @@ use crate::Options;
 use super::{
     DeckRow, EmptyKind, MaskShape, MouseButton, NormalizedRect, OcclusionDrag,
     OcclusionMask, OcclusionState, Phase, UiAction, View, build_deck_rows,
-    collect_tags, date_label, deck_meta, due_total, duration_label, empty_copy,
-    empty_kind, filter_decks, focused_delta, forecast_bar_height,
-    forecast_total, model_index, models_with_stock, next_due_deck, next_view,
-    queue_counts, refreshed_card, session_progress, sum_leaf_counts,
-    validate_draft, validate_occlusion,
+    collect_tags, compute_visible_deck_rows, date_label, deck_meta, due_total,
+    duration_label, empty_copy, empty_kind, filter_decks, focused_delta,
+    forecast_bar_height, forecast_total, model_index, models_with_stock,
+    next_due_deck, next_view, prepare_deck_rows, queue_counts, refreshed_card,
+    session_progress, sum_leaf_counts, validate_draft, validate_occlusion,
 };
 use gpui::{point, px, size};
 
@@ -1314,6 +1314,9 @@ fn row(id: i64, path: &str, depth: usize) -> DeckRow {
         virtual_group: false,
         has_children: false,
         expanded: false,
+        meta: String::new(),
+        child_count: 0,
+        deck_index: None,
     }
 }
 
@@ -1432,6 +1435,9 @@ fn deck_meta_counts_children_and_cards() {
         virtual_group: true,
         has_children: true,
         expanded: false,
+        meta: String::new(),
+        child_count: 0,
+        deck_index: None,
     };
     let child = DeckRow {
         id: Some(2),
@@ -1442,6 +1448,9 @@ fn deck_meta_counts_children_and_cards() {
         virtual_group: false,
         has_children: false,
         expanded: false,
+        meta: String::new(),
+        child_count: 0,
+        deck_index: None,
     };
     assert_eq!(
         deck_meta(&[row.clone(), child], &row),
@@ -1456,6 +1465,32 @@ fn deck_meta_counts_children_and_cards() {
         ..row
     };
     assert_eq!(deck_meta(std::slice::from_ref(&solo), &solo), "1 card");
+}
+
+#[test]
+fn deck_rows_cache_display_metadata() {
+    let entries = [deck(1, "A", 0, 0, 2), deck(2, "A::B", 0, 0, 3)];
+    let decks = entries
+        .iter()
+        .map(|(deck, _)| deck.clone())
+        .collect::<Vec<_>>();
+    let stats = entries.iter().map(|(_, stats)| *stats).collect::<Vec<_>>();
+    let expanded = ["A".to_owned()].into_iter().collect();
+    let mut rows = build_deck_rows(&decks, &stats, &expanded);
+    prepare_deck_rows(&decks, &mut rows);
+    assert_eq!(rows[0].meta, "1 subdeck · 2 cards");
+    assert_eq!(rows[0].child_count, 1);
+    assert_eq!(rows[0].deck_index, Some(0));
+    assert_eq!(rows[1].meta, "3 cards");
+    assert_eq!(rows[1].child_count, 0);
+    assert_eq!(rows[1].deck_index, Some(1));
+
+    let filtered = compute_visible_deck_rows(&decks, &stats, &rows, "B");
+    assert_eq!(filtered[0].path, "A");
+    assert_eq!(filtered[0].meta, rows[0].meta);
+    assert_eq!(filtered[0].child_count, rows[0].child_count);
+    assert_eq!(filtered[0].deck_index, rows[0].deck_index);
+    assert_eq!(filtered[1].meta, rows[1].meta);
 }
 
 #[test]

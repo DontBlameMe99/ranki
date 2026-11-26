@@ -328,6 +328,7 @@ fn push_plain(segments: &mut Vec<ClozeSegment>, text: &str) {
 
 /// Flattens cloze segments into the text shown on a card.
 #[must_use]
+#[cfg(test)]
 pub fn cloze_text(text: &str, ordinal: u16, side: Side) -> String {
     cloze_segments(text, ordinal, side)
         .into_iter()

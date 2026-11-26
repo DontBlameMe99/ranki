@@ -1002,7 +1002,7 @@ impl Store for Collection {
     }
 
     fn collection_modified(&self) -> Result<i64, StoreError> {
-        Ok(records::read_col(&self.conn)?.modified)
+        Ok(read_stamps(&self.conn)?.modified)
     }
 }
 

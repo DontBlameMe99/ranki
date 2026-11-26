@@ -24,7 +24,7 @@ use crate::{
 
 impl Root {
     pub(crate) fn render_review(
-        &mut self,
+        &self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -49,28 +49,23 @@ impl Root {
         let image_height = (stage_height * 0.38).clamp(96.0, 180.0);
         let fraction = self.progress_fraction();
         let from = self.review.progress_from;
-        let current = self.review.current.clone();
+        let current = self.review.current.as_ref();
         let phase = self.review.phase;
-        let question = self.review.question.clone();
-        let answer = self.review.answer.clone();
-        let answer_media = answer
-            .as_ref()
-            .and_then(|card| {
-                let shown = question
-                    .as_ref()
-                    .map_or(&[][..], |card| card.media.as_slice());
-                let extra = card_view::answer_only_media(shown, &card.media);
-                (!extra.is_empty()).then(|| {
-                    card_view::media_column(
-                        &extra,
-                        &self.options.media_dir,
-                        colors,
-                        image_height,
-                    )
-                })
+        let question = self.review.question.as_ref();
+        let answer = self.review.answer.as_ref();
+        let answer_media = if phase == Phase::Answer {
+            (!self.review.answer_media.is_empty()).then(|| {
+                card_view::media_column(
+                    &self.review.answer_media,
+                    &self.options.media_dir,
+                    colors,
+                    image_height,
+                )
             })
-            .flatten();
-        let note = self.review.note.clone();
+        } else {
+            None
+        };
+        let note = self.review.note.as_ref();
         let answered = self.review.answered;
         let load_errors = self.review.load_errors;
         let load_error = self.review.load_error.clone();
@@ -79,7 +74,7 @@ impl Root {
         let can_undo = self.review.last_grade.is_some();
         let quick = self.motion_ms(MOTION_QUICK_MS);
         let progress_ms = self.motion_ms(MOTION_PROGRESS_MS);
-        let active_queue = current.as_ref().map(|card| card.card_type);
+        let active_queue = current.map(|card| card.card_type);
         let previews = self.review.previews;
         let deck_name = if self.review.scope_all {
             String::from("All decks")
@@ -91,12 +86,9 @@ impl Root {
                     |deck| deck.name.replace("::", " \u{203a} "),
                 )
         };
-        let tags = note
-            .as_ref()
-            .map(|note| note.tags.clone())
-            .unwrap_or_default();
+        let tags = note.map_or(&[][..], |note| note.tags.as_slice());
         let reading = (phase == Phase::Answer)
-            .then(|| reading_label(&self.models, note.as_ref()))
+            .then(|| reading_label(&self.models, note))
             .flatten();
         let reveal = self.action_click(UiAction::Reveal);
         let end = self.action_click(UiAction::EndSession);
@@ -412,7 +404,7 @@ impl Root {
                         tags.iter().map(|tag| chip(tag.clone(), colors)),
                     ),
                 ));
-            let question_size = question.as_ref().map_or(84.0, |card| {
+            let question_size = question.map_or(84.0, |card| {
                 card_text_size(
                     card,
                     stage_height,
@@ -424,7 +416,7 @@ impl Root {
             } else {
                 question_size
             };
-            let answer_size = answer.as_ref().map_or(32.0, |card| {
+            let answer_size = answer.map_or(32.0, |card| {
                 card_text_size(
                     card,
                     stage_height,
@@ -453,7 +445,7 @@ impl Root {
                         .text_color(colors.subtext)
                         .child("RECALL THE MEANING")
                 }))
-                .child(if let Some(card) = question.as_ref() {
+                .child(if let Some(card) = question {
                     card_view::rendered_text(card, colors.text, question_size)
                         .into_any_element()
                 } else {
@@ -476,7 +468,7 @@ impl Root {
                     .items_center()
                     .gap(px(SPACE_GROUP))
                     .child(separator(colors))
-                    .child(if let Some(card) = answer.as_ref() {
+                    .child(if let Some(card) = answer {
                         card_view::rendered_text(
                             card,
                             colors.mauve,
@@ -487,10 +479,9 @@ impl Root {
                         div().into_any_element()
                     });
                 if let Some(media) = answer_media {
-                    answer_group = answer_group.child(media);
+                    answer_group = answer_group.children(media);
                 }
                 let key = current
-                    .as_ref()
                     .map_or(0, |card| usize::try_from(card.id).unwrap_or(0));
                 content = content.child(fade_in(
                     answer_group,
@@ -499,15 +490,8 @@ impl Root {
                 ));
             }
             stage = stage.child(center.child(content));
-            let occlusion_image = note
-                .as_ref()
-                .and_then(|note| note.fields.get(1))
-                .and_then(|field| {
-                    card_view::media_refs(field)
-                        .into_iter()
-                        .find(|media| media.kind == card_view::MediaKind::Image)
-                });
-            if let Some(card) = question.as_ref() {
+            let occlusion_image = self.review.occlusion_image.as_ref();
+            if let Some(card) = question {
                 let masked =
                     occlusion_image.as_ref().filter(|_| !card.masks.is_empty());
                 if let Some(image) = masked {
@@ -523,13 +507,12 @@ impl Root {
                             colors,
                             phase == Phase::Answer,
                             image_height,
+                            self.review.occlusion_image_size,
                         ));
                     let rest = card
                         .media
                         .iter()
-                        .filter(|media| {
-                            Some(*media) != occlusion_image.as_ref()
-                        })
+                        .filter(|media| Some(*media) != occlusion_image)
                         .cloned()
                         .collect::<Vec<_>>();
                     if let Some(rest) = card_view::media_column(

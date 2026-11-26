@@ -1,7 +1,5 @@
 //! Decks screen: header, summary cards, five-column table, and empty states.
 
-use std::collections::HashSet;
-
 use gpui::{
     App, ClickEvent, Context, InteractiveElement, IntoElement, MouseButton,
     MouseDownEvent, ParentElement, Rgba, ScrollWheelEvent, SharedString,
@@ -9,7 +7,7 @@ use gpui::{
 };
 
 use crate::{
-    app::{self, Root, UiAction, due_total, leaf_deck_totals},
+    app::{self, Root, UiAction, due_total},
     components::{
         ButtonTone, Interaction, action_button, icon, icon_tile, keycap, panel,
         same_press,
@@ -26,24 +24,8 @@ const ROW_CHILD_HEIGHT: f32 = 45.0;
 const ROW_OVERSCAN: f32 = 240.0;
 
 impl Root {
-    pub(crate) fn visible_deck_rows(&self, cx: &App) -> Vec<app::DeckRow> {
-        let query = self.deck_search.read(cx).text();
-        if query.trim().is_empty() {
-            return self.deck_rows.clone();
-        }
-        let expanded = self
-            .decks
-            .iter()
-            .map(|deck| deck.name.clone())
-            .collect::<HashSet<_>>();
-        let mut expanded = expanded;
-        for deck in &self.decks {
-            for (index, _) in deck.name.match_indices("::") {
-                let _ = expanded.insert(deck.name[..index].to_owned());
-            }
-        }
-        let rows = app::build_deck_rows(&self.decks, &self.stats, &expanded);
-        app::filter_decks(&rows, &query)
+    pub(crate) fn visible_deck_rows(&self, _cx: &App) -> Vec<app::DeckRow> {
+        self.visible_rows.clone()
     }
 
     pub(crate) fn render_decks(
@@ -54,7 +36,7 @@ impl Root {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let rows = self.visible_deck_rows(cx);
-        let totals = leaf_deck_totals(&self.decks, &self.stats);
+        let totals = self.leaf_totals;
         let due = due_total(totals);
         let smooth = self.motion_ms(1) > 0;
         self.decks_scroll.advance(window, smooth);
@@ -541,11 +523,10 @@ impl Root {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let deck_id = row.id;
-        let index = deck_id
-            .and_then(|id| self.decks.iter().position(|deck| deck.id == id));
+        let index = row.deck_index;
         let is_selected = index.is_some() && index == self.selected;
         let has_due = due_total(row.stats) > 0;
-        let meta = app::deck_meta(&self.deck_rows, row);
+        let meta = row.meta.clone();
         let mut name_cell = div()
             .flex()
             .items_center()
