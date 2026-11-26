@@ -91,25 +91,25 @@
     },
     "gui/frame/idle": {
       "budget_ms": 100.0,
-      "median_ms": 0.128309,
+      "median_ms": 0.120591,
       "method": 1,
       "repeat": 1,
       "samples": 10,
-      "sha": "fb4ebbaf5993eeefd16d1db7960644d9dc6ecc4e",
-      "updated_at": "2026-11-25T21:04:09.900427+00:00",
+      "sha": "69eb93b800b39ea6cf785a226fd9b4ede63c464e",
+      "updated_at": "2026-11-26T17:06:35.925504+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.130901
+      "worst_median_ms": 0.123015
     },
     "gui/frame/reveal": {
       "budget_ms": 100.0,
-      "median_ms": 0.30673700000000004,
+      "median_ms": 0.295884,
       "method": 1,
       "repeat": 1,
       "samples": 10,
-      "sha": "fb4ebbaf5993eeefd16d1db7960644d9dc6ecc4e",
-      "updated_at": "2026-11-25T21:04:09.900427+00:00",
+      "sha": "69eb93b800b39ea6cf785a226fd9b4ede63c464e",
+      "updated_at": "2026-11-26T17:06:35.925504+00:00",
       "warmup": 2,
-      "worst_median_ms": 0.309512
+      "worst_median_ms": 0.300562
     },
     "mcp/roundtrip/list-decks": {
       "budget_ms": 100.0,
@@ -233,7 +233,7 @@
       "worst_median_ms": 0.031911
     }
   },
-  "sha": "d2d7deda70c1cce61563a480d32ddc919386f7d3",
+  "sha": "69eb93b800b39ea6cf785a226fd9b4ede63c464e",
   "version": 1,
   "workload_hash": "41c505710405ce82"
 }
