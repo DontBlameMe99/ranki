@@ -80,14 +80,14 @@
     },
     "format/import-apkg": {
       "budget_ms": 1000.0,
-      "median_ms": 12.684828,
+      "median_ms": 11.596372,
       "method": 1,
       "repeat": 1,
       "samples": 5,
-      "sha": "5482c826f02a233325c7e67e842b8152b0b31e64",
-      "updated_at": "2026-11-25T22:26:47.688916+00:00",
+      "sha": "8f0503bb7c2188a4378c5cfa3e6d529e99e28763",
+      "updated_at": "2026-11-26T09:18:52.043328+00:00",
       "warmup": 2,
-      "worst_median_ms": 13.408824
+      "worst_median_ms": 12.132541
     },
     "gui/frame/idle": {
       "budget_ms": 100.0,
@@ -179,14 +179,14 @@
     },
     "storage/due/50": {
       "budget_ms": 50.0,
-      "median_ms": 0.143456,
+      "median_ms": 0.128051,
       "method": 1,
       "repeat": 2,
       "samples": 10,
-      "sha": "23683515644201acbf9072ef133a2bcb83172216",
-      "updated_at": "2026-11-26T01:31:08.457937+00:00",
+      "sha": "8f0503bb7c2188a4378c5cfa3e6d529e99e28763",
+      "updated_at": "2026-11-26T09:18:52.043328+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.150948
+      "worst_median_ms": 0.13136699999999998
     },
     "storage/review/write": {
       "budget_ms": 100.0,
@@ -223,17 +223,17 @@
     },
     "storage/stats": {
       "budget_ms": 20.0,
-      "median_ms": 0.123198,
+      "median_ms": 0.033135,
       "method": 1,
       "repeat": 5,
       "samples": 10,
-      "sha": "5482c826f02a233325c7e67e842b8152b0b31e64",
-      "updated_at": "2026-11-25T22:26:47.688916+00:00",
+      "sha": "8f0503bb7c2188a4378c5cfa3e6d529e99e28763",
+      "updated_at": "2026-11-26T09:18:52.043328+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.123931
+      "worst_median_ms": 0.033609
     }
   },
-  "sha": "6b8bbcbf072fa5a1b190f12aece3e9d31775b1b9",
+  "sha": "8f0503bb7c2188a4378c5cfa3e6d529e99e28763",
   "version": 1,
   "workload_hash": "41c505710405ce82"
 }
