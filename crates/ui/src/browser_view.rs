@@ -6,7 +6,8 @@ use crate::{
     app::{Root, UiAction},
     card_view::{self, CardRequest, MediaRef, RenderedCard},
     components::{
-        ButtonTone, Interaction, action_button, chip, icon, secondary_button,
+        ButtonTone, Interaction, action_button, chip, icon, search_field_icon,
+        secondary_button,
     },
     text_field::{EditHook, TextField},
     theme::{
@@ -272,12 +273,6 @@ impl Root {
         let query = self.browse.search.read(cx).text();
         let selected = self.browse.selected;
         let error = self.browse.error.clone();
-        let search_focused = self
-            .browse
-            .search
-            .read(cx)
-            .focus_handle()
-            .is_focused(window);
         let mut content = div()
             .id("browse-scroll")
             .size_full()
@@ -320,14 +315,11 @@ impl Root {
                                     window.focus(field.read(cx).focus_handle());
                                 },
                             ))
-                            .child(icon(
-                                "icon-search",
+                            .child(search_field_icon(
+                                self.browse.search.read(cx).focus_handle(),
                                 18.,
-                                if search_focused {
-                                    colors.mauve
-                                } else {
-                                    colors.subtext
-                                },
+                                colors,
+                                window,
                             ))
                             .child(
                                 div()

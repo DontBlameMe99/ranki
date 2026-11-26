@@ -214,7 +214,11 @@ impl Root {
             )
     }
 
-    pub(crate) fn render_overlay(&self, cx: &Context<Self>) -> Vec<AnyElement> {
+    pub(crate) fn render_overlay(
+        &self,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
         let colors = self.colors();
         let theme = self.theme();
         let style = Style::new(colors, theme);
@@ -531,7 +535,7 @@ impl Root {
                     .anchor(Corner::TopLeft)
                     .position(self.add.deck_picker_anchor)
                     .offset(point(px(0.), px(SPACE_BLOCK + SPACE_INLINE)))
-                    .child(self.render_deck_picker(colors, cx))
+                    .child(self.render_deck_picker(colors, window, cx))
                     .into_any_element(),
             );
         }

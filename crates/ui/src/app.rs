@@ -2986,7 +2986,7 @@ impl Render for Root {
             }))
             .when(view != View::Review, |this| this.child(self.render_nav(cx)))
             .child(div().flex_1().overflow_hidden().child(main))
-            .children(self.render_overlay(cx))
+            .children(self.render_overlay(window, cx))
     }
 }
 

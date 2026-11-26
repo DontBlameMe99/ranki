@@ -3,7 +3,7 @@
 use std::sync::{Arc, OnceLock};
 
 use gpui::{
-    App, ClickEvent, Div, Image, ImageFormat, ImageSource, Img,
+    App, ClickEvent, Div, FocusHandle, Image, ImageFormat, ImageSource, Img,
     InteractiveElement, IntoElement, MouseDownEvent, ParentElement,
     RenderImage, Rgba, SharedString, Stateful, StatefulInteractiveElement,
     Styled, Svg, Window, div, img, px, svg,
@@ -128,6 +128,22 @@ pub fn icon(name: &'static str, size: f32, color: Rgba) -> Svg {
         .h(px(size))
         .flex_none()
         .text_color(color)
+}
+
+/// Search glyph that turns mauve while its field is focused.
+#[must_use]
+pub fn search_field_icon(
+    focus: &FocusHandle,
+    size: f32,
+    colors: Palette,
+    window: &Window,
+) -> Svg {
+    let color = if focus.is_focused(window) {
+        colors.mauve
+    } else {
+        colors.subtext
+    };
+    icon("icon-search", size, color)
 }
 
 /// 36x36 tinted tile holding a hue-colored icon.
