@@ -171,6 +171,7 @@ impl Root {
                 UiAction::OpenStatistics,
                 true,
             ))
+            .child(div().flex_1())
             .child(nav(
                 "Settings",
                 "icon-settings",
@@ -179,7 +180,6 @@ impl Root {
                 UiAction::OpenSettings,
                 true,
             ))
-            .child(div().flex_1())
     }
 
     pub(crate) fn render_overlay(&self, cx: &Context<Self>) -> Vec<AnyElement> {
