@@ -350,9 +350,8 @@ impl<T: SyncTransport> SyncClient<T> {
             return Ok(SyncOutcome::NoChanges);
         }
         if local_changed {
-            return Ok(conflict(
-                "local collection changed since the last sync",
-            ));
+            self.full_upload()?;
+            return Ok(SyncOutcome::Uploaded);
         }
         if status.mod_time < local.mod_time {
             return Ok(conflict(

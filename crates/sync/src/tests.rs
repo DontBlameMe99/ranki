@@ -383,13 +383,12 @@ fn local_cards_with_an_empty_remote_need_a_choice() -> TestResult {
 }
 
 #[test]
-fn local_changes_need_a_choice_even_when_remote_is_unchanged() -> TestResult {
+fn local_changes_upload_when_remote_is_unchanged() -> TestResult {
     let directory = TempDir::new()?;
     let collection = directory.path().join("collection.anki2");
     let media = directory.path().join("media");
     let state_path = directory.path().join("sync.json");
     make_collection(&collection, (200, 100, 1))?;
-    let before = fs::read(&collection)?;
     write_state(
         &state_path,
         &SyncState {
@@ -399,18 +398,27 @@ fn local_changes_need_a_choice_even_when_remote_is_unchanged() -> TestResult {
             ..SyncState::default()
         },
     )?;
-    let transport = MockTransport::new().with_response(
-        SyncMethod::Meta,
-        meta_response((100, 100, false, now_secs()?))?,
-    );
+    let transport = MockTransport::new()
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((100, 100, false, now_secs()?))?,
+        )
+        .with_response(
+            SyncMethod::Upload,
+            MockResponse::ok_bytes(b"OK".to_vec())?,
+        );
     let mut client =
         SyncClient::new(transport, &collection, &media, &state_path)?;
 
     let outcome = client.sync(None)?;
 
-    assert!(matches!(outcome, SyncOutcome::Conflict { .. }));
-    assert_eq!(client.transport().requests().len(), 1);
-    assert_eq!(fs::read(&collection)?, before);
+    assert_eq!(outcome, SyncOutcome::Uploaded);
+    let requests = client.transport().requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, SyncMethod::Meta);
+    assert_eq!(requests[1].method, SyncMethod::Upload);
+    assert_eq!(client.state().last_mod, Some(200));
+    assert!(client.state().last_scm.is_some_and(|scm| scm > 100));
     Ok(())
 }
 

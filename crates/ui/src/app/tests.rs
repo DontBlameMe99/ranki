@@ -1,6 +1,7 @@
 use gpui::AppContext as _;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ranki_model::Store as _;
@@ -948,6 +949,69 @@ fn repeated_hard_answers_leave_progress_unchanged(
     assert_eq!(grade(ranki_model::Rating::Hard), (0.0, 1));
     assert_eq!(grade(ranki_model::Rating::Hard), (0.0, 2));
     assert_eq!(grade(ranki_model::Rating::Easy), (1.0, 3));
+}
+
+#[gpui::test]
+fn finishing_a_session_starts_one_quiet_sync(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let collection = dir.path().join("collection.anki2");
+    let mut store =
+        ranki_storage::Collection::create(&collection).expect("collection");
+    for front in ["First?", "Second?"] {
+        let _ = store
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![front.to_owned(), String::from("Answer!")],
+                tags: Vec::new(),
+            })
+            .expect("note");
+    }
+    let options = Options {
+        collection,
+        sync: ranki_model::SyncSettings {
+            enabled: true,
+            ..Default::default()
+        },
+        ..Options::default()
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let mut root = super::Root::new(
+            super::Launch {
+                store: Box::new(store),
+                options,
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        );
+        root.sync.signed_in = true;
+        root.sync_run = Arc::new(move |_, _, _, _| {
+            counted.fetch_add(1, Ordering::Relaxed);
+            Ok(ranki_sync::SyncOutcome::Uploaded)
+        });
+        root
+    });
+    cx.update_entity(&root, super::Root::study_all);
+
+    cx.update_entity(&root, |root, cx| {
+        root.review.phase = Phase::Answer;
+        root.review.last_grade_at = None;
+        root.grade(ranki_model::Rating::Easy, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+    cx.update_entity(&root, |root, cx| {
+        root.review.phase = Phase::Answer;
+        root.review.last_grade_at = None;
+        root.grade(ranki_model::Rating::Easy, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    cx.read_entity(&root, |root, _| assert!(root.toast.is_none()));
 }
 #[test]
 fn duration_labels_read_like_a_session_summary() {

@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
@@ -29,6 +30,21 @@ pub fn read_state(collection: &Path) -> Option<SyncState> {
 
 fn sync_status(busy: bool) -> Option<&'static str> {
     busy.then_some("Syncing with AnkiWeb")
+}
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "each flag controls a separate sync state"
+)]
+#[must_use]
+pub fn should_auto_sync(
+    enabled: bool,
+    auto: bool,
+    signed_in: bool,
+    busy: bool,
+    conflicted: bool,
+) -> bool {
+    enabled && auto && signed_in && !busy && !conflicted
 }
 
 /// Exchanges the password for a host key, then runs one sync immediately.
@@ -133,6 +149,19 @@ fn build_client(
         .map_err(|error| error.to_string())
 }
 
+/// Runs one collection sync with the window's transport settings.
+pub type SyncRun =
+    dyn Fn(&Path, &Path, u8, u64) -> Result<SyncOutcome, String> + Send + Sync;
+
+pub fn run_sync(
+    collection: &Path,
+    media_dir: &Path,
+    retries: u8,
+    backoff_ms: u64,
+) -> Result<SyncOutcome, String> {
+    let mut client = build_client(collection, media_dir, retries, backoff_ms)?;
+    client.sync(None).map_err(|error| error.to_string())
+}
 impl Root {
     pub(crate) fn sign_out(&mut self, cx: &mut Context<Self>) {
         if self.sync.busy {
@@ -209,7 +238,7 @@ impl Root {
                         root.sync.password.update(cx, |field, cx| {
                             field.clear(cx);
                         });
-                        root.finish_sync(sync, true, cx);
+                        root.finish_sync(sync, true, false, cx);
                         if let Err(error) = (root.save_settings)(&root.options)
                         {
                             root.show_toast(
@@ -233,6 +262,30 @@ impl Root {
         })
         .detach();
     }
+    /// Syncs once after the last card of a study session is graded.
+    pub(crate) fn sync_after_session(&mut self, cx: &mut Context<Self>) {
+        if !should_auto_sync(
+            self.options.sync.enabled,
+            self.options.sync.auto,
+            self.sync.signed_in,
+            self.sync.busy,
+            self.sync.conflict.is_some(),
+        ) {
+            return;
+        }
+        self.sync.busy = true;
+        cx.notify();
+
+        let collection = self.options.collection.clone();
+        let media_dir = self.options.media_dir.clone();
+        let retries = self.options.sync.retries;
+        let backoff_ms = self.options.sync.backoff_ms;
+        let runner = Arc::clone(&self.sync_run);
+        let task = cx.background_executor().spawn(async move {
+            runner(&collection, &media_dir, retries, backoff_ms)
+        });
+        Self::spawn_sync_task(task, false, None, true, cx);
+    }
 
     pub(crate) fn sync_now(&mut self, cx: &mut Context<Self>) {
         if self.sync.busy || !self.sync.signed_in {
@@ -246,12 +299,11 @@ impl Root {
         let media_dir = self.options.media_dir.clone();
         let retries = self.options.sync.retries;
         let backoff_ms = self.options.sync.backoff_ms;
+        let runner = Arc::clone(&self.sync_run);
         let task = cx.background_executor().spawn(async move {
-            let mut client =
-                build_client(&collection, &media_dir, retries, backoff_ms)?;
-            client.sync(None).map_err(|error| error.to_string())
+            runner(&collection, &media_dir, retries, backoff_ms)
         });
-        Self::spawn_sync_task(task, false, reason, cx);
+        Self::spawn_sync_task(task, false, reason, false, cx);
     }
 
     pub(crate) fn resolve_sync_conflict(
@@ -285,13 +337,18 @@ impl Root {
                     .map_err(|error| error.to_string())
             }
         });
-        Self::spawn_sync_task(task, false, reason, cx);
+        Self::spawn_sync_task(task, false, reason, false, cx);
     }
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "quiet and signed in describe separate sync states"
+    )]
     fn spawn_sync_task(
         task: impl Future<Output = Result<SyncOutcome, String>> + Send + 'static,
         signed_in: bool,
         fallback_conflict: Option<String>,
+        quiet: bool,
         cx: &mut Context<Self>,
     ) {
         cx.spawn(async move |this, cx| {
@@ -299,7 +356,7 @@ impl Root {
             let _ = this.update(cx, |root, cx| {
                 let remaining_conflict =
                     retained_conflict(&result, fallback_conflict);
-                root.finish_sync(result, signed_in, cx);
+                root.finish_sync(result, signed_in, quiet, cx);
                 if remaining_conflict.is_some() {
                     root.sync.conflict = remaining_conflict;
                 }
@@ -309,10 +366,15 @@ impl Root {
         .detach();
     }
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "quiet and signed in describe separate sync states"
+    )]
     fn finish_sync(
         &mut self,
         result: Result<SyncOutcome, String>,
         signed_in: bool,
+        quiet: bool,
         cx: &mut Context<Self>,
     ) {
         self.sync.busy = false;
@@ -337,7 +399,16 @@ impl Root {
                 },
             ),
         };
-        self.show_toast(kind, message, cx);
+        let needs_attention = match &result {
+            Err(_) => true,
+            Ok(
+                SyncOutcome::Conflict { .. } | SyncOutcome::RetryLater { .. },
+            ) => true,
+            Ok(_) => false,
+        };
+        if !quiet || needs_attention {
+            self.show_toast(kind, message, cx);
+        }
         if matches!(result, Ok(SyncOutcome::Downloaded)) {
             self.reopen_collection(cx);
         }
@@ -570,7 +641,7 @@ mod tests {
 
     use super::{
         login_and_sync, read_state, refresh_message, retained_conflict,
-        sync_message, sync_status,
+        should_auto_sync, sync_message, sync_status,
     };
     #[test]
     fn footer_reads_the_last_sync_from_the_state_file() {
@@ -704,6 +775,16 @@ mod tests {
     fn idle_status_is_hidden() {
         assert_eq!(sync_status(false), None);
         assert_eq!(sync_status(true), Some("Syncing with AnkiWeb"));
+    }
+
+    #[test]
+    fn background_sync_waits_for_a_signed_in_idle_session() {
+        assert!(should_auto_sync(true, true, true, false, false));
+        assert!(!should_auto_sync(false, true, true, false, false));
+        assert!(!should_auto_sync(true, false, true, false, false));
+        assert!(!should_auto_sync(true, true, false, false, false));
+        assert!(!should_auto_sync(true, true, true, true, false));
+        assert!(!should_auto_sync(true, true, true, false, true));
     }
 
     #[test]
