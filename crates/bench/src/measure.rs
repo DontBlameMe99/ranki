@@ -239,8 +239,6 @@ fn rank(times: &[f64], numerator: usize, denominator: usize) -> f64 {
 
 struct Fixture {
     directory: TempDir,
-    data_home: PathBuf,
-    config_home: PathBuf,
     collection: PathBuf,
     media: PathBuf,
     package: PathBuf,
@@ -253,14 +251,8 @@ struct Fixture {
 impl Fixture {
     fn new() -> BenchResult<Self> {
         let directory = tempfile::tempdir()?;
-        let data_home = directory.path().join("xdg/data");
-        let config_home = directory.path().join("xdg/config");
-        fs::create_dir_all(&data_home)?;
-        fs::create_dir_all(config_home.join("ranki"))?;
-        let app_dir = data_home.join("ranki");
-        fs::create_dir_all(&app_dir)?;
-        let collection = app_dir.join("collection.anki2");
-        let media = app_dir.join("collection.media");
+        let collection = directory.path().join("collection.anki2");
+        let media = directory.path().join("collection.media");
         fs::create_dir_all(&media)?;
         let mut store = Collection::create(&collection)?;
         let created = store.collection_created()?;
@@ -289,8 +281,6 @@ impl Fixture {
         let now = created.saturating_add(86_400_i64.saturating_mul(2));
         Ok(Self {
             directory,
-            data_home,
-            config_home,
             collection,
             media,
             package,
@@ -312,9 +302,18 @@ impl Fixture {
     }
 
     #[cfg(feature = "gui")]
+    fn options(&self) -> Settings {
+        Settings {
+            collection: self.collection.clone(),
+            media_dir: self.media.clone(),
+            ..Settings::default()
+        }
+    }
+
+    #[cfg(feature = "gui")]
     fn app(&self) -> BenchResult<BenchApp> {
         let store = Box::new(Collection::open(&self.collection)?);
-        Ok(BenchApp::new(store, &Settings::default()))
+        Ok(BenchApp::new(store, &self.options()))
     }
 }
 
@@ -359,15 +358,11 @@ struct ConnectServer {
 }
 
 impl ConnectServer {
-    fn start(
-        binary: &Path,
-        data_home: &Path,
-        config_home: &Path,
-    ) -> BenchResult<Self> {
+    fn start(binary: &Path, collection: &Path) -> BenchResult<Self> {
         let port = free_port()?;
         let child = Command::new(binary)
-            .env("XDG_DATA_HOME", data_home)
-            .env("XDG_CONFIG_HOME", config_home)
+            .args(["--collection"])
+            .arg(collection)
             .args(["connect", "--port", &port.to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -413,14 +408,10 @@ struct McpSession {
 }
 
 impl McpSession {
-    fn start(
-        binary: &Path,
-        data_home: &Path,
-        config_home: &Path,
-    ) -> BenchResult<Self> {
+    fn start(binary: &Path, collection: &Path) -> BenchResult<Self> {
         let spawned = Command::new(binary)
-            .env("XDG_DATA_HOME", data_home)
-            .env("XDG_CONFIG_HOME", config_home)
+            .args(["--collection"])
+            .arg(collection)
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -792,8 +783,9 @@ pub fn run() -> BenchResult<Report> {
             binary.display()
         )));
     }
-    let data_home = &fixture.data_home;
-    let config_home = &fixture.config_home;
+    let collection_arg = collection
+        .to_str()
+        .ok_or_else(|| message("collection path is not valid UTF-8"))?;
     recorder.measure(
         "process/cli/decks",
         "start ranki and list decks within 500 ms",
@@ -803,9 +795,7 @@ pub fn run() -> BenchResult<Report> {
         2,
         || {
             let output = Command::new(&binary)
-                .env("XDG_DATA_HOME", data_home)
-                .env("XDG_CONFIG_HOME", config_home)
-                .args(["decks"])
+                .args(["--collection", collection_arg, "decks"])
                 .output()?;
             if !output.status.success()
                 || !String::from_utf8_lossy(&output.stdout).contains("Default")
@@ -824,9 +814,7 @@ pub fn run() -> BenchResult<Report> {
         2,
         || {
             let output = Command::new(&binary)
-                .env("XDG_DATA_HOME", data_home)
-                .env("XDG_CONFIG_HOME", config_home)
-                .args(["search", "unique42"])
+                .args(["--collection", collection_arg, "search", "unique42"])
                 .output()?;
             if !output.status.success() {
                 return Err(message("ranki search failed"));
@@ -843,12 +831,12 @@ pub fn run() -> BenchResult<Report> {
         1,
         1,
         || {
-            let server = ConnectServer::start(&binary, data_home, config_home)?;
+            let server = ConnectServer::start(&binary, collection)?;
             drop(server);
             Ok(())
         },
     )?;
-    let connect = ConnectServer::start(&binary, data_home, config_home)?;
+    let connect = ConnectServer::start(&binary, collection)?;
     recorder.measure(
         "connect/roundtrip/version",
         "answer an AnkiConnect version request within 100 ms",
@@ -884,12 +872,12 @@ pub fn run() -> BenchResult<Report> {
         1,
         1,
         || {
-            let session = McpSession::start(&binary, data_home, config_home)?;
+            let session = McpSession::start(&binary, collection)?;
             drop(session);
             Ok(())
         },
     )?;
-    let mut mcp = McpSession::start(&binary, data_home, config_home)?;
+    let mut mcp = McpSession::start(&binary, collection)?;
     recorder.measure(
         "mcp/roundtrip/tools-list",
         "answer an MCP tools/list request within 100 ms",
