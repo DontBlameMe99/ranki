@@ -134,11 +134,25 @@ pub struct DeckMenu {
     pub id: Id,
     pub anchor: Point<Pixels>,
 }
+/// Open card actions menu and the window point that opened it.
+#[derive(Clone, Copy, Debug)]
+pub struct CardMenu {
+    pub id: Id,
+    pub anchor: Point<Pixels>,
+}
+
+/// Card being edited in the add-card form.
+#[derive(Clone, Copy, Debug)]
+pub struct CardEdit {
+    pub card_id: Id,
+    pub note_id: Id,
+}
 
 /// Pending destructive action.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Confirmation {
     RemoveDeck { id: Id, name: String },
+    RemoveCard { id: Id, front: String },
     Reload,
 }
 
@@ -559,6 +573,9 @@ pub struct Root {
     pub(crate) deck_edit: Option<DeckEdit>,
     pub(crate) deck_menu: Option<DeckMenu>,
     pub(crate) deck_menu_dismissed_press: Option<MouseDownEvent>,
+    pub(crate) card_menu: Option<CardMenu>,
+    pub(crate) card_menu_dismissed_press: Option<MouseDownEvent>,
+    pub(crate) card_edit: Option<CardEdit>,
     pub(crate) confirmation: Option<Confirmation>,
     pub(crate) review: ReviewState,
     pub(crate) add: AddState,
@@ -695,6 +712,9 @@ impl Root {
             deck_edit: None,
             deck_menu: None,
             deck_menu_dismissed_press: None,
+            card_menu: None,
+            card_menu_dismissed_press: None,
+            card_edit: None,
             confirmation: None,
             review: ReviewState::default(),
             add: AddState {
@@ -832,6 +852,37 @@ impl Root {
                 id: deck.id,
                 name: deck.name.clone(),
             });
+        }
+        if env::var("RANKI_UI_DEV_BROWSE_MENU").is_ok_and(|value| value == "1")
+        {
+            root.view = View::Browse;
+            root.refresh_browse(cx);
+            let viewport = window.viewport_size();
+            root.card_menu = root.browse.rows.first().map(|row| CardMenu {
+                id: row.card.id,
+                anchor: point(viewport.width - px(408.), px(250.)),
+            });
+        }
+        if env::var("RANKI_UI_DEV_BROWSE_EDIT").is_ok_and(|value| value == "1")
+        {
+            root.view = View::Browse;
+            root.refresh_browse(cx);
+            if let Some(row) = root.browse.rows.first().cloned() {
+                root.start_card_edit(row.card.id, window, cx);
+            }
+        }
+        if env::var("RANKI_UI_DEV_BROWSE_REMOVE")
+            .is_ok_and(|value| value == "1")
+        {
+            root.view = View::Browse;
+            root.refresh_browse(cx);
+            if let Some(row) = root.browse.rows.first() {
+                root.confirmation = Some(Confirmation::RemoveCard {
+                    id: row.card.id,
+                    front: crate::browser_view::preview_line(&row.front),
+                });
+                window.focus(&root.dialog_focus);
+            }
         }
         if env::var("RANKI_UI_DEV_DECK_PICKER").is_ok_and(|value| value == "1")
         {
@@ -1353,6 +1404,9 @@ impl Root {
         index: usize,
         cx: &mut Context<Self>,
     ) {
+        if self.card_edit.is_some() {
+            return;
+        }
         let Some(model) = self.models.get(index).cloned() else {
             return;
         };
@@ -2106,6 +2160,28 @@ impl Root {
                     ),
                 }
             }
+            Some(Confirmation::RemoveCard { id, .. }) => {
+                match self.store.remove_card(id) {
+                    Ok(()) => {
+                        self.clear_toast();
+                        self.forget_card(id, cx);
+                        if self.card_edit.is_some_and(|edit| edit.card_id == id)
+                        {
+                            self.discard_card_edit(cx);
+                        }
+                        self.browse.selected = None;
+                        self.refresh_stats();
+                        self.refresh_browse(cx);
+                        self.record_local_write();
+                        self.show_toast(ToastKind::Success, "Card removed", cx);
+                    }
+                    Err(error) => self.show_toast(
+                        ToastKind::Error,
+                        format!("Could not remove card: {error}"),
+                        cx,
+                    ),
+                }
+            }
             Some(Confirmation::Reload) => self.reload_collection(cx),
             None => {}
         }
@@ -2201,6 +2277,99 @@ impl Root {
         }
     }
 
+    /// Drops the edit draft and restores the empty add-card form.
+    pub(crate) fn discard_card_edit(&mut self, cx: &mut Context<Self>) {
+        if self.card_edit.take().is_none() {
+            return;
+        }
+        self.add.tag_chips.clear();
+        self.add.tags.update(cx, TextField::clear);
+        self.add.occlusion = OcclusionState::default();
+        self.add.errors.clear();
+        self.reset_fields(cx);
+    }
+
+    /// Opens the existing note in the add-card form.
+    pub(crate) fn start_card_edit(
+        &mut self,
+        card_id: Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(row) = self
+            .browse
+            .rows
+            .iter()
+            .find(|row| row.card.id == card_id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(model_index) = self
+            .models
+            .iter()
+            .position(|model| model.id == row.note.model_id)
+        else {
+            self.show_toast(
+                ToastKind::Error,
+                "This note type is not in the collection",
+                cx,
+            );
+            return;
+        };
+        if self.models[model_index].is_image_occlusion() {
+            self.show_toast(
+                ToastKind::Error,
+                "Image occlusion cards cannot be edited here",
+                cx,
+            );
+            return;
+        }
+        self.discard_card_edit(cx);
+        self.card_edit = Some(CardEdit {
+            card_id,
+            note_id: row.note.id,
+        });
+        self.add.model_index = model_index;
+        self.add.deck_id = Some(row.card.deck_id);
+        self.add.deck_picker = false;
+        self.add.errors.clear();
+        self.add.tag_chips.clone_from(&row.note.tags);
+        self.add
+            .tags
+            .update(cx, |field, cx| field.seed(String::new(), cx));
+        self.reset_fields(cx);
+        for (field, value) in self.add.fields.iter().zip(row.note.fields.iter())
+        {
+            field.update(cx, |field, cx| field.seed(value.clone(), cx));
+        }
+        self.previous_view = View::Browse;
+        self.view = View::AddCard;
+        self.card_menu = None;
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// Removes a card from a session that may still hold it in its queues.
+    fn forget_card(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.review.queue.retain(|card| card.id != id);
+        self.review.pending.retain(|card| card.id != id);
+        self.review.seen.remove(&id);
+        let was_current = self
+            .review
+            .current
+            .as_ref()
+            .is_some_and(|card| card.id == id);
+        if was_current {
+            self.review.current = None;
+            self.review.note = None;
+            self.review.question = None;
+            self.review.answer = None;
+            self.review.phase = Phase::Question;
+            self.ensure_current(cx);
+        }
+    }
+
     pub(crate) fn save_note(&mut self, cx: &mut Context<Self>) {
         if self.view != View::AddCard {
             return;
@@ -2252,41 +2421,88 @@ impl Root {
             cx.notify();
             return;
         }
-        let note = NewNote {
-            model_id: model.id,
-            deck_id: deck.id,
-            fields,
-            tags,
-        };
+        let edit = self.card_edit;
         self.poll_external_change(cx);
-        match self.store.add_note(&note) {
-            Ok(ids) => {
-                let count = ids.len();
-                self.clear_toast();
-                for field in &self.add.fields {
-                    field.update(cx, |field, cx| {
+        if let Some(edit) = edit {
+            let mut saved = match self.store.note(edit.note_id) {
+                Ok(Some(note)) => note,
+                Ok(None) => {
+                    self.show_toast(
+                        ToastKind::Error,
+                        "That card no longer exists",
+                        cx,
+                    );
+                    return;
+                }
+                Err(error) => {
+                    self.show_toast(
+                        ToastKind::Error,
+                        format!("Could not load card: {error}"),
+                        cx,
+                    );
+                    return;
+                }
+            };
+            saved.model_id = model.id;
+            saved.fields = fields;
+            saved.tags = tags;
+            match self.store.update_note(&saved, deck.id) {
+                Ok(()) => {
+                    self.clear_toast();
+                    self.card_edit = None;
+                    self.add.tag_chips.clear();
+                    self.add.tags.update(cx, TextField::clear);
+                    self.add.occlusion = OcclusionState::default();
+                    self.add.errors.clear();
+                    self.reset_fields(cx);
+                    self.refresh_stats();
+                    self.refresh_browse(cx);
+                    self.record_local_write();
+                    self.view = View::Browse;
+                    self.show_toast(ToastKind::Success, "Card updated", cx);
+                }
+                Err(error) => self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not update card: {error}"),
+                    cx,
+                ),
+            }
+        } else {
+            let note = NewNote {
+                model_id: model.id,
+                deck_id: deck.id,
+                fields,
+                tags,
+            };
+            match self.store.add_note(&note) {
+                Ok(ids) => {
+                    let count = ids.len();
+                    self.clear_toast();
+                    for field in &self.add.fields {
+                        field.update(cx, |field, cx| {
+                            field.seed("", cx);
+                        });
+                    }
+                    self.add.tags.update(cx, |field, cx| {
                         field.seed("", cx);
                     });
+                    self.add.errors.clear();
+                    self.refresh_stats();
+                    self.add.occlusion = OcclusionState::default();
+                    self.record_local_write();
+                    self.show_toast(
+                        ToastKind::Success,
+                        format!("Added {count} cards"),
+                        cx,
+                    );
                 }
-                self.add.tags.update(cx, |field, cx| {
-                    field.seed("", cx);
-                });
-                self.add.errors.clear();
-                self.refresh_stats();
-                self.add.occlusion = OcclusionState::default();
-                self.record_local_write();
-                self.show_toast(
-                    ToastKind::Success,
-                    format!("Added {count} cards"),
-                    cx,
-                );
-            }
-            Err(error) => {
-                self.show_toast(
-                    ToastKind::Error,
-                    format!("Could not add note: {error}"),
-                    cx,
-                );
+                Err(error) => {
+                    self.show_toast(
+                        ToastKind::Error,
+                        format!("Could not add note: {error}"),
+                        cx,
+                    );
+                }
             }
         }
         cx.notify();
@@ -2327,6 +2543,10 @@ impl Root {
         cx: &mut Context<Self>,
     ) {
         self.tick_focus(window);
+        if self.card_menu.take().is_some() {
+            self.card_menu_dismissed_press = None;
+            cx.notify();
+        }
         if self.deck_menu.take().is_some() {
             self.deck_menu_dismissed_press = None;
             cx.notify();
@@ -2398,6 +2618,7 @@ impl Root {
                 });
             }
             UiAction::OpenAdd => {
+                self.discard_card_edit(cx);
                 if self.view != View::AddCard {
                     if let Some(deck) =
                         self.selected.and_then(|index| self.decks.get(index))
@@ -2431,6 +2652,7 @@ impl Root {
             }
             UiAction::SaveNote => self.save_note(cx),
             UiAction::CancelAdd => {
+                self.discard_card_edit(cx);
                 self.view = next_view(self.view, self.previous_view);
                 self.add.errors.clear();
                 cx.notify();
@@ -2782,7 +3004,8 @@ impl Render for Root {
             .font_family(self.font_family)
             .track_focus(&self.focus)
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                let menu = this.deck_menu_dismissed_press.take().is_some();
+                let menu = this.deck_menu_dismissed_press.take().is_some()
+                    || this.card_menu_dismissed_press.take().is_some();
                 let picker =
                     this.add.deck_picker_dismissed_press.take().is_some();
                 if menu || picker {
@@ -2792,7 +3015,8 @@ impl Render for Root {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    let menu = this.deck_menu_dismissed_press.take().is_some();
+                    let menu = this.deck_menu_dismissed_press.take().is_some()
+                        || this.card_menu_dismissed_press.take().is_some();
                     let picker =
                         this.add.deck_picker_dismissed_press.take().is_some();
                     if menu || picker {

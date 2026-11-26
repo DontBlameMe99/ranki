@@ -398,6 +398,101 @@ impl Root {
                     .into_any_element(),
             );
         }
+        if self.view == View::Browse
+            && let Some(menu) = self.card_menu
+            && let Some(row) =
+                self.browse.rows.iter().find(|row| row.card.id == menu.id)
+        {
+            let card_id = menu.id;
+            let front = crate::browser_view::preview_line(&row.front);
+            layers.push(
+                anchored()
+                    .anchor(Corner::TopRight)
+                    .position(menu.anchor)
+                    .offset(point(px(15.), px(19.)))
+                    .child(
+                        div()
+                            .id("card-actions-menu")
+                            .debug_selector(|| "card-actions-menu".to_owned())
+                            .on_mouse_down_out(cx.listener(
+                                move |this,
+                                      event: &gpui::MouseDownEvent,
+                                      _,
+                                      cx| {
+                                    this.card_menu = None;
+                                    this.card_menu_dismissed_press =
+                                        Some(event.clone());
+                                    cx.notify();
+                                },
+                            ))
+                            .flex_col()
+                            .w(px(160.))
+                            .gap(px(SPACE_INLINE))
+                            .p(px(SPACE_GROUP))
+                            .rounded(px(12.))
+                            .bg(colors.mantle)
+                            .border_1()
+                            .border_color(colors.surface1)
+                            .child(
+                                Interaction::surface(colors)
+                                    .apply(
+                                        div()
+                                            .id("browse-edit")
+                                            .w_full()
+                                            .px(px(SPACE_RELATED))
+                                            .py(px(SPACE_GROUP))
+                                            .rounded(px(8.))
+                                            .cursor_pointer(),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this,
+                                              _: &ClickEvent,
+                                              window,
+                                              cx| {
+                                            this.card_menu = None;
+                                            this.start_card_edit(
+                                                card_id, window, cx,
+                                            );
+                                        },
+                                    ))
+                                    .text_size(px(13.))
+                                    .child("Edit"),
+                            )
+                            .child(
+                                Interaction::danger(colors)
+                                    .apply(
+                                        div()
+                                            .id("browse-remove")
+                                            .w_full()
+                                            .px(px(SPACE_RELATED))
+                                            .py(px(SPACE_GROUP))
+                                            .rounded(px(8.))
+                                            .cursor_pointer()
+                                            .text_color(colors.red),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this,
+                                              _: &ClickEvent,
+                                              window,
+                                              cx| {
+                                            this.card_menu = None;
+                                            this.confirmation = Some(
+                                                Confirmation::RemoveCard {
+                                                    id: card_id,
+                                                    front: front.clone(),
+                                                },
+                                            );
+                                            cx.notify();
+                                            window.focus(&this.dialog_focus);
+                                        },
+                                    ))
+                                    .text_size(px(13.))
+                                    .child("Remove"),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
         if self.view == View::AddCard && self.add.deck_picker {
             layers.push(
                 anchored()
@@ -529,6 +624,12 @@ impl Root {
         }
         if let Some(confirmation) = self.confirmation.clone() {
             let (title, detail, accept, tone) = match confirmation {
+                Confirmation::RemoveCard { front, .. } => (
+                    "Remove card?",
+                    format!("{front} will be deleted with its review history."),
+                    "Remove card",
+                    ButtonTone::Danger,
+                ),
                 Confirmation::RemoveDeck { name, .. } => (
                     "Remove deck?",
                     format!("{name} and every card below it will be deleted."),
