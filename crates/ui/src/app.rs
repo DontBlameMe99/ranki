@@ -685,7 +685,9 @@ impl Root {
             field
         };
         let deck_search = cx.new(|cx| make_field(cx, "Search decks"));
-        let browse_search = cx.new(|cx| TextField::new(cx, "Search cards"));
+        let browse_search = cx.new(|cx| {
+            TextField::new(cx, "Search name, tag:any_tag or deck:any_deck")
+        });
         let browse_hook = Self::browse_edit_hook(cx);
         browse_search.update(cx, |field, _| field.set_edit_hook(browse_hook));
         let create_hook = Self::create_field_hook(cx);
