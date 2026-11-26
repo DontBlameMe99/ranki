@@ -508,8 +508,10 @@ pub const NAV_COMPACT_WIDTH: f32 = 180.0;
 pub const NAV_DIVIDER_WIDTH: f32 = 4.0;
 pub const TOPBAR_HEIGHT: f32 = 72.0;
 pub const FOOTER_HEIGHT: f32 = 64.0;
-pub const STAGE_WIDTH: f32 = 760.0;
-pub const STAGE_HEIGHT: f32 = 440.0;
+pub const STAGE_WIDTH: f32 = 1064.0;
+pub const STAGE_HEIGHT: f32 = 528.0;
+/// Smallest card width left after fitting the stage inside a narrow window.
+pub const STAGE_WIDTH_MIN: f32 = 480.0;
 pub const STAGE_RADIUS: f32 = 32.0;
 pub const STAGE_PADDING: f32 = SPACE_GUTTER;
 pub const CONTROL_HEIGHT: f32 = 76.0;
@@ -543,6 +545,12 @@ pub const ADD_CONTENT_WIDTH: f32 = ADD_FORM_WIDTH + ADD_GAP + PREVIEW_WIDTH;
 #[must_use]
 pub fn nav_width(width: f32) -> f32 {
     width.clamp(NAV_WIDTH_MIN, NAV_WIDTH_MAX)
+}
+
+/// Fits the card into the window while keeping the desktop width as a cap.
+#[must_use]
+pub fn stage_width(viewport_width: f32) -> f32 {
+    (viewport_width - 2.0 * PAGE_X).clamp(STAGE_WIDTH_MIN, STAGE_WIDTH)
 }
 
 /// Converts an interval in days or negative seconds into an Anki-style label.
@@ -596,12 +604,12 @@ mod tests {
         NAV_COMPACT_WIDTH, NAV_WIDTH, NAV_WIDTH_MAX, NAV_WIDTH_MIN, PAGE_X,
         PAGE_Y, PROGRESS_HEIGHT, PROGRESS_WIDTH, RATING_GAP, SPACE_BLOCK,
         SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE, SPACE_RELATED, SPACE_SECTION,
-        STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS, STAGE_WIDTH, Theme,
-        accent_hover, accent_press, alpha, blend, contrast, font_candidates,
-        gtk_animations_disabled, interval_label, kde_animations_disabled,
-        keycap_ink, nav_width, palette, parse_flag_bool, placeholder_color,
-        rating_fill, rating_label, reduced_motion, resolve_theme,
-        xdg_config_dir,
+        STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS, STAGE_WIDTH,
+        STAGE_WIDTH_MIN, Theme, accent_hover, accent_press, alpha, blend,
+        contrast, font_candidates, gtk_animations_disabled, interval_label,
+        kde_animations_disabled, keycap_ink, nav_width, palette,
+        parse_flag_bool, placeholder_color, rating_fill, rating_label,
+        reduced_motion, resolve_theme, stage_width, xdg_config_dir,
     };
     use crate::ThemeChoice;
 
@@ -665,11 +673,18 @@ mod tests {
 
     #[test]
     fn layout_constants_match_the_artboard() {
-        assert_eq!(STAGE_WIDTH, 760.0);
-        assert_eq!(STAGE_HEIGHT, 440.0);
+        assert_eq!(STAGE_WIDTH, 1064.0);
+        assert_eq!(STAGE_HEIGHT, 528.0);
         assert_eq!(STAGE_RADIUS, 32.0);
         assert_eq!(PROGRESS_WIDTH, 420.0);
         assert_eq!(PROGRESS_HEIGHT, 6.0);
+    }
+
+    #[test]
+    fn stage_width_fits_the_window_without_growing_past_desktop() {
+        assert_eq!(stage_width(1280.0), STAGE_WIDTH);
+        assert_eq!(stage_width(900.0), 900.0 - 2.0 * PAGE_X);
+        assert_eq!(stage_width(500.0), STAGE_WIDTH_MIN);
     }
 
     #[test]

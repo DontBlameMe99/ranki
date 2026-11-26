@@ -17,8 +17,8 @@ use crate::{
         CONTROL_HEIGHT, FOOTER_HEIGHT, MOTION_PROGRESS_MS, MOTION_QUICK_MS,
         PROGRESS_WIDTH, RATING_GAP, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER,
         SPACE_INLINE, SPACE_RELATED, SPACE_SECTION, STAGE_HEIGHT,
-        STAGE_PADDING, STAGE_RADIUS, STAGE_WIDTH, TOPBAR_HEIGHT, accent_hover,
-        accent_press, alpha, interval_label, rating_fill, rating_label,
+        STAGE_PADDING, STAGE_RADIUS, TOPBAR_HEIGHT, accent_hover, accent_press,
+        alpha, interval_label, rating_fill, rating_label, stage_width,
     },
 };
 
@@ -39,6 +39,7 @@ impl Root {
         let more_due = self.review.more_due;
         let session_complete = self.session_complete();
         let viewport_height = f32::from(window.viewport_size().height);
+        let card_width = stage_width(f32::from(window.viewport_size().width));
         let stage_height = (viewport_height
             - TOPBAR_HEIGHT
             - FOOTER_HEIGHT
@@ -235,7 +236,7 @@ impl Root {
                 .justify_center()
                 .child(
                     div()
-                        .w(px(STAGE_WIDTH))
+                        .w(px(card_width))
                         .flex()
                         .flex_col()
                         .items_center()
@@ -281,7 +282,7 @@ impl Root {
             let summary =
                 div().flex_1().flex().items_center().justify_center().child(
                     div()
-                        .w(px(STAGE_WIDTH))
+                        .w(px(card_width))
                         .flex()
                         .flex_col()
                         .items_center()
@@ -365,7 +366,7 @@ impl Root {
                         .items_center()
                         .justify_center()
                         .gap(px(SPACE_GROUP))
-                        .w(px(STAGE_WIDTH))
+                        .w(px(card_width))
                         .p(px(SPACE_GUTTER))
                         .rounded(px(STAGE_RADIUS))
                         .bg(colors.surface0)
@@ -386,7 +387,7 @@ impl Root {
                 .into_any_element()
         } else {
             let mut stage = div()
-                .w(px(STAGE_WIDTH))
+                .w(px(card_width))
                 .h(px(stage_height))
                 .flex_none()
                 .flex()
@@ -527,7 +528,7 @@ impl Root {
                 .child(if phase == Phase::Question {
                     div()
                         .id("review-reveal")
-                        .w(px(STAGE_WIDTH))
+                        .w(px(card_width))
                         .h(px(CONTROL_HEIGHT))
                         .flex()
                         .items_center()
@@ -550,7 +551,8 @@ impl Root {
                         .child(keycap("Space", colors, true))
                         .into_any_element()
                 } else {
-                    rating_row(colors, &previews, cx).into_any_element()
+                    rating_row(card_width, colors, &previews, cx)
+                        .into_any_element()
                 })
                 .into_any_element()
         };
@@ -723,12 +725,13 @@ fn reading_label(models: &[NoteModel], note: Option<&Note>) -> Option<String> {
 }
 
 fn rating_row(
+    card_width: f32,
     colors: crate::theme::Palette,
     previews: &[i32; 4],
     cx: &Context<Root>,
 ) -> gpui::Div {
     let mut row = div()
-        .w(px(STAGE_WIDTH))
+        .w(px(card_width))
         .h(px(CONTROL_HEIGHT))
         .flex()
         .gap(px(RATING_GAP));
@@ -1013,8 +1016,8 @@ mod tests {
 
     #[test]
     fn short_viewports_leave_room_for_grading_controls() {
-        let stage =
-            (600.0_f32 - 72.0 - 64.0 - 76.0 - 48.0 - 18.0).clamp(220.0, 440.0);
+        let stage = (600.0_f32 - 72.0 - 64.0 - 76.0 - 48.0 - 18.0)
+            .clamp(220.0, crate::theme::STAGE_HEIGHT);
         assert!(stage <= 322.0);
         assert!(stage + 72.0 + 64.0 + 76.0 + 48.0 + 18.0 <= 600.0);
     }
