@@ -1485,6 +1485,13 @@ impl Root {
                 anchor: point(viewport.width - px(408.), px(250.)),
             });
         }
+        if let Ok(index) = env::var("RANKI_UI_DEV_SELECT_ALL")
+            && let Ok(index) = index.parse::<usize>()
+            && let Some(field) = root.add.fields.get(index).cloned()
+        {
+            window.focus(field.read(cx).focus_handle());
+            field.update(cx, super::text_field::TextField::select_all);
+        }
         if env::var("RANKI_UI_DEV_BROWSE_EDIT").is_ok_and(|value| value == "1")
         {
             root.view = View::Browse;

@@ -450,7 +450,7 @@ impl TextField {
         self.select_to(target, cx);
     }
 
-    fn select_all(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn select_all(&mut self, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
     }
@@ -689,7 +689,9 @@ impl Render for TextField {
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
                     this.selecting = true;
                     let index = this.index_for_point(event.position);
-                    if event.click_count >= 2 {
+                    if event.click_count >= 3 {
+                        this.select_all(cx);
+                    } else if event.click_count == 2 {
                         this.select_word_at(index, cx);
                     } else if event.modifiers.shift {
                         this.select_to(index, cx);
@@ -954,7 +956,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn double_click_selects_a_word_in_the_field(cx: &mut gpui::TestAppContext) {
+    fn double_and_triple_click_select_word_then_field(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (field, cx) =
             cx.add_window_view(|_, cx| super::TextField::new(cx, "value"));
         cx.update_entity(&field, |field, cx| field.set_text("hello world", cx));
@@ -980,6 +984,23 @@ mod tests {
         assert_eq!(
             cx.read_entity(&field, |field, _| field.selected_range.clone()),
             6..11
+        );
+
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            button: gpui::MouseButton::Left,
+            modifiers: gpui::Modifiers::none(),
+            click_count: 3,
+            first_mouse: false,
+        });
+        cx.simulate_mouse_up(
+            at,
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        assert_eq!(
+            cx.read_entity(&field, |field, _| field.selected_range.clone()),
+            0..11
         );
     }
 
