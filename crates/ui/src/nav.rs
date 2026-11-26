@@ -9,7 +9,7 @@ use gpui::{
 use crate::{
     app::{Confirmation, Root, UiAction, View},
     components::{
-        ButtonTone, ClickHandler, Interaction, action_button, brand_mark, icon,
+        ButtonTone, ClickHandler, Interaction, action_button, brand, icon,
         keycap, panel, secondary_button,
     },
     theme::{
@@ -26,7 +26,6 @@ impl Root {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let active = self.view;
-        let mark = brand_mark();
         let compact = self.nav_compact();
         let add_selected = active == View::AddCard;
         let add_ink = if add_selected {
@@ -129,21 +128,7 @@ impl Root {
             .gap(px(SPACE_GROUP))
             .px(px(SPACE_GROUP))
             .pb(px(SPACE_BLOCK))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(32.))
-                    .h(px(32.))
-                    .flex_none()
-                    .rounded(px(10.))
-                    .text_color(style.ink())
-                    .text_size(px(mark.glyph))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .bg(colors.mauve)
-                    .child(mark.label),
-            );
+            .child(brand());
         if compact {
             header = header.justify_center();
         } else {
