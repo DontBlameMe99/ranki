@@ -1081,6 +1081,64 @@ fn space_ends_a_completed_session(cx: &mut gpui::TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn space_ends_a_caught_up_session(cx: &mut gpui::TestAppContext) {
+    cx.update(|app| app.bind_keys(super::key_bindings()));
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update_entity(&root, |root, cx| root.study_deck(0, cx));
+    cx.run_until_parked();
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+    assert_eq!(cx.update(|_, cx| root.read(cx).view), View::Review);
+    assert!(cx.update(|_, cx| root.read(cx).review.current.is_none()));
+
+    cx.simulate_keystrokes("space");
+    assert_eq!(cx.update(|_, cx| root.read(cx).view), View::Decks);
+}
+
+#[gpui::test]
+fn space_after_grading_waits_for_debounce(cx: &mut gpui::TestAppContext) {
+    cx.update(|app| app.bind_keys(super::key_bindings()));
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update_entity(&root, |root, cx| {
+        root.view = View::Review;
+        root.review.current = None;
+        root.review.answered = 1;
+        root.review.last_grade_at = Some(std::time::Instant::now());
+        cx.notify();
+    });
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+    cx.simulate_keystrokes("space");
+    assert_eq!(cx.update(|_, cx| root.read(cx).view), View::Review);
+
+    cx.update_entity(&root, |root, _| root.review.last_grade_at = None);
+    cx.simulate_keystrokes("space");
+    assert_eq!(cx.update(|_, cx| root.read(cx).view), View::Decks);
+}
+
 #[test]
 fn tab_moves_focus_in_and_out_of_text_inputs() {
     let mut keymap = gpui::Keymap::default();
