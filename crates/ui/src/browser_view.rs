@@ -35,6 +35,7 @@ pub struct BrowserRow {
     pub front_media: Vec<MediaRef>,
     pub back_media: Vec<MediaRef>,
     pub deck: SharedString,
+    pub tags: SharedString,
     pub model: SharedString,
     /// Table-cell text prepared once with the rendered sides.
     pub preview: SharedString,
@@ -95,6 +96,7 @@ pub fn browser_row(
         back,
         back_media: back_rendered.media,
         deck: SharedString::from(deck),
+        tags: SharedString::from(note.tags.join(", ")),
         model: SharedString::from(model.name.clone()),
     })
 }
@@ -354,9 +356,10 @@ impl Root {
                 .text_color(colors.subtext)
                 .child(browse_cell("QUESTION", 0, colors))
                 .child(browse_cell("DECK", 1, colors))
-                .child(browse_cell("TYPE", 2, colors))
-                .child(browse_cell("STATE", 3, colors))
-                .child(browse_cell("DUE", 4, colors))
+                .child(browse_cell("TAGS", 2, colors))
+                .child(browse_cell("TYPE", 3, colors))
+                .child(browse_cell("STATE", 4, colors))
+                .child(browse_cell("DUE", 5, colors))
                 .child(div().w(px(BROWSE_ACTION_WIDTH)).flex_none()),
         );
         for row in &self.browse.rows {
@@ -426,13 +429,14 @@ impl Root {
                         .child(row.preview.clone()),
                 )
                 .child(browse_cell(row.deck.clone(), 1, colors))
-                .child(browse_cell(row.model.clone(), 2, colors))
+                .child(browse_cell(row.tags.clone(), 2, colors))
+                .child(browse_cell(row.model.clone(), 3, colors))
                 .child(
-                    browse_cell(state, 3, colors)
+                    browse_cell(state, 4, colors)
                         .text_color(color)
                         .font_weight(gpui::FontWeight::SEMIBOLD),
                 )
-                .child(browse_cell(row.due.clone(), 4, colors))
+                .child(browse_cell(row.due.clone(), 5, colors))
                 .child({
                     let menu_open =
                         self.card_menu.is_some_and(|menu| menu.id == id);
@@ -694,7 +698,7 @@ fn browse_meta(
 }
 
 const BROWSE_PREVIEW_WIDTH: f32 = 320.;
-const BROWSE_COLUMNS: [f32; 5] = [1.0, 130., 90., 85., 60.];
+const BROWSE_COLUMNS: [f32; 6] = [1.0, 105., 90., 75., 65., 50.];
 const BROWSE_ACTION_WIDTH: f32 = 30.;
 
 #[cfg(test)]
@@ -805,6 +809,35 @@ mod tests {
         assert_eq!(rows[0].due, "Today");
         assert_eq!(rows[0].key.as_str(), "browse-row-1");
         assert_eq!(rows[0].menu_key.as_str(), "browse-menu-1");
+    }
+    #[test]
+    fn browser_rows_prepare_tags_for_the_table() {
+        let deck = Deck {
+            id: DEFAULT_DECK_ID,
+            name: "Default".to_owned(),
+            description: String::new(),
+        };
+        let note = Note {
+            id: 6,
+            guid: String::new(),
+            model_id: DEFAULT_MODEL_ID,
+            modified: 0,
+            usn: 0,
+            tags: vec!["spanish".to_owned(), "verb".to_owned()],
+            fields: vec!["Hola".to_owned(), "Hello".to_owned()],
+            sort_field: "Hola".to_owned(),
+            checksum: 0,
+            flags: 0,
+            data: String::new(),
+        };
+        let row = browser_row(
+            &card_with_id(6, CardQueue::New, 0),
+            &note,
+            std::slice::from_ref(&deck),
+            std::slice::from_ref(&model()),
+        )
+        .expect("browser row");
+        assert_eq!(row.tags, "spanish, verb");
     }
 
     #[test]
