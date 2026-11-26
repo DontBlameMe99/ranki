@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono.workspace = true
 ranki-format.workspace = true
 ranki-model.workspace = true
 ranki-core.workspace = true
