@@ -124,3 +124,18 @@ pub fn state_path(collection: &Path) -> PathBuf {
     let parent = collection.parent().unwrap_or_else(|| Path::new("."));
     parent.join("ranki-sync.json")
 }
+
+/// Clears the host key while keeping the last sync stamps.
+///
+/// # Errors
+///
+/// Returns an error when an existing state file cannot be read or written.
+pub fn clear_host_key(collection: &Path) -> Result<()> {
+    let path = state_path(collection);
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut state = SyncState::load(&path)?;
+    state.host_key.clear();
+    state.save(&path)
+}

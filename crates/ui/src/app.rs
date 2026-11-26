@@ -707,9 +707,6 @@ impl Root {
         let signed_in = sync_state
             .as_ref()
             .is_some_and(|state| !state.host_key.is_empty());
-        if let Some(name) = options.sync.username.clone() {
-            sync_username.update(cx, |field, cx| field.seed(name, cx));
-        }
         let mut root = Self {
             scheduler: from_settings(&options),
             store,
@@ -2800,11 +2797,8 @@ impl Root {
                 window.focus(self.browse.search.read(cx).focus_handle());
                 cx.notify();
             }
-            UiAction::ToggleSync => {
-                let enabled = !self.options.sync.enabled;
-                self.set_sync_enabled(enabled, cx);
-            }
             UiAction::SyncSignIn => self.sign_in(cx),
+            UiAction::SyncSignOut => self.sign_out(cx),
             UiAction::SyncNow => self.sync_now(cx),
             UiAction::SyncKeepLocal => self.resolve_sync_conflict(true, cx),
             UiAction::SyncKeepRemote => self.resolve_sync_conflict(false, cx),
@@ -2993,11 +2987,11 @@ impl Render for Root {
             .on_action(cx.listener(|this, action: &NextDeck, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleSync, window, cx| {
-                this.dispatch(UiAction::ToggleSync, window, cx);
-            }))
             .on_action(cx.listener(|this, _: &SyncSignIn, window, cx| {
                 this.dispatch(UiAction::SyncSignIn, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SyncSignOut, window, cx| {
+                this.dispatch(UiAction::SyncSignOut, window, cx);
             }))
             .on_action(cx.listener(|this, _: &SyncNow, window, cx| {
                 this.dispatch(UiAction::SyncNow, window, cx);

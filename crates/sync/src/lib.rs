@@ -31,7 +31,7 @@ mod wire;
 pub use client::{Credentials, RemoteStatus, SyncClient, SyncOutcome};
 pub use error::{Result, SyncError};
 pub use mock::{MockResponse, MockTransport, RecordedRequest};
-pub use state::{SyncState, state_path};
+pub use state::{SyncState, clear_host_key, state_path};
 pub use transport::{
     DEFAULT_CLIENT_VERSION, DEFAULT_ENDPOINT, HttpTransport,
     META_CLIENT_VERSION, ORIGINAL_SIZE_HEADER, RetryPolicy, SyncMethod,
