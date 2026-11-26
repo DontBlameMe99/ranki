@@ -1276,6 +1276,15 @@ impl Root {
         if let Ok(prefill) = env::var("RANKI_UI_DEV_FIELDS") {
             root.seed_fields(&prefill, cx);
         }
+        if let Ok(spec) = env::var("RANKI_UI_DEV_SELECT_WORD")
+            && let Some((index, offset)) = spec.split_once(':')
+            && let Ok(index) = index.parse::<usize>()
+            && let Ok(offset) = offset.parse::<usize>()
+            && let Some(field) = root.add.fields.get(index).cloned()
+        {
+            window.focus(field.read(cx).focus_handle());
+            field.update(cx, |field, cx| field.select_word_at(offset, cx));
+        }
         if let Ok(tags) = env::var("RANKI_UI_DEV_TAGS") {
             root.add.tag_chips =
                 tags.split_whitespace().map(str::to_owned).collect();

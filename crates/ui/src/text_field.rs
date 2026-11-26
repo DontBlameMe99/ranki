@@ -140,6 +140,38 @@ fn byte_at_char(text: &str, index: usize) -> usize {
         .nth(index)
         .map_or(text.len(), |(offset, _)| offset)
 }
+
+fn is_word_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+/// Byte range of the word touching `offset`, if the click landed on a word.
+fn word_range_at(text: &str, offset: usize) -> Option<Range<usize>> {
+    let offset = text.floor_char_boundary(offset.min(text.len()));
+    let before = text.get(..offset)?.chars().next_back();
+    let after = text.get(offset..)?.chars().next();
+    if !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char) {
+        return None;
+    }
+
+    let mut start = offset;
+    for (index, character) in text.get(..offset)?.char_indices().rev() {
+        if !is_word_char(character) {
+            break;
+        }
+        start = index;
+    }
+    let mut end = offset;
+    for (index, character) in text.get(offset..)?.char_indices() {
+        if !is_word_char(character) {
+            break;
+        }
+        end = offset
+            .saturating_add(index)
+            .saturating_add(character.len_utf8());
+    }
+    (start < end).then_some(start..end)
+}
 impl TextField {
     #[must_use]
     pub fn new(
@@ -331,6 +363,20 @@ impl TextField {
                 self.selected_range.end..self.selected_range.start;
         }
         cx.notify();
+    }
+
+    pub(crate) fn select_word_at(
+        &mut self,
+        offset: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(range) = word_range_at(&self.content, offset) {
+            self.selected_range = range;
+            self.selection_reversed = false;
+            cx.notify();
+        } else {
+            self.move_to(offset, cx);
+        }
     }
 
     fn index_for_point(&self, point: Point<Pixels>) -> usize {
@@ -643,7 +689,9 @@ impl Render for TextField {
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
                     this.selecting = true;
                     let index = this.index_for_point(event.position);
-                    if event.modifiers.shift {
+                    if event.click_count >= 2 {
+                        this.select_word_at(index, cx);
+                    } else if event.modifiers.shift {
                         this.select_to(index, cx);
                     } else {
                         this.move_to(index, cx);
@@ -872,7 +920,9 @@ impl Element for TextElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{byte_at_char, chars_before, key_bindings, wrap_selection};
+    use super::{
+        byte_at_char, chars_before, key_bindings, word_range_at, wrap_selection,
+    };
 
     use gpui::{AppContext, ClipboardItem, point, px, size};
     #[test]
@@ -891,6 +941,46 @@ mod tests {
         let bindings = key_bindings();
         assert_eq!(bindings.len(), 16);
         assert!(!bindings.is_empty());
+    }
+
+    #[test]
+    fn word_range_finds_the_word_under_a_click() {
+        assert_eq!(word_range_at("hello world", 2), Some(0..5));
+        assert_eq!(word_range_at("hello world", 6), Some(6..11));
+        assert_eq!(word_range_at("hello world!", 11), Some(6..11));
+        assert_eq!(word_range_at("a_b c", 2), Some(0..3));
+        assert_eq!(word_range_at("hello 世界!", 7), Some(6..12));
+        assert_eq!(word_range_at("  ", 1), None);
+    }
+
+    #[gpui::test]
+    fn double_click_selects_a_word_in_the_field(cx: &mut gpui::TestAppContext) {
+        let (field, cx) =
+            cx.add_window_view(|_, cx| super::TextField::new(cx, "value"));
+        cx.update_entity(&field, |field, cx| field.set_text("hello world", cx));
+        cx.draw(point(px(0.), px(0.)), size(px(200.), px(20.)), |_, _| {
+            field.clone()
+        });
+        let x = cx.read_entity(&field, |field, _| {
+            field.last_layout.as_ref().map(|line| line.x_for_index(7))
+        });
+        let at = point(x.unwrap_or(px(0.)), px(10.));
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            button: gpui::MouseButton::Left,
+            modifiers: gpui::Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_mouse_up(
+            at,
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        assert_eq!(
+            cx.read_entity(&field, |field, _| field.selected_range.clone()),
+            6..11
+        );
     }
 
     #[test]
