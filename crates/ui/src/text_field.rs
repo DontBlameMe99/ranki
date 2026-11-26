@@ -3,13 +3,13 @@
 use std::{ops::Range, sync::Arc};
 
 use gpui::{
-    App, Bounds, ContentMask, Context, Element, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
-    UnderlineStyle, Window, actions, div, fill, hsla, point, prelude::*, px,
-    size,
+    App, Bounds, ClipboardItem, ContentMask, Context, Element,
+    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable,
+    GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PaintQuad, Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun,
+    UTF16Selection, UnderlineStyle, Window, actions, div, fill, hsla, point,
+    prelude::*, px, size,
 };
 
 /// Called after each edit so the owning view can refresh derived state.
@@ -25,6 +25,9 @@ actions!(
         FieldSelectLeft,
         FieldSelectRight,
         FieldSelectAll,
+        FieldCopy,
+        FieldCut,
+        FieldPaste,
         FieldHome,
         FieldEnd,
     ]
@@ -42,6 +45,12 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-right", FieldSelectRight, Some("ranki_input")),
         KeyBinding::new("cmd-a", FieldSelectAll, Some("ranki_input")),
         KeyBinding::new("ctrl-a", FieldSelectAll, Some("ranki_input")),
+        KeyBinding::new("cmd-c", FieldCopy, Some("ranki_input")),
+        KeyBinding::new("ctrl-c", FieldCopy, Some("ranki_input")),
+        KeyBinding::new("cmd-x", FieldCut, Some("ranki_input")),
+        KeyBinding::new("ctrl-x", FieldCut, Some("ranki_input")),
+        KeyBinding::new("cmd-v", FieldPaste, Some("ranki_input")),
+        KeyBinding::new("ctrl-v", FieldPaste, Some("ranki_input")),
         KeyBinding::new("home", FieldHome, Some("ranki_input")),
         KeyBinding::new("end", FieldEnd, Some("ranki_input")),
     ]
@@ -400,6 +409,32 @@ impl TextField {
         self.select_to(self.content.len(), cx);
     }
 
+    fn copy(&self, cx: &mut Context<Self>) {
+        if self.secure {
+            return;
+        }
+        let Some(text) = self.content.get(self.selected_range.clone()) else {
+            return;
+        };
+        if !text.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+        }
+    }
+
+    fn cut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.copy(cx);
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+        else {
+            return;
+        };
+        let single_line = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
+        self.replace_text_in_range(None, &single_line, window, cx);
+    }
+
     fn home(&mut self, cx: &mut Context<Self>) {
         self.move_to(0, cx);
     }
@@ -593,6 +628,13 @@ impl Render for TextField {
             }))
             .on_action(cx.listener(|this, _: &FieldSelectAll, _, cx| {
                 this.select_all(cx);
+            }))
+            .on_action(cx.listener(|this, _: &FieldCopy, _, cx| this.copy(cx)))
+            .on_action(cx.listener(|this, _: &FieldCut, window, cx| {
+                this.cut(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FieldPaste, window, cx| {
+                this.paste(window, cx);
             }))
             .on_action(cx.listener(|this, _: &FieldHome, _, cx| this.home(cx)))
             .on_action(cx.listener(|this, _: &FieldEnd, _, cx| this.end(cx)))
@@ -832,6 +874,7 @@ impl Element for TextElement {
 mod tests {
     use super::{byte_at_char, chars_before, key_bindings, wrap_selection};
 
+    use gpui::{AppContext, ClipboardItem, point, px, size};
     #[test]
     fn secure_field_offsets_map_characters_to_bytes() {
         let text = "a日本b";
@@ -846,8 +889,85 @@ mod tests {
     #[test]
     fn input_context_defines_navigation_keys() {
         let bindings = key_bindings();
-        assert_eq!(bindings.len(), 10);
+        assert_eq!(bindings.len(), 16);
         assert!(!bindings.is_empty());
+    }
+
+    #[test]
+    fn clipboard_keys_are_bound_in_input_context() {
+        let mut keymap = gpui::Keymap::default();
+        keymap.add_bindings(key_bindings());
+        let context =
+            [gpui::KeyContext::parse("ranki_input").expect("input context")];
+        for key in ["cmd-c", "ctrl-c", "cmd-x", "ctrl-x", "cmd-v", "ctrl-v"] {
+            let stroke = gpui::Keystroke::parse(key).expect("keystroke");
+            let (bindings, _) = keymap
+                .bindings_for_input(std::slice::from_ref(&stroke), &context);
+            assert_eq!(bindings.len(), 1, "{key}");
+        }
+    }
+
+    #[gpui::test]
+    fn copy_and_paste_shortcuts_work_in_text_fields(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|app| app.bind_keys(key_bindings()));
+        let (field, cx) =
+            cx.add_window_view(|_, cx| super::TextField::new(cx, "value"));
+        cx.update_entity(&field, |field, cx| field.set_text("hello", cx));
+        cx.update(|window, cx| window.focus(field.read(cx).focus_handle()));
+        cx.draw(point(px(0.), px(0.)), size(px(200.), px(20.)), |_, _| {
+            field.clone()
+        });
+
+        cx.simulate_keystrokes("ctrl-a ctrl-c");
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("hello")
+        );
+
+        cx.update_entity(&field, super::TextField::clear);
+        cx.write_to_clipboard(ClipboardItem::new_string(String::from(
+            "pasted",
+        )));
+        cx.simulate_keystrokes("ctrl-v");
+        assert_eq!(cx.read_entity(&field, |field, _| field.text()), "pasted");
+
+        cx.update_entity(&field, |field, cx| field.set_text("cut me", cx));
+        cx.simulate_keystrokes("ctrl-a ctrl-x");
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("cut me")
+        );
+        assert_eq!(cx.read_entity(&field, |field, _| field.text()), "");
+
+        cx.write_to_clipboard(ClipboardItem::new_string(String::from(
+            "first\r\nsecond\nthird",
+        )));
+        cx.simulate_keystrokes("ctrl-v");
+        assert_eq!(
+            cx.read_entity(&field, |field, _| field.text()),
+            "first second third"
+        );
+        cx.draw(point(px(0.), px(0.)), size(px(200.), px(20.)), |_, _| {
+            field.clone()
+        });
+
+        cx.update_entity(&field, |field, cx| {
+            field.set_secure(true, cx);
+            field.set_text("secret", cx);
+        });
+        cx.simulate_keystrokes("ctrl-a ctrl-c");
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("first\r\nsecond\nthird")
+        );
     }
 
     #[test]
