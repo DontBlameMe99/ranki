@@ -1430,10 +1430,10 @@ fn draft_validation_blocks_empty_and_cloze_without_marker() {
 
 #[test]
 fn empty_states_are_distinct() {
-    assert_eq!(empty_kind(0, 0, 0), EmptyKind::NoDecks);
-    assert_eq!(empty_kind(1, 1, 0), EmptyKind::CaughtUp);
-    assert_eq!(empty_kind(1, 0, 3), EmptyKind::NoMatch);
-    assert_eq!(empty_kind(1, 3, 3), EmptyKind::None);
+    assert_eq!(empty_kind(0, 0), EmptyKind::NoDecks);
+    assert_eq!(empty_kind(1, 1), EmptyKind::None);
+    assert_eq!(empty_kind(1, 0), EmptyKind::NoMatch);
+    assert_eq!(empty_kind(1, 3), EmptyKind::None);
     assert_eq!(empty_copy(EmptyKind::NoDecks).0, "No decks yet");
 }
 

@@ -14,7 +14,7 @@ use crate::{
     },
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED,
-        SPACE_SECTION, Style, TABLE_COLUMNS, alpha, blend, queue_text,
+        SPACE_SECTION, Style, TABLE_COLUMNS, alpha, queue_text,
     },
 };
 
@@ -34,10 +34,8 @@ impl Root {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = self.colors();
-        let style = Style::new(colors, self.theme());
         let rows = self.visible_deck_rows(cx);
         let totals = self.leaf_totals;
-        let due = due_total(totals);
         let smooth = self.motion_ms(1) > 0;
         self.decks_scroll.advance(window, smooth);
 
@@ -115,7 +113,7 @@ impl Root {
                                 .child(keycap("/", colors, false)),
                         )
                         .child(
-                            Interaction::accent(style)
+                            Interaction::raised(colors)
                                 .apply(
                                     div()
                                         .id("decks-create")
@@ -125,14 +123,14 @@ impl Root {
                                         .h(px(44.))
                                         .px(px(SPACE_BLOCK))
                                         .rounded(px(12.))
-                                        .bg(colors.mauve)
-                                        .text_color(style.ink())
+                                        .bg(colors.surface0)
+                                        .text_color(colors.text)
                                         .text_size(px(14.))
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .cursor_pointer(),
                                 )
                                 .on_click(create_click)
-                                .child(icon("icon-plus", 18., style.ink()))
+                                .child(icon("icon-plus", 18., colors.text))
                                 .child("Create deck"),
                         ),
                 ),
@@ -140,7 +138,7 @@ impl Root {
 
         content = content.child(self.render_summary(totals, cx));
 
-        let kind = app::empty_kind(self.decks.len(), rows.len(), due);
+        let kind = app::empty_kind(self.decks.len(), rows.len());
         if !rows.is_empty() {
             let mut row_tops = Vec::with_capacity(rows.len().saturating_add(1));
             let mut rows_height = 0.0;
@@ -249,13 +247,6 @@ impl Root {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let due = due_total(totals);
-        // Accent ink only reads on the mauve fill. With nothing due the pill
-        // falls back to surface1, so its label and icon take the surface1 ink.
-        let study_all_ink = if due > 0 {
-            style.ink()
-        } else {
-            crate::theme::keycap_ink(colors)
-        };
         let queue_stat = |label: &str, value: usize, color: Rgba| {
             div()
                 .flex_1()
@@ -320,51 +311,32 @@ impl Root {
                                     ),
                             )
                             .child(
-                                if due > 0 {
-                                    Interaction::accent(style)
-                                } else {
-                                    Interaction::new(
-                                        alpha(colors.text, 0.0),
-                                        blend(
-                                            colors.surface1,
-                                            colors.surface0,
-                                            0.5,
-                                        ),
-                                        blend(
-                                            colors.surface1,
-                                            colors.crust,
-                                            0.14,
-                                        ),
-                                        colors.mauve,
+                                Interaction::accent(style)
+                                    .apply(
+                                        div()
+                                            .id("decks-study-all")
+                                            .flex()
+                                            .flex_none()
+                                            .items_center()
+                                            .gap(px(SPACE_GROUP))
+                                            .h(px(52.))
+                                            .px(px(SPACE_SECTION))
+                                            .rounded(px(26.))
+                                            .bg(colors.mauve)
+                                            .text_color(style.ink())
+                                            .text_size(px(16.))
+                                            .font_weight(
+                                                gpui::FontWeight::SEMIBOLD,
+                                            )
+                                            .cursor_pointer(),
                                     )
-                                }
-                                .apply(
-                                    div()
-                                        .id("decks-study-all")
-                                        .flex()
-                                        .flex_none()
-                                        .items_center()
-                                        .gap(px(SPACE_GROUP))
-                                        .h(px(52.))
-                                        .px(px(SPACE_SECTION))
-                                        .rounded(px(26.))
-                                        .bg(if due > 0 {
-                                            colors.mauve
-                                        } else {
-                                            colors.surface1
-                                        })
-                                        .text_color(study_all_ink)
-                                        .text_size(px(16.))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .cursor_pointer(),
-                                )
-                                .on_click(cx.listener(
-                                    |this, _: &ClickEvent, _, cx| {
-                                        this.study_all(cx);
-                                    },
-                                ))
-                                .child(icon("icon-play", 18., study_all_ink))
-                                .child("Study all"),
+                                    .on_click(cx.listener(
+                                        |this, _: &ClickEvent, _, cx| {
+                                            this.study_all(cx);
+                                        },
+                                    ))
+                                    .child(icon("icon-play", 18., style.ink()))
+                                    .child("Study all"),
                             ),
                     )
                     .child(
@@ -817,9 +789,6 @@ impl Root {
         let (label, action) = match kind {
             app::EmptyKind::NoDecks => ("Create deck", UiAction::CreateDeck),
             app::EmptyKind::NoMatch => ("Clear search", UiAction::ClearSearch),
-            app::EmptyKind::CaughtUp => {
-                ("Study another deck", UiAction::NextDeck)
-            }
             app::EmptyKind::None => ("", UiAction::OpenDecks),
         };
         div()

@@ -3599,17 +3599,11 @@ pub const fn rating_name(rating: Rating) -> &'static str {
 }
 
 #[must_use]
-pub const fn empty_kind(
-    deck_count: usize,
-    matching_rows: usize,
-    due: usize,
-) -> EmptyKind {
+pub const fn empty_kind(deck_count: usize, matching_rows: usize) -> EmptyKind {
     if deck_count == 0 {
         EmptyKind::NoDecks
     } else if matching_rows == 0 {
         EmptyKind::NoMatch
-    } else if due == 0 {
-        EmptyKind::CaughtUp
     } else {
         EmptyKind::None
     }
@@ -3620,7 +3614,6 @@ pub enum EmptyKind {
     None,
     NoDecks,
     NoMatch,
-    CaughtUp,
 }
 
 #[must_use]
@@ -3630,7 +3623,6 @@ pub const fn empty_copy(kind: EmptyKind) -> (&'static str, &'static str) {
             ("No decks yet", "Create a deck to start studying")
         }
         EmptyKind::NoMatch => ("No decks match", "Try a different search"),
-        EmptyKind::CaughtUp => ("All caught up", "No cards are due right now"),
         EmptyKind::None => ("", ""),
     }
 }
