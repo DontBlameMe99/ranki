@@ -1981,20 +1981,7 @@ impl Root {
         };
         let now = Self::now();
         let start = self.collection_start;
-        self.review.previews = [
-            self.scheduler.preview(
-                card,
-                ranki_model::Rating::Again,
-                now,
-                start,
-            ),
-            self.scheduler
-                .preview(card, ranki_model::Rating::Hard, now, start),
-            self.scheduler
-                .preview(card, ranki_model::Rating::Good, now, start),
-            self.scheduler
-                .preview(card, ranki_model::Rating::Easy, now, start),
-        ];
+        self.review.previews = self.scheduler.preview_all(card, now, start);
     }
 
     pub(crate) fn grade(&mut self, rating: Rating, cx: &mut Context<Self>) {
