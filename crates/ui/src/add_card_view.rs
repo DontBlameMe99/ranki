@@ -1054,7 +1054,7 @@ const MARKUP_BUTTONS: [(&str, &str, &str, bool, Option<&'static str>); 5] = [
         false,
         Some("icon-code"),
     ),
-    ("Math", "\\[", "\\]", false, Some("icon-math")),
+    ("Math", "\\(", "\\)", false, Some("icon-math")),
 ];
 
 /// Field formatting bar plus the keyboard hint, under the first field.
@@ -1467,5 +1467,15 @@ mod tests {
         let (text, caret) = crate::text_field::insert_at("front", 0..5, &image);
         assert_eq!(text, "<img src=\"diagram.png\">");
         assert_eq!(caret, text.len());
+    }
+
+    #[test]
+    fn math_button_uses_inline_mathjax_delimiters() {
+        let (_, open, close, _, _) = super::MARKUP_BUTTONS
+            .iter()
+            .find(|button| button.0 == "Math")
+            .copied()
+            .unwrap_or(("", "", "", false, None));
+        assert_eq!((open, close), ("\\(", "\\)"));
     }
 }

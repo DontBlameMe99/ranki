@@ -48,6 +48,405 @@ pub enum ClozeKind {
     Inactive,
 }
 
+/// `MathJax` markup in a field becomes these display spans. Anki stores inline
+/// math between `\(` and `\)` and display math between `\[` and `\]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MathSegment {
+    pub text: String,
+    pub kind: MathKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MathKind {
+    Text,
+    Inline,
+    Block,
+}
+
+const MATH_DELIMITERS: [(&str, &str, MathKind); 3] = [
+    ("\\(", "\\)", MathKind::Inline),
+    ("\\[", "\\]", MathKind::Block),
+    ("$$", "$$", MathKind::Block),
+];
+
+/// Splits card text into plain runs and `MathJax` expressions.
+#[must_use]
+pub fn math_segments(input: &str) -> Vec<MathSegment> {
+    let mut segments = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rest) = input.get(cursor..) {
+        let mut found: Option<(usize, &str, &str, MathKind)> = None;
+        for (open, close, kind) in MATH_DELIMITERS {
+            if let Some(at) = rest.find(open)
+                && found.is_none_or(|(earliest, ..)| at < earliest)
+            {
+                found = Some((at, open, close, kind));
+            }
+        }
+        let Some((at, open, close, kind)) = found else {
+            break;
+        };
+        let start = cursor.saturating_add(at);
+        let body_start = start.saturating_add(open.len());
+        let Some(body) = input.get(body_start..) else {
+            break;
+        };
+        let Some(end) = body.find(close) else {
+            push_plain_segment(
+                &mut segments,
+                input.get(cursor..body_start).unwrap_or(""),
+            );
+            cursor = body_start;
+            continue;
+        };
+        push_plain_segment(
+            &mut segments,
+            input.get(cursor..start).unwrap_or(""),
+        );
+        let expression = body.get(..end).unwrap_or("");
+        segments.push(MathSegment {
+            text: display_math(expression),
+            kind,
+        });
+        cursor = body_start.saturating_add(end).saturating_add(close.len());
+    }
+    push_plain_segment(&mut segments, input.get(cursor..).unwrap_or(""));
+    segments
+}
+
+fn push_plain_segment(segments: &mut Vec<MathSegment>, text: &str) {
+    if !text.is_empty() {
+        segments.push(MathSegment {
+            text: text.to_owned(),
+            kind: MathKind::Text,
+        });
+    }
+}
+
+/// Converts the common `MathJax` subset to glyphs a native text run can show.
+fn display_math(expression: &str) -> String {
+    let mut output = String::with_capacity(expression.len());
+    let mut cursor = 0usize;
+    while let Some(rest) = expression.get(cursor..) {
+        if rest.is_empty() {
+            break;
+        }
+        if rest.starts_with('\\') {
+            if let Some((command, glyph)) = math_symbol(rest) {
+                output.push_str(glyph);
+                cursor = cursor.saturating_add(command.len());
+                while expression.get(cursor..).is_some_and(|tail| {
+                    tail.starts_with(|character: char| {
+                        character.is_ascii_whitespace()
+                    })
+                }) {
+                    cursor = cursor.saturating_add(1);
+                }
+                continue;
+            }
+            let fraction = ["\\dfrac", "\\tfrac", "\\frac"]
+                .into_iter()
+                .find(|command| rest.starts_with(command));
+            if let Some(command) = fraction {
+                cursor = cursor.saturating_add(command.len());
+                let (numerator, next) = math_argument(expression, cursor);
+                cursor = next;
+                let (denominator, next) = math_argument(expression, cursor);
+                cursor = next;
+                output.push('(');
+                output.push_str(&fraction_part(&numerator));
+                output.push('/');
+                output.push_str(&fraction_part(&denominator));
+                output.push(')');
+                continue;
+            }
+            if rest.starts_with("\\sqrt") {
+                cursor = cursor.saturating_add("\\sqrt".len());
+                let (radicand, next) = math_argument(expression, cursor);
+                cursor = next;
+                output.push('√');
+                output.push_str(&radicand);
+                continue;
+            }
+            let name = rest
+                .get(1..)
+                .unwrap_or("")
+                .chars()
+                .take_while(char::is_ascii_alphabetic)
+                .count();
+            let unknown = rest.get(..name.saturating_add(1)).unwrap_or(rest);
+            output.push_str(unknown);
+            cursor = cursor.saturating_add(unknown.len());
+            if expression
+                .get(cursor..)
+                .is_some_and(|tail| tail.starts_with('{'))
+            {
+                let (group, next) = raw_group(expression, cursor);
+                output.push_str(&group);
+                cursor = next;
+            }
+            continue;
+        }
+        if rest.starts_with('{') {
+            let (group, next) =
+                math_group(expression, cursor.saturating_add(1));
+            cursor = next;
+            output.push_str(&group);
+            continue;
+        }
+        if rest.starts_with('^') || rest.starts_with('_') {
+            let superscript = rest.starts_with('^');
+            let after = cursor.saturating_add(1);
+            let (token, next) = math_argument(expression, after);
+            cursor = next;
+            if let Some(script) = script_glyph(&token, superscript) {
+                output.push_str(&script);
+            } else {
+                output.push(if superscript { '^' } else { '_' });
+                output.push_str(&token);
+            }
+            continue;
+        }
+        let Some(character) = rest.chars().next() else {
+            break;
+        };
+        output.push(character);
+        cursor = cursor.saturating_add(character.len_utf8());
+    }
+    output
+}
+
+/// Keeps a slash fraction unambiguous when its part has several terms.
+fn fraction_part(text: &str) -> String {
+    let compound = text.chars().any(|character| {
+        character.is_whitespace()
+            || matches!(character, '+' | '-' | '=' | '/' | '×' | '÷')
+    });
+    if compound {
+        format!("({text})")
+    } else {
+        text.to_owned()
+    }
+}
+
+/// Reads a braced group or the next single token as a math argument.
+fn math_argument(input: &str, start: usize) -> (String, usize) {
+    if input.get(start..).is_some_and(|rest| rest.starts_with('{')) {
+        math_group(input, start.saturating_add(1))
+    } else {
+        let (token, next) = math_token(input, start);
+        (display_math(&token), next)
+    }
+}
+
+/// Copies a braced group verbatim, including its braces.
+fn raw_group(input: &str, start: usize) -> (String, usize) {
+    let mut depth = 0usize;
+    let mut cursor = start;
+    while let Some(rest) = input.get(cursor..) {
+        if rest.is_empty() {
+            break;
+        }
+        if rest.starts_with('\\') {
+            cursor = cursor.saturating_add(1);
+        }
+        if rest.starts_with('{') {
+            depth = depth.saturating_add(1);
+        } else if rest.starts_with('}') {
+            if depth == 0 {
+                let end = cursor.saturating_add(1);
+                return (input.get(start..end).unwrap_or("").to_owned(), end);
+            }
+            depth = depth.saturating_sub(1);
+        }
+        let Some(character) = rest.chars().next() else {
+            break;
+        };
+        cursor = cursor.saturating_add(character.len_utf8());
+    }
+    (input.get(start..).unwrap_or("").to_owned(), input.len())
+}
+
+/// Reads one brace-balanced group and renders its contents.
+fn math_group(input: &str, start: usize) -> (String, usize) {
+    let mut depth = 0usize;
+    let mut cursor = start;
+    while let Some(rest) = input.get(cursor..) {
+        if rest.is_empty() {
+            break;
+        }
+        if rest.starts_with('\\') {
+            cursor = cursor.saturating_add(1);
+            continue;
+        }
+        if rest.starts_with('{') {
+            depth = depth.saturating_add(1);
+        } else if rest.starts_with('}') {
+            if depth == 0 {
+                let group = input.get(start..cursor).unwrap_or("");
+                return (display_math(group), cursor.saturating_add(1));
+            }
+            depth = depth.saturating_sub(1);
+        }
+        let Some(character) = rest.chars().next() else {
+            break;
+        };
+        cursor = cursor.saturating_add(character.len_utf8());
+    }
+    (display_math(input.get(start..).unwrap_or("")), input.len())
+}
+
+/// Reads a command or a single character used as a script.
+fn math_token(input: &str, start: usize) -> (String, usize) {
+    let Some(rest) = input.get(start..) else {
+        return (String::new(), input.len());
+    };
+    if rest.starts_with('\\') {
+        let length = rest
+            .get(1..)
+            .unwrap_or("")
+            .chars()
+            .take_while(char::is_ascii_alphabetic)
+            .count()
+            .saturating_add(1);
+        let token = rest.get(..length).unwrap_or(rest);
+        return (token.to_owned(), start.saturating_add(token.len()));
+    }
+    let Some(character) = rest.chars().next() else {
+        return (String::new(), input.len());
+    };
+    (
+        character.to_string(),
+        start.saturating_add(character.len_utf8()),
+    )
+}
+
+/// Maps `MathJax` commands to Unicode symbols. Longest commands come first.
+fn math_symbol(input: &str) -> Option<(&'static str, &'static str)> {
+    const SYMBOLS: &[(&str, &str)] = &[
+        ("\\Leftrightarrow", "⇔"),
+        ("\\Longrightarrow", "⟹"),
+        ("\\qquad", "  "),
+        ("\\rightarrow", "→"),
+        ("\\leftarrow", "←"),
+        ("\\Rightarrow", "⇒"),
+        ("\\varepsilon", "ε"),
+        ("\\varnothing", "∅"),
+        ("\\ldots", "…"),
+        ("\\partial", "∂"),
+        ("\\nabla", "∇"),
+        ("\\notin", "∉"),
+        ("\\subset", "⊂"),
+        ("\\alpha", "α"),
+        ("\\beta", "β"),
+        ("\\gamma", "γ"),
+        ("\\delta", "δ"),
+        ("\\epsilon", "ε"),
+        ("\\theta", "θ"),
+        ("\\lambda", "λ"),
+        ("\\sigma", "σ"),
+        ("\\omega", "ω"),
+        ("\\Gamma", "Γ"),
+        ("\\Delta", "Δ"),
+        ("\\Theta", "Θ"),
+        ("\\Lambda", "Λ"),
+        ("\\Sigma", "Σ"),
+        ("\\Omega", "Ω"),
+        ("\\times", "×"),
+        ("\\cdot", "⋅"),
+        ("\\sum", "∑"),
+        ("\\prod", "∏"),
+        ("\\int", "∫"),
+        ("\\infty", "∞"),
+        ("\\approx", "≈"),
+        ("\\neq", "≠"),
+        ("\\sim", "∼"),
+        ("\\leq", "≤"),
+        ("\\geq", "≥"),
+        ("\\forall", "∀"),
+        ("\\exists", "∃"),
+        ("\\cup", "∪"),
+        ("\\cap", "∩"),
+        ("\\dots", "…"),
+        ("\\quad", " "),
+        ("\\left", ""),
+        ("\\right", ""),
+        ("\\text", ""),
+        ("\\pi", "π"),
+        ("\\mu", "μ"),
+        ("\\phi", "φ"),
+        ("\\div", "÷"),
+        ("\\pm", "±"),
+        ("\\le", "≤"),
+        ("\\ge", "≥"),
+        ("\\ne", "≠"),
+        ("\\in", "∈"),
+        ("\\to", "→"),
+        ("\\,", ""),
+        ("\\;", ""),
+        ("\\!", ""),
+        ("\\ ", " "),
+    ];
+    SYMBOLS
+        .iter()
+        .find(|(command, _)| {
+            if !input.starts_with(command) {
+                return false;
+            }
+            let letter = command
+                .chars()
+                .last()
+                .is_some_and(|character| character.is_ascii_alphabetic());
+            let next = input
+                .get(command.len()..)
+                .and_then(|tail| tail.chars().next());
+            !letter
+                || !next
+                    .is_some_and(|character| character.is_ascii_alphabetic())
+        })
+        .copied()
+}
+
+/// Converts scripts into Unicode where the alphabet has matching glyphs.
+fn script_glyph(token: &str, superscript: bool) -> Option<String> {
+    let digit = if superscript {
+        "⁰¹²³⁴⁵⁶⁷⁸⁹"
+    } else {
+        "₀₁₂₃₄₅₆₇₈₉"
+    };
+    let mut output = String::with_capacity(token.len());
+    for character in token.chars() {
+        let glyph = match (character, superscript) {
+            ('0'..='9', _) => character
+                .to_digit(10)
+                .and_then(|value| usize::try_from(value).ok())
+                .and_then(|index| digit.chars().nth(index))
+                .unwrap_or(character),
+            ('+', true) => '⁺',
+            ('+', false) => '₊',
+            ('-', true) => '⁻',
+            ('-', false) => '₋',
+            ('=', true) => '⁼',
+            ('=', false) => '₌',
+            ('(', true) => '⁽',
+            ('(', false) => '₍',
+            (')', true) => '⁾',
+            (')', false) => '₎',
+            ('n', false) => 'ₙ',
+            ('i', false) => 'ᵢ',
+            ('j', false) => 'ⱼ',
+            ('n', true) => 'ⁿ',
+            ('i', true) => 'ⁱ',
+            (other, _) => other,
+        };
+        if glyph == character && !character.is_ascii_digit() {
+            return None;
+        }
+        output.push(glyph);
+    }
+    Some(output)
+}
+
 /// Occlusion overlay with image-relative coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaskOverlay {
@@ -97,6 +496,20 @@ pub fn strip_tags(input: &str) -> String {
                 break;
             }
             continue;
+        }
+        if let Some((open, close)) =
+            MATH_DELIMITERS.iter().find_map(|(open, close, _)| {
+                rest.starts_with(open).then_some((*open, *close))
+            })
+        {
+            let after = rest.get(open.len()..).unwrap_or("");
+            if let Some(end) = after.find(close) {
+                let length =
+                    open.len().saturating_add(end).saturating_add(close.len());
+                output.push_str(rest.get(..length).unwrap_or(""));
+                cursor = cursor.saturating_add(length);
+                continue;
+            }
         }
         if rest.starts_with('<') {
             let Some(end) = rest.find('>') else {
@@ -424,4 +837,82 @@ fn parse_points(text: &str, width: f32, height: f32) -> Vec<(f32, f32)> {
             ))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod math_tests {
+    use super::{MathKind, math_segments, strip_tags};
+
+    #[test]
+    fn inline_math_uses_anki_delimiters() {
+        let segments = math_segments("Area \\(\\pi r^2\\) here");
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].text, "Area ");
+        assert_eq!(segments[0].kind, MathKind::Text);
+        assert_eq!(segments[1].text, "πr²");
+        assert_eq!(segments[1].kind, MathKind::Inline);
+        assert_eq!(segments[2].text, " here");
+    }
+
+    #[test]
+    fn display_math_stays_on_its_own_span() {
+        let segments = math_segments("\\[\\frac{a}{b}\\]");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "(a/b)");
+        assert_eq!(segments[0].kind, MathKind::Block);
+    }
+
+    #[test]
+    fn incomplete_math_stays_visible() {
+        let segments = math_segments("\\(x + y");
+        let text = segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+        assert_eq!(text, "\\(x + y");
+        assert!(
+            segments
+                .iter()
+                .all(|segment| segment.kind == MathKind::Text)
+        );
+    }
+
+    #[test]
+    fn common_math_renders_as_unicode() {
+        let segments = math_segments("\\(\\sqrt{x_1} \\leq \\alpha_{n}\\)");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "√x₁ ≤αₙ");
+    }
+
+    #[test]
+    fn unknown_commands_are_kept() {
+        let segments = math_segments("\\(\\operatorname{sin} x\\)");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "\\operatorname{sin} x");
+        let segments = math_segments("\\(\\text{bold}\\)");
+        assert_eq!(segments[0].text, "bold");
+        let segments = math_segments("\\(\\textbf{bold}\\)");
+        assert_eq!(segments[0].text, "\\textbf{bold}");
+    }
+
+    #[test]
+    fn fraction_keeps_compound_parts_grouped() {
+        let segments = math_segments("\\(\\frac{a+b}{c}\\)");
+        assert_eq!(segments[0].text, "((a+b)/c)");
+    }
+
+    #[test]
+    fn a_later_pair_survives_an_unclosed_opener() {
+        let segments = math_segments("a \\(b $$x^2$$");
+        let texts = segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["a \\(", "b ", "x²"]);
+    }
+
+    #[test]
+    fn strip_tags_keeps_math_inequalities() {
+        assert_eq!(strip_tags("x \\(a < b\\) y"), "x \\(a < b\\) y");
+    }
 }
