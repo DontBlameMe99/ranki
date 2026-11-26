@@ -312,17 +312,9 @@ impl Fixture {
     }
 
     #[cfg(feature = "gui")]
-    fn options(&self) -> Settings {
-        Settings {
-            paths: ranki_model::DataPaths::new(&self.data_home),
-            ..Settings::default()
-        }
-    }
-
-    #[cfg(feature = "gui")]
     fn app(&self) -> BenchResult<BenchApp> {
         let store = Box::new(Collection::open(&self.collection)?);
-        Ok(BenchApp::new(store, &self.options()))
+        Ok(BenchApp::new(store, &Settings::default()))
     }
 }
 
