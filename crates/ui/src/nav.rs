@@ -362,6 +362,7 @@ impl Root {
                         div()
                             .id("deck-actions-menu")
                             .debug_selector(|| "deck-actions-menu".to_owned())
+                            .occlude()
                             .on_mouse_down_out(cx.listener(
                                 move |this,
                                       event: &gpui::MouseDownEvent,
@@ -386,6 +387,9 @@ impl Root {
                                     .apply(
                                         div()
                                             .id("decks-rename")
+                                            .debug_selector(|| {
+                                                "decks-rename".to_owned()
+                                            })
                                             .w_full()
                                             .px(px(SPACE_RELATED))
                                             .py(px(SPACE_GROUP))
@@ -406,6 +410,9 @@ impl Root {
                                     .apply(
                                         div()
                                             .id("decks-remove")
+                                            .debug_selector(|| {
+                                                "decks-remove".to_owned()
+                                            })
                                             .w_full()
                                             .px(px(SPACE_RELATED))
                                             .py(px(SPACE_GROUP))
@@ -690,6 +697,7 @@ impl Root {
                     .items_center()
                     .justify_center()
                     .bg(crate::theme::alpha(colors.crust, 0.7))
+                    .occlude()
                     .key_context("ranki_dialog")
                     .track_focus(&self.dialog_focus)
                     .on_action(cx.listener(
