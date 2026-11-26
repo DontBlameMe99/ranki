@@ -884,7 +884,7 @@ impl Root {
             .child(div().text_size(px(15.)).child(row.front.clone()))
             .children(card_view::media_column(
                 &row.front_media,
-                &self.options.media_dir,
+                &self.options.paths.media_dir,
                 colors,
                 180.0,
             ))
@@ -899,7 +899,7 @@ impl Root {
             .child(div().text_size(px(15.)).child(row.back.clone()))
             .children(card_view::media_column(
                 &row.back_media,
-                &self.options.media_dir,
+                &self.options.paths.media_dir,
                 colors,
                 180.0,
             ));

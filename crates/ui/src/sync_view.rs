@@ -14,7 +14,7 @@ use ranki_storage::ReopeningCollection;
 
 use ranki_sync::{
     Credentials, HttpTransport, RetryPolicy, SyncClient, SyncOutcome,
-    SyncState, SyncTransport, TransportConfig, state_path,
+    SyncState, SyncTransport, TransportConfig,
 };
 
 use crate::{
@@ -24,8 +24,8 @@ use crate::{
 };
 
 /// Reads the local sync state without changing it.
-pub fn read_state(collection: &Path) -> Option<SyncState> {
-    SyncState::load(&state_path(collection)).ok()
+pub fn read_state(state_path: &Path) -> Option<SyncState> {
+    SyncState::load(state_path).ok()
 }
 
 fn sync_status(busy: bool) -> Option<&'static str> {
@@ -132,6 +132,7 @@ fn retained_conflict(
 fn build_client(
     collection: &Path,
     media_dir: &Path,
+    state_path: &Path,
     retries: u8,
     backoff_ms: u64,
 ) -> Result<SyncClient<HttpTransport>, String> {
@@ -145,21 +146,25 @@ fn build_client(
             ..TransportConfig::default()
         },
     );
-    SyncClient::new(transport, collection, media_dir, &state_path(collection))
+    SyncClient::new(transport, collection, media_dir, state_path)
         .map_err(|error| error.to_string())
 }
 
 /// Runs one collection sync with the window's transport settings.
-pub type SyncRun =
-    dyn Fn(&Path, &Path, u8, u64) -> Result<SyncOutcome, String> + Send + Sync;
+/// Runs one collection sync with the window's transport settings.
+pub type SyncRun = dyn Fn(&Path, &Path, &Path, u8, u64) -> Result<SyncOutcome, String>
+    + Send
+    + Sync;
 
 pub fn run_sync(
     collection: &Path,
     media_dir: &Path,
+    state_path: &Path,
     retries: u8,
     backoff_ms: u64,
 ) -> Result<SyncOutcome, String> {
-    let mut client = build_client(collection, media_dir, retries, backoff_ms)?;
+    let mut client =
+        build_client(collection, media_dir, state_path, retries, backoff_ms)?;
     client.sync(None).map_err(|error| error.to_string())
 }
 impl Root {
@@ -167,7 +172,8 @@ impl Root {
         if self.sync.busy {
             return;
         }
-        if let Err(error) = ranki_sync::clear_host_key(&self.options.collection)
+        if let Err(error) =
+            ranki_sync::clear_host_key(&self.options.paths.sync_state)
         {
             self.show_toast(
                 ToastKind::Error,
@@ -218,13 +224,19 @@ impl Root {
         self.sync.busy = true;
         cx.notify();
 
-        let collection = self.options.collection.clone();
-        let media_dir = self.options.media_dir.clone();
+        let collection = self.options.paths.collection.clone();
+        let media_dir = self.options.paths.media_dir.clone();
+        let sync_state = self.options.paths.sync_state.clone();
         let retries = self.options.sync.retries;
         let backoff_ms = self.options.sync.backoff_ms;
         let task = cx.background_executor().spawn(async move {
-            let mut client =
-                build_client(&collection, &media_dir, retries, backoff_ms)?;
+            let mut client = build_client(
+                &collection,
+                &media_dir,
+                &sync_state,
+                retries,
+                backoff_ms,
+            )?;
             login_and_sync(&mut client, username, password)
         });
         cx.spawn(async move |this, cx| {
@@ -276,13 +288,14 @@ impl Root {
         self.sync.busy = true;
         cx.notify();
 
-        let collection = self.options.collection.clone();
-        let media_dir = self.options.media_dir.clone();
+        let collection = self.options.paths.collection.clone();
+        let media_dir = self.options.paths.media_dir.clone();
+        let sync_state = self.options.paths.sync_state.clone();
         let retries = self.options.sync.retries;
         let backoff_ms = self.options.sync.backoff_ms;
         let runner = Arc::clone(&self.sync_run);
         let task = cx.background_executor().spawn(async move {
-            runner(&collection, &media_dir, retries, backoff_ms)
+            runner(&collection, &media_dir, &sync_state, retries, backoff_ms)
         });
         Self::spawn_sync_task(task, false, None, true, cx);
     }
@@ -295,13 +308,14 @@ impl Root {
         self.sync.busy = true;
         cx.notify();
 
-        let collection = self.options.collection.clone();
-        let media_dir = self.options.media_dir.clone();
+        let collection = self.options.paths.collection.clone();
+        let media_dir = self.options.paths.media_dir.clone();
+        let sync_state = self.options.paths.sync_state.clone();
         let retries = self.options.sync.retries;
         let backoff_ms = self.options.sync.backoff_ms;
         let runner = Arc::clone(&self.sync_run);
         let task = cx.background_executor().spawn(async move {
-            runner(&collection, &media_dir, retries, backoff_ms)
+            runner(&collection, &media_dir, &sync_state, retries, backoff_ms)
         });
         Self::spawn_sync_task(task, false, reason, false, cx);
     }
@@ -318,13 +332,19 @@ impl Root {
         self.sync.busy = true;
         cx.notify();
 
-        let collection = self.options.collection.clone();
-        let media_dir = self.options.media_dir.clone();
+        let collection = self.options.paths.collection.clone();
+        let media_dir = self.options.paths.media_dir.clone();
+        let sync_state = self.options.paths.sync_state.clone();
         let retries = self.options.sync.retries;
         let backoff_ms = self.options.sync.backoff_ms;
         let task = cx.background_executor().spawn(async move {
-            let mut client =
-                build_client(&collection, &media_dir, retries, backoff_ms)?;
+            let mut client = build_client(
+                &collection,
+                &media_dir,
+                &sync_state,
+                retries,
+                backoff_ms,
+            )?;
             if keep_local {
                 client
                     .full_upload()
@@ -415,8 +435,9 @@ impl Root {
     }
 
     fn reopen_collection(&mut self, cx: &mut Context<Self>) {
-        self.store =
-            Box::new(ReopeningCollection::new(&self.options.collection));
+        self.store = Box::new(ReopeningCollection::new(
+            &self.options.paths.collection,
+        ));
         self.reload_collection(cx);
     }
 
@@ -627,7 +648,7 @@ fn labeled_input(
 mod tests {
     use ranki_sync::{
         MockResponse, MockTransport, SyncClient, SyncMethod, SyncOutcome,
-        SyncState, clear_host_key, state_path,
+        SyncState, clear_host_key,
     };
     use serde_json::json;
 
@@ -640,7 +661,7 @@ mod tests {
         let Ok(directory) = tempfile::tempdir() else {
             return;
         };
-        let collection = directory.path().join("collection.anki2");
+        let state_path = directory.path().join("ranki-sync.json");
         let state = SyncState {
             host_key: String::from("stored-key"),
             last_success: Some(1_700_000_000),
@@ -649,10 +670,10 @@ mod tests {
         let Ok(text) = serde_json::to_string(&state) else {
             return;
         };
-        if std::fs::write(state_path(&collection), text).is_err() {
+        if std::fs::write(&state_path, text).is_err() {
             return;
         }
-        let loaded = read_state(&collection).unwrap_or_default();
+        let loaded = read_state(&state_path).unwrap_or_default();
         assert_eq!(loaded.host_key, "stored-key");
         assert_eq!(loaded.last_success, Some(1_700_000_000));
     }
@@ -687,7 +708,7 @@ mod tests {
                 }))
                 .unwrap(),
             );
-        let state_path = state_path(&collection);
+        let state_path = directory.path().join("ranki-sync.json");
         let Ok(mut client) = SyncClient::new(
             transport,
             &collection,
@@ -784,8 +805,7 @@ mod tests {
         let Ok(directory) = tempfile::tempdir() else {
             return;
         };
-        let collection = directory.path().join("collection.anki2");
-        let path = state_path(&collection);
+        let state_path = directory.path().join("ranki-sync.json");
         let state = SyncState {
             host_key: String::from("stored-key"),
             last_mod: Some(7),
@@ -795,12 +815,12 @@ mod tests {
         let Ok(text) = serde_json::to_string(&state) else {
             return;
         };
-        assert!(std::fs::write(&path, text).is_ok());
-        assert!(clear_host_key(&collection).is_ok());
-        let saved = read_state(&collection).unwrap_or_default();
+        assert!(std::fs::write(&state_path, text).is_ok());
+        assert!(clear_host_key(&state_path).is_ok());
+        let saved = read_state(&state_path).unwrap_or_default();
         assert_eq!(saved.host_key, "");
         assert_eq!(saved.last_mod, Some(7));
         assert_eq!(saved.last_scm, Some(8));
-        assert!(clear_host_key(&collection).is_ok());
+        assert!(clear_host_key(&state_path).is_ok());
     }
 }

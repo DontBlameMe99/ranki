@@ -1083,12 +1083,10 @@ mod tests {
     #[test]
     fn auto_sync_uploads_at_shutdown_after_a_command_changes_the_collection() {
         let directory = tempfile::tempdir().unwrap();
-        let collection = directory.path().join("collection.anki2");
-        let media = directory.path().join("collection.media");
-        assert!(crate::open_or_create(&collection).is_ok());
-        let state_path = super::sync::state_path(&collection);
+        let paths = ranki_model::DataPaths::new(directory.path());
+        assert!(crate::open_or_create(&paths.collection).is_ok());
         fs::write(
-            &state_path,
+            &paths.sync_state,
             serde_json::json!({
                 "version": 1,
                 "endpoint": ranki_sync::DEFAULT_ENDPOINT,
@@ -1108,14 +1106,15 @@ mod tests {
                 SyncMethod::Upload,
                 MockResponse::ok_bytes(b"OK".to_vec()).unwrap(),
             ),
-            &collection,
-            &media,
-            &state_path,
+            &paths.collection,
+            &paths.media_dir,
+            &paths.sync_state,
         )
         .unwrap();
         seed.full_upload().unwrap();
         let state: serde_json::Value =
-            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(&paths.sync_state).unwrap())
+                .unwrap();
         let mod_time = state["last_mod"].as_i64().unwrap();
         let scm = state["last_scm"].as_i64().unwrap();
         let meta = MockResponse::ok_json(&serde_json::json!({
@@ -1139,8 +1138,6 @@ mod tests {
         config.scheduler.auto_optimize = false;
         let cli = parse(&[
             "ranki",
-            "--collection",
-            collection.to_str().unwrap(),
             "add-note",
             "--model",
             "Basic",
@@ -1151,7 +1148,7 @@ mod tests {
             "--field",
             "Answer!",
         ]);
-        run_with_sync(cli, &mut config, &mut transport).unwrap();
+        run_with_sync(cli, &mut config, &mut transport, paths).unwrap();
         let methods: Vec<_> = transport
             .requests()
             .iter()

@@ -1189,7 +1189,7 @@ fn finishing_a_session_starts_one_quiet_sync(cx: &mut gpui::TestAppContext) {
             .expect("note");
     }
     let options = Options {
-        collection,
+        paths: ranki_model::DataPaths::new(dir.path()),
         sync: ranki_model::SyncSettings {
             enabled: true,
             ..Default::default()
@@ -1209,7 +1209,7 @@ fn finishing_a_session_starts_one_quiet_sync(cx: &mut gpui::TestAppContext) {
             cx,
         );
         root.sync.signed_in = true;
-        root.sync_run = Arc::new(move |_, _, _, _| {
+        root.sync_run = Arc::new(move |_, _, _, _, _| {
             counted.fetch_add(1, Ordering::Relaxed);
             Ok(ranki_sync::SyncOutcome::Uploaded)
         });
