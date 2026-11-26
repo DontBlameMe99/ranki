@@ -475,6 +475,19 @@ pub trait Store {
     /// # Errors
     /// Returns [`StoreError`] if the collection cannot be read.
     fn models(&self) -> Result<Vec<NoteModel>, StoreError>;
+
+    /// Lists distinct tags already used by notes in the collection.
+    ///
+    /// Implementations without tag storage return
+    /// [`StoreError::Unsupported`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
+    fn tags(&self) -> Result<Vec<String>, StoreError> {
+        Err(StoreError::Unsupported(
+            "tags are not supported by this store".to_owned(),
+        ))
+    }
     /// Installs a stock note type and returns the stored model.
     ///
     /// Returns the collection's existing model when it already has that stock

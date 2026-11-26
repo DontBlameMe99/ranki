@@ -29,6 +29,7 @@ actions!(
         UseLightTheme,
         UseDarkTheme,
         UseSystemTheme,
+        AcceptTagSuggestion,
         SubmitDeck,
         SaveNote,
         CancelAdd,

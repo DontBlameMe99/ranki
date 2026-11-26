@@ -386,6 +386,22 @@ fn add_note_stores_anki_fields_tags_sort_field_and_checksum() {
 }
 
 #[test]
+fn tags_lists_distinct_tags_from_every_note() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let _ = store
+        .add_note(&note(&["first", "back"], &["japan", "verb"]))
+        .expect("add first");
+    let _ = store
+        .add_note(&note(&["second", "back"], &["verb", "noun"]))
+        .expect("add second");
+    assert_eq!(store.tags().expect("tags"), ["japan", "noun", "verb"]);
+
+    let reopened = ReopeningCollection::new(&path);
+    assert_eq!(reopened.tags().expect("tags"), ["japan", "noun", "verb"]);
+}
+
+#[test]
 fn add_note_creates_one_card_per_template() {
     let (_directory, path) = fixture();
     {

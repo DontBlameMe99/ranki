@@ -24,6 +24,7 @@ mod schema;
 mod search;
 
 use std::cell::OnceCell;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Display;
@@ -521,6 +522,21 @@ impl Store for Collection {
 
     fn models(&self) -> Result<Vec<NoteModel>, StoreError> {
         self.model_list()
+    }
+
+    fn tags(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT tags FROM notes")
+            .map_err(backend)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(backend)?;
+        let mut tags = BTreeSet::new();
+        for row in rows {
+            tags.extend(anki::decode_tags(&row.map_err(backend)?));
+        }
+        Ok(tags.into_iter().collect())
     }
 
     fn ensure_model(
