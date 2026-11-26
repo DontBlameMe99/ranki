@@ -23,6 +23,7 @@ use crate::{
     Options, SettingsSaver, ThemeChoice,
     browser_view::BrowseState,
     card_view::{self, MediaKind, MediaRef, RenderedCard},
+    components::warm_brand,
     occlusion::{
         self, MaskShape, NormalizedRect, OcclusionMask, image_occlusion_fields,
     },
@@ -663,6 +664,7 @@ impl Root {
             options,
             save_settings,
         } = launch;
+        warm_brand(cx);
         let focus = cx.focus_handle();
         let dialog_focus = cx.focus_handle();
         let settings_focus = cx.focus_handle();

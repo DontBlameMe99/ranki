@@ -5,26 +5,79 @@ use std::{borrow::Cow, fs, path::PathBuf};
 use gpui::{AssetSource, Result, SharedString};
 
 // Crane's source filter drops non-Rust assets, so the icon ships as a
-// constant. `assets/rai.svg` stays the editable copy.
-const RAI: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="800" height="800" viewBox="0 0 211.6667 211.66669">
-  <defs>
-    <filter id="glow" style="color-interpolation-filters:sRGB;" x="-0.056453245" y="-0.13570336" width="1.1329358" height="1.3195536">
-      <feOffset dx="3" dy="3"/>
-      <feGaussianBlur stdDeviation="3" result="blur"/>
-      <feFlood flood-color="rgb(0,0,0)" flood-opacity="1" result="flood"/>
-      <feComposite in="flood" in2="SourceGraphic" operator="in" result="composite"/>
-      <feBlend in="blur" in2="composite" mode="normal" result="fbSourceGraphic"/>
-      <feColorMatrix in="fbSourceGraphic" values="0 0 0 -1 0 0 0 0 -1 0 0 0 0 -1 0 0 0 0 1 0"/>
-      <feColorMatrix in="fbSourceGraphic" values="1.3 0 0 0.0345 -0.15 0 1.3 0 0.0345 -0.15 0 0 1.3 0.0345 -0.15 0 0 0 1 0"/>
+// constant. `assets/rai.svg` stays the editable copy; RAI is its text-free
+// build so the wordmark does not depend on installed fonts.
+pub const RAI: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="800"
+   height="800"
+   viewBox="0 0 211.6667 211.66669"
+   version="1.1"
+   id="svg4"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs2">
+    <filter
+       id="glow"
+       style="color-interpolation-filters:sRGB;"
+       x="-0.082707436"
+       y="-0.13798849"
+       width="1.194759"
+       height="1.3249346">
+      <feOffset
+         dx="3"
+         dy="3"
+         id="feOffset1" />
+      <feGaussianBlur
+         stdDeviation="3"
+         result="blur"
+         id="feGaussianBlur1" />
+      <feFlood
+         flood-color="rgb(0,0,0)"
+         flood-opacity="1"
+         result="flood"
+         id="feFlood1" />
+      <feComposite
+         in="flood"
+         in2="SourceGraphic"
+         operator="in"
+         result="composite"
+         id="feComposite1" />
+      <feBlend
+         in="blur"
+         in2="composite"
+         mode="normal"
+         result="fbSourceGraphic"
+         id="feBlend1" />
+      <feColorMatrix
+         in="fbSourceGraphic"
+         values="0 0 0 -1 0 0 0 0 -1 0 0 0 0 -1 0 0 0 0 1 0"
+         id="feColorMatrix1" />
+      <feColorMatrix
+         in="fbSourceGraphic"
+         values="1.3 0 0 0.0345 -0.15 0 1.3 0 0.0345 -0.15 0 0 1.3 0.0345 -0.15 0 0 0 1 0"
+         id="feColorMatrix2" />
     </filter>
   </defs>
-  <text
-     xml:space="preserve"
-     style="font-weight:bold;font-size:79.375px;font-family:Comfortaa;fill:#000000;fill-rule:evenodd;stroke:#181825;stroke-width:2.51118;stroke-opacity:1;stroke-linejoin:round;paint-order:markers fill stroke;filter:url(#glow)"
-     x="4.7136173"
-     y="147.98276"
-     transform="translate(23.41563,0.95911) matrix(1.0246445,0,0,0.96727946,17.908656,-8.9300719)"><tspan style="fill:#cba6f7">r</tspan><tspan style="fill:#94e2d5">a</tspan><tspan style="fill:#f38ba8">i</tspan></text>
+  <g
+     id="text4"
+     style="font-weight:bold;font-size:79.375px;font-family:Comfortaa;fill-rule:evenodd;stroke:#181825;stroke-width:2.51118;stroke-linejoin:round;paint-order:markers fill stroke;filter:url(#glow)"
+     transform="matrix(1.0246445,0,0,0.96727946,41.324286,-7.9709619)"
+     aria-label="rai">
+    <path
+       style="fill:#cba6f7"
+       d="m 15.826117,147.98276 q -3.96875,0 -3.96875,-3.96875 v -35.48063 q 0,-3.96875 3.96875,-3.96875 3.96875,0 3.96875,3.96875 v 1.50813 q 2.38125,-2.77813 5.794375,-4.36563 3.4925,-1.5875 7.540625,-1.5875 4.7625,0 7.064375,1.5875 2.38125,1.50813 1.825625,3.65125 -0.396875,1.66688 -1.5875,2.2225 -1.190625,0.47625 -2.778125,0.15875 -5.08,-1.03187 -9.128125,-0.15875 -4.048125,0.87313 -6.429375,3.25438 -2.301875,2.38125 -2.301875,6.0325 v 23.1775 q 0,3.96875 -3.96875,3.96875 z"
+       id="path4" />
+    <path
+       style="fill:#94e2d5"
+       d="m 68.531123,148.30026 q -5.794375,0 -10.398125,-2.8575 -4.60375,-2.93688 -7.3025,-7.85813 -2.619375,-5.00062 -2.619375,-11.27125 0,-6.27062 2.8575,-11.27125 2.936875,-5.00062 7.858125,-7.85812 5.000625,-2.93688 11.191875,-2.93688 6.19125,0 11.1125,2.93688 4.92125,2.8575 7.77875,7.85812 2.936875,5.00063 2.936875,11.27125 v 17.70063 q 0,1.74625 -1.190625,2.93687 -1.11125,1.11125 -2.8575,1.11125 -1.74625,0 -2.936875,-1.11125 -1.11125,-1.19062 -1.11125,-2.93687 v -2.93688 q -2.778125,3.33375 -6.746875,5.31813 -3.889375,1.905 -8.5725,1.905 z m 1.5875,-7.14375 q 4.048125,0 7.223125,-1.905 3.175,-1.98438 5.000625,-5.31813 1.825625,-3.41312 1.825625,-7.62 0,-4.28625 -1.825625,-7.62 -1.825625,-3.41312 -5.000625,-5.31812 -3.175,-1.98438 -7.223125,-1.98438 -3.96875,0 -7.223125,1.98438 -3.175,1.905 -5.08,5.31812 -1.825625,3.33375 -1.825625,7.62 0,4.20688 1.825625,7.62 1.905,3.33375 5.08,5.31813 3.254375,1.905 7.223125,1.905 z"
+       id="path5" />
+    <path
+       style="fill:#f38ba8"
+       d="m 108.85356,147.98276 q -1.74625,0 -2.93687,-1.11125 -1.11125,-1.19063 -1.11125,-2.93688 v -35.32187 q 0,-1.82563 1.11125,-2.93688 1.19062,-1.11125 2.93687,-1.11125 1.82563,0 2.93688,1.11125 1.11125,1.11125 1.11125,2.93688 v 35.32187 q 0,1.74625 -1.11125,2.93688 -1.11125,1.11125 -2.93688,1.11125 z m 0,-50.482502 q -2.14312,0 -3.73062,-1.508125 -1.50813,-1.5875 -1.50813,-3.730625 0,-2.143125 1.50813,-3.65125 1.5875,-1.5875 3.73062,-1.5875 2.14313,0 3.65125,1.5875 1.5875,1.508125 1.5875,3.65125 0,2.143125 -1.5875,3.730625 -1.50812,1.508125 -3.65125,1.508125 z"
+       id="path6" />
+  </g>
 </svg>
 "#;
 
@@ -166,11 +219,16 @@ mod tests {
     }
 
     #[test]
-    fn embedded_logo_matches_the_asset_copy() {
+    fn embedded_logo_uses_the_asset_colors_without_text() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("assets/rai.svg");
         if let Ok(svg) = std::fs::read_to_string(path) {
-            assert!(RAI.contains(svg.trim()));
+            assert!(RAI.contains("viewBox=\"0 0 211.6667 211.66669\""));
+            assert!(!RAI.contains("<text"));
+            for color in ["#cba6f7", "#94e2d5", "#f38ba8"] {
+                assert!(svg.contains(color));
+                assert!(RAI.contains(color));
+            }
         }
     }
 }
