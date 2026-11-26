@@ -882,12 +882,12 @@ fn footer_button(
     let (bg, ink) = if primary {
         (colors.mauve, crate::theme::accent_ink(theme))
     } else {
-        (colors.mantle, colors.text)
+        (colors.surface0, colors.text)
     };
     let hover = if primary {
         accent_hover(theme)
     } else {
-        colors.surface0
+        crate::theme::blend(colors.surface0, colors.surface1, 0.5)
     };
     let border = if primary {
         colors.mauve
@@ -897,7 +897,7 @@ fn footer_button(
     let press = if primary {
         accent_press(theme)
     } else {
-        colors.surface1
+        crate::theme::blend(colors.surface0, colors.surface1, 0.75)
     };
     Interaction::new(
         border,

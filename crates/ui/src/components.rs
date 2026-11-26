@@ -9,7 +9,7 @@ use gpui::{
 use crate::theme::{
     BUTTON_HEIGHT, BUTTON_PADDING_X, BUTTON_RADIUS, BUTTON_TEXT_SIZE, Palette,
     SPACE_GROUP, SPACE_INLINE, SPACE_RELATED, Style, accent_hover,
-    accent_press, alpha, blend, keycap_ink,
+    accent_press, alpha, blend, danger_hover, danger_press, keycap_ink,
 };
 
 pub type ClickHandler =
@@ -138,6 +138,108 @@ pub fn icon_tile(name: &'static str, hue: Rgba) -> Div {
         .child(icon(name, 18., hue))
 }
 
+/// Visual weight of an action button. Primary marks the intended next step,
+/// Neutral covers cancellation and alternatives, Danger marks deletion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ButtonTone {
+    Primary,
+    Neutral,
+    Danger,
+}
+
+/// Outline, rest fill, ink, hover fill, pressed fill, and focus ring.
+struct Shades {
+    border: Rgba,
+    fill: Rgba,
+    ink: Rgba,
+    hover: Rgba,
+    press: Rgba,
+    focus: Rgba,
+}
+
+fn tone_shades(tone: ButtonTone, style: Style) -> Shades {
+    let colors = style.colors;
+    match tone {
+        ButtonTone::Primary => Shades {
+            border: alpha(colors.text, 0.0),
+            fill: colors.mauve,
+            ink: style.ink(),
+            hover: accent_hover(style.theme),
+            press: accent_press(style.theme),
+            focus: style.ink(),
+        },
+        ButtonTone::Neutral => neutral_shades(colors),
+        ButtonTone::Danger => Shades {
+            border: alpha(colors.text, 0.0),
+            fill: colors.red,
+            ink: style.ink(),
+            hover: danger_hover(style.theme),
+            press: danger_press(style.theme),
+            focus: style.ink(),
+        },
+    }
+}
+
+fn neutral_shades(colors: Palette) -> Shades {
+    // The hover stops short of surface1: Latte body text only clears 4.5:1
+    // on a fill that stays between surface0 and surface1.
+    Shades {
+        border: colors.surface1,
+        fill: colors.surface0,
+        ink: colors.text,
+        hover: blend(colors.surface0, colors.surface1, 0.5),
+        press: blend(colors.surface0, colors.surface1, 0.75),
+        focus: colors.mauve,
+    }
+}
+
+fn tone_button(
+    id: SharedString,
+    label: SharedString,
+    shades: Shades,
+    on_click: ClickHandler,
+) -> impl IntoElement {
+    let debug = id.clone();
+    Interaction::new(shades.border, shades.hover, shades.press, shades.focus)
+        .apply(
+            div()
+                .id(id)
+                .debug_selector(move || debug.to_string())
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(SPACE_GROUP))
+                .h(px(BUTTON_HEIGHT))
+                .px(px(BUTTON_PADDING_X))
+                .rounded(px(BUTTON_RADIUS))
+                .bg(shades.fill)
+                .text_color(shades.ink)
+                .text_size(px(BUTTON_TEXT_SIZE))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .cursor_pointer(),
+        )
+        .on_click(on_click)
+        .child(label)
+}
+
+/// Filled action button for forms, dialogs, and empty states.
+#[must_use]
+pub fn action_button(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    tone: ButtonTone,
+    style: Style,
+    on_click: ClickHandler,
+) -> impl IntoElement {
+    tone_button(
+        SharedString::from(id),
+        label.into(),
+        tone_shades(tone, style),
+        on_click,
+    )
+}
+
+/// Outline button for the alternative to a primary action.
 #[must_use]
 pub fn secondary_button(
     label: impl Into<SharedString>,
@@ -146,58 +248,7 @@ pub fn secondary_button(
 ) -> impl IntoElement {
     let label = label.into();
     let id = SharedString::from(format!("secondary-{label}"));
-    Interaction::new(
-        colors.surface1,
-        colors.surface0,
-        colors.surface1,
-        colors.mauve,
-    )
-    .apply(
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap(px(SPACE_GROUP))
-            .h(px(BUTTON_HEIGHT))
-            .px(px(BUTTON_PADDING_X))
-            .rounded(px(BUTTON_RADIUS))
-            .text_color(colors.text)
-            .text_size(px(BUTTON_TEXT_SIZE))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .cursor_pointer(),
-    )
-    .on_click(on_click)
-    .child(label)
-}
-
-#[must_use]
-pub fn small_button(
-    label: impl Into<SharedString>,
-    style: Style,
-    on_click: ClickHandler,
-) -> impl IntoElement {
-    let label = label.into();
-    let id = SharedString::from(format!("small-{label}"));
-    Interaction::accent(style)
-        .apply(
-            div()
-                .id(id.clone())
-                .debug_selector(|| id.to_string())
-                .flex()
-                .items_center()
-                .justify_center()
-                .h(px(BUTTON_HEIGHT))
-                .px(px(BUTTON_PADDING_X))
-                .rounded(px(BUTTON_RADIUS))
-                .bg(style.colors.mauve)
-                .text_color(style.ink())
-                .text_size(px(BUTTON_TEXT_SIZE))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .cursor_pointer(),
-        )
-        .on_click(on_click)
-        .child(label)
+    tone_button(id, label, neutral_shades(colors), on_click)
 }
 
 /// Fades an element in where it first paints. The clock starts on the frame
@@ -371,8 +422,41 @@ pub fn progress_bar(
 
 #[cfg(test)]
 mod tests {
-    use super::{Interaction, brand_mark};
-    use crate::theme::{MOCHA, Style, Theme, accent_hover, accent_press};
+    use super::{ButtonTone, Interaction, brand_mark, tone_shades};
+    use crate::theme::{
+        LATTE, MOCHA, Style, Theme, accent_hover, accent_press, contrast,
+    };
+
+    #[test]
+    fn action_tones_keep_filled_ink_readable_in_both_themes() {
+        for style in [
+            Style::new(MOCHA, Theme::Dark),
+            Style::new(LATTE, Theme::Light),
+        ] {
+            let primary = tone_shades(ButtonTone::Primary, style);
+            let neutral = tone_shades(ButtonTone::Neutral, style);
+            let danger = tone_shades(ButtonTone::Danger, style);
+            assert_eq!(primary.fill, style.colors.mauve);
+            assert_eq!(neutral.fill, style.colors.surface0);
+            assert_eq!(neutral.border, style.colors.surface1);
+            assert_eq!(danger.fill, style.colors.red);
+            assert_eq!(primary.ink, style.ink());
+            assert_eq!(danger.ink, style.ink());
+            assert!(contrast(primary.ink, primary.fill) >= 4.5);
+            assert!(contrast(primary.ink, primary.hover) >= 4.5);
+            assert!(contrast(primary.ink, primary.press) >= 4.5);
+            assert!(contrast(danger.ink, danger.fill) >= 4.5);
+            assert!(contrast(danger.ink, danger.hover) >= 4.5);
+            assert!(contrast(danger.ink, danger.press) >= 4.5);
+            assert!(contrast(neutral.ink, neutral.fill) >= 4.5);
+            assert!(contrast(neutral.ink, neutral.hover) >= 4.5);
+            assert!(contrast(neutral.ink, neutral.press) >= 4.5);
+        }
+        assert_ne!(
+            Style::new(MOCHA, Theme::Dark).ink(),
+            Style::new(LATTE, Theme::Light).ink()
+        );
+    }
 
     #[test]
     fn brand_mark_fills_the_tile_at_32_px() {

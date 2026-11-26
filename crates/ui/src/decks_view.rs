@@ -10,7 +10,9 @@ use gpui::{
 
 use crate::{
     app::{self, Root, UiAction, due_total, leaf_deck_totals},
-    components::{Interaction, icon, icon_tile, keycap},
+    components::{
+        ButtonTone, Interaction, action_button, icon, icon_tile, keycap,
+    },
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED,
         SPACE_SECTION, Style, TABLE_COLUMNS, alpha, blend, queue_text,
@@ -49,6 +51,7 @@ impl Root {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = self.colors();
+        let style = Style::new(colors, self.theme());
         let rows = self.visible_deck_rows(cx);
         let totals = leaf_deck_totals(&self.decks, &self.stats);
         let due = due_total(totals);
@@ -129,28 +132,25 @@ impl Root {
                                 .child(keycap("/", colors, false)),
                         )
                         .child(
-                            Interaction::new(
-                                colors.surface1,
-                                colors.surface0,
-                                colors.surface1,
-                                colors.mauve,
-                            )
-                            .apply(
-                                div()
-                                    .id("decks-create")
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(SPACE_GROUP))
-                                    .h(px(44.))
-                                    .px(px(SPACE_BLOCK))
-                                    .rounded(px(12.))
-                                    .text_size(px(14.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .cursor_pointer(),
-                            )
-                            .on_click(create_click)
-                            .child(icon("icon-plus", 18., colors.text))
-                            .child("Create deck"),
+                            Interaction::accent(style)
+                                .apply(
+                                    div()
+                                        .id("decks-create")
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(SPACE_GROUP))
+                                        .h(px(44.))
+                                        .px(px(SPACE_BLOCK))
+                                        .rounded(px(12.))
+                                        .bg(colors.mauve)
+                                        .text_color(style.ink())
+                                        .text_size(px(14.))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .cursor_pointer(),
+                                )
+                                .on_click(create_click)
+                                .child(icon("icon-plus", 18., style.ink()))
+                                .child("Create deck"),
                         ),
                 ),
         );
@@ -656,21 +656,16 @@ impl Root {
                         )
                         .child(self.rename_field.clone()),
                 )
-                .child(
-                    Interaction::surface(colors)
-                        .apply(
-                            div()
-                                .id("decks-save-rename")
-                                .text_size(px(13.))
-                                .text_color(colors.mauve)
-                                .cursor_pointer(),
-                        )
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.apply_rename(cx);
-                        }))
-                        .child("Save"),
-                );
+                .child(action_button(
+                    "decks-save-rename",
+                    "Save",
+                    ButtonTone::Primary,
+                    style,
+                    Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.apply_rename(cx);
+                    })),
+                ));
         }
         let count = |value: usize, color: Rgba| {
             div()

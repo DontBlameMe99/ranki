@@ -17,7 +17,7 @@ use ranki_sync::{
 
 use crate::{
     app::{Root, ToastKind},
-    components::{icon, small_button},
+    components::{ButtonTone, action_button, icon},
     theme::{Palette, SPACE_BLOCK, SPACE_GROUP, SPACE_RELATED, SPACE_SECTION},
 };
 
@@ -231,12 +231,14 @@ impl Root {
                 ))
                 .child(
                     div().flex().items_center().gap(px(SPACE_RELATED)).child(
-                        small_button(
+                        action_button(
+                            "sync-sign-in",
                             if self.sync.busy {
                                 "Signing in"
                             } else {
                                 "Sign in"
                             },
+                            ButtonTone::Primary,
                             self.style(),
                             sign_in,
                         ),
@@ -291,8 +293,14 @@ impl Root {
                                     .child(note),
                             ),
                     )
-                    .child(small_button(
+                    .child(action_button(
+                        "sync-toggle",
                         if enabled { "Turn off" } else { "Turn on" },
+                        if enabled {
+                            ButtonTone::Neutral
+                        } else {
+                            ButtonTone::Primary
+                        },
                         self.style(),
                         toggle,
                     )),

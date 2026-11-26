@@ -9,10 +9,10 @@ use gpui::{
 use crate::{
     app::{Confirmation, Root, UiAction, View},
     components::{
-        ClickHandler, Interaction, brand_mark, icon, keycap, secondary_button,
+        ButtonTone, ClickHandler, Interaction, action_button, brand_mark, icon,
+        keycap, secondary_button,
     },
     theme::{
-        BUTTON_HEIGHT, BUTTON_PADDING_X, BUTTON_RADIUS, BUTTON_TEXT_SIZE,
         NAV_WIDTH, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED,
         SPACE_SECTION, Style, alpha,
     },
@@ -184,6 +184,8 @@ impl Root {
 
     pub(crate) fn render_overlay(&self, cx: &Context<Self>) -> Vec<AnyElement> {
         let colors = self.colors();
+        let theme = self.theme();
+        let style = Style::new(colors, theme);
         let mut layers: Vec<AnyElement> = Vec::new();
         if self.external_change {
             let refresh = self.action_click(UiAction::Reload);
@@ -219,17 +221,20 @@ impl Root {
                             ),
                     )
                     .child(
-                        div()
-                            .id("external-refresh")
-                            .flex()
-                            .items_center()
-                            .gap(px(SPACE_GROUP))
-                            .h(px(36.))
-                            .px(px(SPACE_RELATED))
-                            .rounded(px(10.))
-                            .bg(colors.red)
-                            .text_color(crate::theme::accent_ink(self.theme()))
-                            .cursor_pointer()
+                        Interaction::accent(style)
+                            .apply(
+                                div()
+                                    .id("external-refresh")
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(SPACE_GROUP))
+                                    .h(px(36.))
+                                    .px(px(SPACE_RELATED))
+                                    .rounded(px(10.))
+                                    .bg(colors.mauve)
+                                    .text_color(style.ink())
+                                    .cursor_pointer(),
+                            )
                             .on_click(refresh)
                             .child("Refresh")
                             .child(keycap("F5", colors, true)),
@@ -407,7 +412,6 @@ impl Root {
             let cancel = cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.cancel_create(window, cx);
             });
-            let style = Style::new(colors, self.theme());
             let create_error = self.create_error.clone();
             layers.push(
                 div()
@@ -510,9 +514,10 @@ impl Root {
                                         colors,
                                         Box::new(cancel),
                                     ))
-                                    .child(primary(
+                                    .child(action(
                                         "create-deck-primary",
                                         "Create",
+                                        ButtonTone::Primary,
                                         style,
                                         UiAction::SubmitDeck,
                                         cx,
@@ -523,11 +528,12 @@ impl Root {
             );
         }
         if let Some(confirmation) = self.confirmation.clone() {
-            let (title, detail, accept) = match confirmation {
+            let (title, detail, accept, tone) = match confirmation {
                 Confirmation::RemoveDeck { name, .. } => (
                     "Remove deck?",
                     format!("{name} and every card below it will be deleted."),
                     "Remove deck",
+                    ButtonTone::Danger,
                 ),
                 Confirmation::Reload => (
                     "Reload collection?",
@@ -535,6 +541,7 @@ impl Root {
                         "This ends the current review session and loads the latest collection.",
                     ),
                     "Reload",
+                    ButtonTone::Primary,
                 ),
             };
             let cancel = self.action_click(UiAction::CancelDialog);
@@ -589,10 +596,11 @@ impl Root {
                                     .child(secondary_button(
                                         "Cancel", colors, cancel,
                                     ))
-                                    .child(primary(
+                                    .child(action(
                                         "confirm-primary",
                                         accept,
-                                        Style::new(colors, self.theme()),
+                                        tone,
+                                        style,
                                         UiAction::Confirm,
                                         cx,
                                     )),
@@ -632,19 +640,13 @@ impl Root {
                     .child(help_row("A / D", "Add card / Decks", colors))
                     .child(help_row("T", "Statistics", colors))
                     .child(help_row("?", "This sheet", colors))
-                    .child(
-                        Interaction::surface(colors)
-                            .apply(
-                                div()
-                                    .id("help-close")
-                                    .mt(px(SPACE_GROUP))
-                                    .text_size(px(12.))
-                                    .text_color(colors.mauve)
-                                    .cursor_pointer(),
-                            )
-                            .on_click(close)
-                            .child("Close"),
-                    )
+                    .child(div().flex().child(action_button(
+                        "help-close",
+                        "Close",
+                        ButtonTone::Neutral,
+                        style,
+                        close,
+                    )))
                     .into_any_element(),
             );
         }
@@ -660,33 +662,23 @@ impl Root {
     }
 }
 
-fn primary(
+fn action(
     id: &'static str,
     label: &'static str,
+    tone: ButtonTone,
     style: Style,
     action: UiAction,
     cx: &Context<Root>,
 ) -> impl IntoElement {
-    Interaction::accent(style)
-        .apply(
-            div()
-                .id(id)
-                .debug_selector(move || id.to_owned())
-                .h(px(BUTTON_HEIGHT))
-                .px(px(BUTTON_PADDING_X))
-                .rounded(px(BUTTON_RADIUS))
-                .bg(style.colors.mauve)
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(style.ink())
-                .text_size(px(BUTTON_TEXT_SIZE))
-                .flex()
-                .items_center()
-                .cursor_pointer(),
-        )
-        .on_click(cx.listener(move |_, _: &ClickEvent, window, cx| {
+    action_button(
+        id,
+        label,
+        tone,
+        style,
+        Box::new(cx.listener(move |_, _: &ClickEvent, window, cx| {
             crate::app::dispatch_app_action(window, cx, action.clone());
-        }))
-        .child(label)
+        })),
+    )
 }
 
 fn help_row(

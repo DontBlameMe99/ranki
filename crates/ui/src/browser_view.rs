@@ -5,7 +5,9 @@ use std::sync::Arc;
 use crate::{
     app::{Root, UiAction},
     card_view::{self, CardRequest, MediaRef, RenderedCard},
-    components::{Interaction, chip, icon, secondary_button},
+    components::{
+        ButtonTone, Interaction, action_button, chip, icon, secondary_button,
+    },
     text_field::{EditHook, TextField},
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_RELATED,
@@ -469,9 +471,11 @@ impl Root {
                 self.action_click(UiAction::ClearBrowseSearch),
             ));
         } else if error.is_none() {
-            empty = empty.child(secondary_button(
+            empty = empty.child(action_button(
+                "browse-empty-add",
                 "Add card",
-                colors,
+                ButtonTone::Primary,
+                style,
                 self.action_click(UiAction::OpenAdd),
             ));
         }
