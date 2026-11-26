@@ -463,13 +463,28 @@ fn normalize_pending_usns(conn: &Connection) -> Result<(), FormatError> {
         ]
         .contains(&table.as_str())
         {
-            conn.execute(
-                &format!("UPDATE {table} SET usn = 0 WHERE usn < 0"),
-                [],
-            )
-            .map_err(db_error("cannot normalize pending sync ids"))?;
+            normalize_table_usns(conn, &table)?;
         }
     }
+    Ok(())
+}
+
+fn normalize_table_usns(
+    conn: &Connection,
+    table: &str,
+) -> Result<(), FormatError> {
+    let pending: i64 = conn
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE usn < 0)"),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error("cannot normalize pending sync ids"))?;
+    if pending == 0 {
+        return Ok(());
+    }
+    conn.execute(&format!("UPDATE {table} SET usn = 0 WHERE usn < 0"), [])
+        .map_err(db_error("cannot normalize pending sync ids"))?;
     Ok(())
 }
 
@@ -485,16 +500,17 @@ fn normalize_col_metadata(conn: &Connection) -> Result<(), FormatError> {
         let Some(value) = raw else {
             continue;
         };
-        let serialized = if value.contains("\"usn\":-1") {
-            normalize_metadata(&value)?
-        } else {
-            value
-        };
-        conn.execute(
-            &format!("UPDATE col SET {key} = ?1 WHERE id = 1"),
-            [serialized],
-        )
-        .map_err(db_error("cannot normalize pending sync ids"))?;
+        if !value.contains("\"usn\":-1") {
+            continue;
+        }
+        let serialized = normalize_metadata(&value)?;
+        if serialized != value {
+            conn.execute(
+                &format!("UPDATE col SET {key} = ?1 WHERE id = 1"),
+                [serialized],
+            )
+            .map_err(db_error("cannot normalize pending sync ids"))?;
+        }
     }
     Ok(())
 }
@@ -566,4 +582,137 @@ fn write_json_entry<T: Serialize>(
     let bytes = serde_json::to_vec(value)
         .map_err(json_error(format!("cannot encode {name}")))?;
     write_zip_entry(writer, name, &bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    use rusqlite::Connection;
+    use rusqlite::hooks::AuthAction;
+    use rusqlite::hooks::AuthContext;
+    use rusqlite::hooks::Authorization;
+    use serde_json::Value;
+
+    use super::normalize_col_metadata;
+    use super::normalize_pending_usns;
+
+    fn metadata_db(value: &str) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE col (
+                id INTEGER PRIMARY KEY, conf TEXT NOT NULL,
+                models TEXT NOT NULL, decks TEXT NOT NULL,
+                dconf TEXT NOT NULL, tags TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO col VALUES (1, ?1, ?1, ?1, ?1, ?1)", [value])
+            .unwrap();
+        conn
+    }
+
+    fn col_value(conn: &Connection, key: &str) -> Value {
+        let raw: String = conn
+            .query_row(
+                &format!("SELECT {key} FROM col WHERE id = 1"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    fn update_counter(conn: &mut Connection) -> Arc<AtomicUsize> {
+        let updates = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&updates);
+        conn.authorizer(Some(move |context: AuthContext<'_>| {
+            let is_update = matches!(context.action, AuthAction::Update { .. });
+            is_update.then(|| counted.fetch_add(1, Ordering::Relaxed));
+            Authorization::Allow
+        }))
+        .unwrap();
+        updates
+    }
+
+    #[test]
+    fn pending_usn_normalization_skips_tables_without_negative_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE notes (id INTEGER PRIMARY KEY, usn INTEGER NOT NULL);
+             CREATE TABLE cards (id INTEGER PRIMARY KEY, usn INTEGER NOT NULL);",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO notes VALUES (1, 0)", []).unwrap();
+        conn.execute("INSERT INTO cards VALUES (1, 2)", []).unwrap();
+        let updates = update_counter(&mut conn);
+
+        normalize_pending_usns(&conn).unwrap();
+
+        assert_eq!(updates.load(Ordering::Relaxed), 0);
+        let usn: i64 = conn
+            .query_row("SELECT usn FROM notes WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(usn, 0);
+    }
+
+    #[test]
+    fn pending_usn_normalization_still_rewrites_negative_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE notes (id INTEGER PRIMARY KEY, usn INTEGER NOT NULL);
+             CREATE TABLE cards (id INTEGER PRIMARY KEY, usn INTEGER NOT NULL);",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO notes VALUES (1, -1)", [])
+            .unwrap();
+        conn.execute("INSERT INTO cards VALUES (1, 0)", []).unwrap();
+        let updates = update_counter(&mut conn);
+
+        normalize_pending_usns(&conn).unwrap();
+
+        assert_eq!(updates.load(Ordering::Relaxed), 1);
+        let usn: i64 = conn
+            .query_row("SELECT usn FROM notes WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(usn, 0);
+    }
+
+    #[test]
+    fn metadata_normalization_skips_already_normalized_values() {
+        let value = r#"{"nested":[{"keep":2,"usn":-1.0}],"usn":-1.0}"#;
+        let mut conn = metadata_db(value);
+        let updates = update_counter(&mut conn);
+
+        normalize_col_metadata(&conn).unwrap();
+
+        assert_eq!(updates.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            col_value(&conn, "conf"),
+            serde_json::from_str::<Value>(value).unwrap()
+        );
+    }
+
+    #[test]
+    fn metadata_normalization_still_rewrites_negative_usns() {
+        let conn = metadata_db(r#"{"nested":[{"keep":2,"usn":-1}],"usn":-1}"#);
+
+        normalize_col_metadata(&conn).unwrap();
+
+        let expected = serde_json::json!({
+            "nested": [{"keep": 2, "usn": 0}],
+            "usn": 0,
+        });
+        assert_eq!(col_value(&conn, "conf"), expected);
+        assert_eq!(col_value(&conn, "models"), expected);
+        assert_eq!(col_value(&conn, "decks"), expected);
+        assert_eq!(col_value(&conn, "dconf"), expected);
+        assert_eq!(col_value(&conn, "tags"), expected);
+    }
 }
