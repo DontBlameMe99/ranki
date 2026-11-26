@@ -809,20 +809,6 @@ impl Root {
                     .child(div().flex_1())
                     .child(image_button),
             )
-            .child(div().flex().items_center().gap(px(SPACE_GROUP)).child({
-                div()
-                    .flex_1()
-                    .text_size(px(12.))
-                    .text_color(if image.is_some() {
-                        colors.subtext
-                    } else {
-                        colors.overlay
-                    })
-                    .child(
-                        image
-                            .unwrap_or_else(|| String::from("Upload an image")),
-                    )
-            }))
             .child(canvas);
         if let Some(error) = errors.get("occlusion") {
             editor = editor.child(validation(error, colors));
