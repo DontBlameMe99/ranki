@@ -8,7 +8,7 @@ use gpui::{
 use crate::{
     ThemeChoice,
     app::{Root, UiAction},
-    components::{Interaction, icon, keycap},
+    components::{Interaction, icon},
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_INLINE, SPACE_RELATED,
         SPACE_SECTION, alpha,
@@ -94,16 +94,9 @@ impl Root {
             .py(px(PAGE_Y))
             .child(
                 div()
-                    .flex()
-                    .items_end()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(32.))
-                            .font_weight(FontWeight::BOLD)
-                            .child("Settings"),
-                    )
-                    .child(keycap(",", colors, false)),
+                    .text_size(px(32.))
+                    .font_weight(FontWeight::BOLD)
+                    .child("Settings"),
             )
             .child(
                 div()
