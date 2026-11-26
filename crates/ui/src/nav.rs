@@ -352,6 +352,7 @@ impl Root {
                 self.decks.iter().find(|deck| deck.id == menu.id).cloned()
         {
             let rename_deck = deck.clone();
+            let export_deck = deck.clone();
             let remove_deck = deck;
             layers.push(
                 anchored()
@@ -404,6 +405,29 @@ impl Root {
                                     ))
                                     .text_size(px(13.))
                                     .child("Rename"),
+                            )
+                            .child(
+                                Interaction::surface(colors)
+                                    .apply(
+                                        div()
+                                            .id("decks-export")
+                                            .debug_selector(|| {
+                                                "decks-export".to_owned()
+                                            })
+                                            .w_full()
+                                            .px(px(SPACE_RELATED))
+                                            .py(px(SPACE_GROUP))
+                                            .rounded(px(8.))
+                                            .cursor_pointer(),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _: &ClickEvent, _, cx| {
+                                            this.deck_menu = None;
+                                            this.export_deck(&export_deck, cx);
+                                        },
+                                    ))
+                                    .text_size(px(13.))
+                                    .child("Export .apkg"),
                             )
                             .child(
                                 Interaction::danger(colors)

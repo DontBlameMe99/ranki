@@ -4621,6 +4621,7 @@ dependencies = [
  "gpui",
  "image",
  "ranki-core",
+ "ranki-format",
  "ranki-model",
  "ranki-storage",
  "ranki-sync",

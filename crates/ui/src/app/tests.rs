@@ -2533,6 +2533,75 @@ fn right_clicking_a_deck_opens_its_actions_menu(cx: &mut gpui::TestAppContext) {
     assert!(cx.debug_bounds("deck-actions-menu").is_some());
 }
 #[gpui::test]
+fn exporting_a_deck_asks_for_a_save_path(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("collection.anki2");
+    let mut store =
+        ranki_storage::Collection::create(&path).expect("collection");
+    let _ = store
+        .add_note(&NewNote {
+            model_id: 1,
+            deck_id: 1,
+            fields: vec![String::from("Question?"), String::from("Answer!")],
+            tags: Vec::new(),
+        })
+        .expect("note");
+    let options = Options {
+        collection: path,
+        ..Options::default()
+    };
+    let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(store),
+                options,
+                save_settings,
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.update_entity(&root, |root, cx| {
+        root.deck_menu = Some(super::DeckMenu {
+            id: 1,
+            anchor: point(px(100.), px(100.)),
+        });
+        cx.notify();
+    });
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+
+    let export = cx
+        .debug_bounds("decks-export")
+        .expect("deck export menu item bounds");
+    cx.simulate_click(export.center(), gpui::Modifiers::none());
+
+    assert!(cx.did_prompt_for_new_path());
+    assert!(cx.read_entity(&root, |root, _| root.deck_menu.is_none()));
+}
+
+#[test]
+fn export_file_name_is_safe_for_deck_paths() {
+    assert_eq!(
+        super::Root::export_file_name("Visual Deck"),
+        "Visual Deck.apkg"
+    );
+    assert_eq!(
+        super::Root::export_file_name("Language::French/1"),
+        "Language - French_1.apkg"
+    );
+    assert_eq!(super::Root::export_file_name("::"), "deck.apkg");
+}
+#[gpui::test]
 fn escape_closes_a_deck_actions_menu(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("collection.anki2");

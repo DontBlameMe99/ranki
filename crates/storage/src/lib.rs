@@ -309,7 +309,12 @@ params![stamp.modified, stamp.scm, json],
         Ok(models)
     }
 
-    fn deck_subtree(&self, deck_id: Id) -> Result<Vec<Id>, StoreError> {
+    /// Lists the deck and every subdeck below it in the `A::B` hierarchy.
+    /// Returns an empty list when the deck is missing.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
+    pub fn deck_subtree(&self, deck_id: Id) -> Result<Vec<Id>, StoreError> {
         let decks = self.deck_list()?;
         let Some(deck) = decks.iter().find(|deck| deck.id == deck_id) else {
             return Ok(Vec::new());

@@ -71,9 +71,17 @@ pub fn write_apkg(
     media_dir: &Path,
     destination: &Path,
 ) -> Result<(), FormatError> {
+    let media_files = collect_media_files(media_dir)?;
+    write_apkg_files(collection, &media_files, destination)
+}
+
+pub fn write_apkg_files(
+    collection: &Path,
+    media_files: &[MediaFile],
+    destination: &Path,
+) -> Result<(), FormatError> {
     schema::ensure_parent(destination)?;
     let database = snapshot_collection(collection)?;
-    let media_files = collect_media_files(media_dir)?;
 
     let file = File::create(destination).map_err(io_error(format!(
         "cannot create package {}",
@@ -82,7 +90,7 @@ pub fn write_apkg(
     let mut writer = ZipWriter::new(BufWriter::new(file));
 
     write_zip_entry(&mut writer, "collection.anki21", &database)?;
-    let mapping = media_mapping(&media_files);
+    let mapping = media_mapping(media_files);
     write_json_entry(&mut writer, "media", &mapping)?;
     for (index, media) in media_files.iter().enumerate() {
         let bytes = fs::read(&media.path).map_err(io_error(format!(
@@ -406,7 +414,7 @@ fn write_temp_collection(bytes: &[u8]) -> Result<NamedTempFile, FormatError> {
     Ok(file)
 }
 
-fn snapshot_collection(collection: &Path) -> Result<Vec<u8>, FormatError> {
+pub fn snapshot_collection(collection: &Path) -> Result<Vec<u8>, FormatError> {
     if !collection.is_file() {
         return Err(FormatError::new(format!(
             "collection does not exist: {}",
