@@ -1122,6 +1122,233 @@ fn deck_scroll_animates_toward_the_wheel_target(cx: &mut gpui::TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn dragging_the_scrollbar_moves_the_deck_list(cx: &mut gpui::TestAppContext) {
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    cx.update_entity(&root, |root, cx| {
+        root.decks = (0..200i64)
+            .map(|index| Deck {
+                id: index.saturating_add(1),
+                name: format!("Deck {index:03}"),
+                description: String::new(),
+            })
+            .collect();
+        root.stats = vec![DeckStats::default(); root.decks.len()];
+        root.rebuild_deck_rows();
+        cx.notify();
+    });
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let thumb = cx
+        .debug_bounds("scrollbar-decks-thumb")
+        .expect("deck scrollbar thumb")
+        .center();
+
+    cx.simulate_mouse_move(thumb, None, gpui::Modifiers::none());
+    cx.simulate_mouse_down(
+        thumb,
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    let dragged = point(thumb.x, thumb.y + px(80.));
+    cx.simulate_mouse_move(
+        dragged,
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::none(),
+    );
+    cx.simulate_mouse_up(
+        dragged,
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+
+    let offset = cx.read_entity(&root, |root, _| {
+        -f32::from(root.decks_scroll.handle().offset().y)
+    });
+    assert!(offset > 0.0, "dragging the thumb must scroll the list");
+}
+
+#[gpui::test]
+fn grabbing_the_thumb_off_center_keeps_the_grab_point(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    cx.update_entity(&root, |root, cx| {
+        root.decks = (0..200i64)
+            .map(|index| Deck {
+                id: index.saturating_add(1),
+                name: format!("Deck {index:03}"),
+                description: String::new(),
+            })
+            .collect();
+        root.stats = vec![DeckStats::default(); root.decks.len()];
+        root.rebuild_deck_rows();
+        root.decks_scroll
+            .handle()
+            .set_offset(point(px(0.), px(-1000.)));
+        cx.notify();
+    });
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let thumb = cx
+        .debug_bounds("scrollbar-decks-thumb")
+        .expect("deck scrollbar thumb");
+    let track = cx
+        .debug_bounds("scrollbar-decks-track")
+        .expect("deck scrollbar track");
+    let (initial, max_offset) = cx.read_entity(&root, |root, _| {
+        (
+            -f32::from(root.decks_scroll.handle().offset().y),
+            f32::from(root.decks_scroll.handle().max_offset().height),
+        )
+    });
+    let travel = f32::from(track.size.height) - f32::from(thumb.size.height);
+    let grab = point(
+        thumb.center().x,
+        thumb.origin.y + thumb.size.height - px(4.),
+    );
+    let dragged = point(grab.x, grab.y + px(8.));
+    mouse_drag(cx, grab, dragged, gpui::MouseButton::Left);
+    let actual = cx.read_entity(&root, |root, _| {
+        -f32::from(root.decks_scroll.handle().offset().y)
+    });
+    let expected = initial + 8.0 / travel * max_offset;
+    assert!(
+        (actual - expected).abs() < 8.0,
+        "off-center grab jumped: {actual} vs {expected}"
+    );
+}
+
+#[gpui::test]
+fn deck_picker_scrollbar_receives_drags(cx: &mut gpui::TestAppContext) {
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    cx.update_entity(&root, |root, cx| {
+        root.view = super::View::AddCard;
+        root.decks = (0..200i64)
+            .map(|index| Deck {
+                id: index.saturating_add(1),
+                name: format!("Picker deck {index:03}"),
+                description: String::new(),
+            })
+            .collect();
+        root.add.deck_picker = true;
+        root.add.deck_picker_anchor = point(px(270.), px(224.));
+        cx.notify();
+    });
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let thumb = cx
+        .debug_bounds("scrollbar-deck-picker-thumb")
+        .expect("deck picker scrollbar thumb")
+        .center();
+    let left = point(thumb.x - px(40.), thumb.y + px(10.));
+    cx.simulate_mouse_move(thumb, None, gpui::Modifiers::none());
+    cx.simulate_mouse_down(
+        thumb,
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.simulate_mouse_move(
+        left,
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::none(),
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let dragged = point(left.x, left.y + px(20.));
+    cx.simulate_mouse_move(
+        dragged,
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::none(),
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.simulate_mouse_up(
+        dragged,
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+
+    let offset = cx.read_entity(&root, |root, _| {
+        -f32::from(root.deck_picker_scroll.offset().y)
+    });
+    assert!(
+        offset > 0.0,
+        "dragging must continue after the pointer leaves the strip"
+    );
+
+    let track = cx
+        .debug_bounds("scrollbar-deck-picker-track")
+        .expect("deck picker scrollbar track");
+    let before = cx.read_entity(&root, |root, _| root.add.deck_id);
+    click_test_point(
+        cx,
+        point(
+            track.center().x,
+            track.origin.y + track.size.height - px(8.),
+        ),
+    );
+    let after = cx.read_entity(&root, |root, _| root.add.deck_id);
+    assert_eq!(
+        after, before,
+        "a scrollbar press must not select a deck row"
+    );
+    assert!(
+        cx.read_entity(&root, |root, _| root.add.deck_picker),
+        "a scrollbar press must keep the picker open"
+    );
+}
+
 #[test]
 fn session_progress_never_fills_an_empty_queue() {
     assert_eq!(session_progress(0, 0), 0.0);

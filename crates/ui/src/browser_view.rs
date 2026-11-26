@@ -417,7 +417,7 @@ impl Root {
             page_width(f32::from(window.viewport_size().width), self.nav_width);
         let columns = BrowseColumns::for_width(width);
         let show_detail_side = width >= 900.0;
-        let show_detail = width >= 520.0;
+        let show_detail = width >= BROWSE_DETAIL_MIN_WIDTH;
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let query = self.browse.search.read(cx).text();
@@ -495,7 +495,8 @@ impl Root {
             .bg(colors.mantle)
             .border_1()
             .border_color(colors.surface0)
-            .overflow_scroll();
+            .overflow_scroll()
+            .track_scroll(&self.browse_scroll);
         table = table.child(
             div()
                 .flex()
@@ -877,7 +878,8 @@ impl Root {
             .bg(colors.mantle)
             .border_1()
             .border_color(colors.surface0)
-            .overflow_scroll();
+            .overflow_scroll()
+            .track_scroll(&self.browse_detail_scroll);
         if side {
             detail = detail.w(px(BROWSE_PREVIEW_WIDTH));
         } else {
@@ -984,6 +986,7 @@ fn browse_meta(
         .child(div().child(value.to_owned()))
 }
 
+pub const BROWSE_DETAIL_MIN_WIDTH: f32 = 520.;
 const BROWSE_PREVIEW_WIDTH: f32 = 320.;
 const BROWSE_COLUMNS: [f32; 6] = [1.0, 105., 90., 75., 65., 50.];
 const BROWSE_ACTION_WIDTH: f32 = 30.;

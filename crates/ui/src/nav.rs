@@ -2,8 +2,9 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, Corner, CursorStyle, InteractiveElement,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, anchored, div, point, px,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Window, anchored, div,
+    point, px,
 };
 
 use crate::{
@@ -232,6 +233,16 @@ impl Root {
         let theme = self.theme();
         let style = Style::new(colors, theme);
         let mut layers: Vec<AnyElement> = Vec::new();
+        let mut bars = self.active_scrollbars(window);
+        let deck_picker_bar = bars
+            .iter()
+            .position(|(id, _)| *id == "deck-picker")
+            .map(|index| bars.remove(index));
+        for (id, handle) in bars {
+            if let Some(scrollbar) = self.render_scrollbar(id, handle, cx) {
+                layers.push(scrollbar);
+            }
+        }
         if self.external_change {
             let refresh = self.action_click(UiAction::Reload);
             layers.push(
@@ -596,6 +607,11 @@ impl Root {
                     .into_any_element(),
             );
         }
+        if let Some((id, handle)) = deck_picker_bar
+            && let Some(scrollbar) = self.render_scrollbar(id, handle, cx)
+        {
+            layers.push(scrollbar);
+        }
         if self.create_modal {
             let cancel = cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.cancel_create(window, cx);
@@ -834,6 +850,36 @@ impl Root {
                         style,
                         close,
                     )))
+                    .into_any_element(),
+            );
+        }
+        if self.scrollbar_drag.is_some() {
+            layers.push(
+                div()
+                    .id("scrollbar-drag-catcher")
+                    .debug_selector(|| String::from("scrollbar-drag-catcher"))
+                    .absolute()
+                    .inset_0()
+                    .on_mouse_move(cx.listener(
+                        |this: &mut Self, event: &MouseMoveEvent, window, _| {
+                            this.drag_scrollbar(
+                                f32::from(event.position.y),
+                                window,
+                            );
+                        },
+                    ))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            this.end_scrollbar_drag(cx);
+                        }),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            this.end_scrollbar_drag(cx);
+                        }),
+                    )
                     .into_any_element(),
             );
         }
