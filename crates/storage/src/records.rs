@@ -53,6 +53,28 @@ pub fn read_col(conn: &Connection) -> Result<ColData, StoreError> {
     .map_err(crate::backend)
 }
 
+/// Reads one `col` text column without loading the other JSON columns.
+fn read_col_column(
+    conn: &Connection,
+    column: &str,
+) -> Result<String, StoreError> {
+    let sql = match column {
+        "decks" => "SELECT decks FROM col WHERE id = 1",
+        "models" => "SELECT models FROM col WHERE id = 1",
+        _ => return Err(crate::invalid("invalid col column")),
+    };
+    conn.query_row(sql, [], |row| Ok(text(row.get::<_, Value>(0)?)))
+        .map_err(crate::backend)
+}
+
+pub fn read_col_decks(conn: &Connection) -> Result<String, StoreError> {
+    read_col_column(conn, "decks")
+}
+
+pub fn read_col_models(conn: &Connection) -> Result<String, StoreError> {
+    read_col_column(conn, "models")
+}
+
 pub fn card_from_row(row: &Row<'_>) -> SqlResult<Card> {
     let ordinal = anki::as_u16(row.get(3)?).map_err(conversion)?;
     let factor = anki::as_u32(row.get(10)?).map_err(conversion)?;

@@ -270,7 +270,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> CliResult<()> {
     let mut config = config::load();
-    let mut transport = sync::http_transport(&config);
+    let mut transport = sync::lazy_http_transport(&config);
     run_with_sync(cli, &mut config, &mut transport)
 }
 
@@ -297,16 +297,7 @@ fn run_with_sync(
     };
     let settings = config::resolve_settings(&cli, config, fallback);
     let manual_sync = matches!(cli.command, Some(Command::Sync { .. }));
-    let auth = if manual_sync || settings.sync.enabled && settings.sync.auto {
-        sync::load_auth(&settings, &sync::read_env())
-    } else {
-        None
-    };
-    let auto_sync = auto_sync_enabled(
-        &settings,
-        auth.is_some() || sync::has_stored_key(&settings),
-        manual_sync,
-    );
+    let (auth, auto_sync) = sync::startup_credentials(&settings, manual_sync);
 
     if auto_sync
         && sync_once_and_warn(transport, &settings, auth.as_ref()).is_some()
@@ -389,18 +380,13 @@ fn run_with_sync(
             run_store_command(&mut collection, command, &scheduler, media_dir)
         }
     };
-    let shutdown_auth =
-        if final_settings.sync.enabled && final_settings.sync.auto {
-            sync::load_auth(&final_settings, &sync::read_env())
+    let (shutdown_auth, shutdown_sync) =
+        if auto_sync && final_settings.sync.enabled && final_settings.sync.auto
+        {
+            sync::startup_credentials(&final_settings, false)
         } else {
-            None
+            (None, false)
         };
-    let shutdown_sync = shutdown_sync_enabled(
-        auto_sync,
-        &final_settings,
-        shutdown_auth.is_some() || sync::has_stored_key(&final_settings),
-        manual_sync,
-    );
     if shutdown_sync {
         let _ = sync_once_and_warn(
             transport,
@@ -426,32 +412,6 @@ fn sync_once_and_warn(
             None
         }
     }
-}
-
-#[expect(
-    clippy::fn_params_excessive_bools,
-    reason = "sync flags map directly onto CLI switches"
-)]
-const fn auto_sync_enabled(
-    settings: &config::Settings,
-    has_credentials: bool,
-    manual: bool,
-) -> bool {
-    settings.sync.enabled && settings.sync.auto && has_credentials && !manual
-}
-
-#[expect(
-    clippy::fn_params_excessive_bools,
-    clippy::too_many_arguments,
-    reason = "startup and manual decisions map directly onto CLI switches"
-)]
-const fn shutdown_sync_enabled(
-    startup_sync: bool,
-    final_settings: &config::Settings,
-    has_credentials: bool,
-    manual: bool,
-) -> bool {
-    startup_sync && auto_sync_enabled(final_settings, has_credentials, manual)
 }
 
 fn maybe_optimize(config: &mut config::Config, settings: &config::Settings) {
@@ -1069,12 +1029,11 @@ mod tests {
 
     use super::Cli;
     use super::Command;
-    use super::auto_sync_enabled;
     use super::default_collection_path;
     use super::media_dir_for;
+    use super::now_secs;
     use super::parse_rating;
     use super::run_with_sync;
-    use super::shutdown_sync_enabled;
     use ranki_model::Rating;
 
     fn parse(args: &[&str]) -> Cli {
@@ -1082,19 +1041,75 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_sync_uses_the_final_settings_but_keeps_the_startup_gate() {
-        let mut settings = super::config::Settings::default();
-        settings.sync.auto = true;
-        settings.sync.enabled = true;
-        assert!(shutdown_sync_enabled(true, &settings, true, false));
-        assert!(!shutdown_sync_enabled(false, &settings, true, false));
-        assert!(!shutdown_sync_enabled(true, &settings, true, true));
-
-        settings.sync.enabled = false;
-        assert!(!shutdown_sync_enabled(true, &settings, true, false));
-
-        assert!(!auto_sync_enabled(&settings, true, false));
+    fn auto_sync_runs_at_startup_and_rereads_state_after_the_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let collection = directory.path().join("collection.anki2");
+        assert!(crate::open_or_create(&collection).is_ok());
+        let mut config = ranki_model::Config::default();
+        config.sync.enabled = true;
+        config.scheduler.auto_optimize = false;
+        let state = serde_json::json!({
+            "version": 1,
+            "endpoint": ranki_sync::DEFAULT_ENDPOINT,
+            "host_key": "stored-hkey",
+            "last_mod": null,
+            "last_scm": 1_700_000_000_000_i64,
+            "last_usn": 0,
+            "last_media_usn": 0,
+            "last_success": null,
+            "failures": 0,
+        });
+        fs::write(super::sync::state_path(&collection), state.to_string())
+            .unwrap();
+        let response = MockResponse::ok_json(&serde_json::json!({
+            "mod": 1_700_000_000_000_i64,
+            "scm": 1_700_000_000_000_i64,
+            "usn": 7,
+            "ts": now_secs().unwrap(),
+            "empty": true,
+        }))
+        .unwrap();
+        let mut transport = MockTransport::new()
+            .with_response(SyncMethod::Meta, response.clone())
+            .with_response(SyncMethod::Meta, response);
+        let cli = parse(&[
+            "ranki",
+            "--collection",
+            collection.to_str().unwrap(),
+            "decks",
+        ]);
+        run_with_sync(cli, &mut config, &mut transport).unwrap();
+        assert_eq!(transport.request_count(), 2);
+        assert!(
+            transport
+                .requests()
+                .iter()
+                .all(|request| request.method == SyncMethod::Meta)
+        );
     }
+
+    #[test]
+    fn sync_disabled_commands_never_use_the_transport() {
+        let directory = tempfile::tempdir().unwrap();
+        let collection = directory.path().join("collection.anki2");
+        assert!(crate::open_or_create(&collection).is_ok());
+        let mut config = ranki_model::Config::default();
+        fs::write(
+            super::sync::state_path(&collection),
+            r#"{"version":1,"host_key":"stored-hkey"}"#,
+        )
+        .unwrap();
+        let mut transport = MockTransport::new();
+        let cli = parse(&[
+            "ranki",
+            "--collection",
+            collection.to_str().unwrap(),
+            "decks",
+        ]);
+        run_with_sync(cli, &mut config, &mut transport).unwrap();
+        assert_eq!(transport.request_count(), 0);
+    }
+
     #[test]
     fn no_subcommand_selects_gui() {
         assert!(matches!(

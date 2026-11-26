@@ -298,8 +298,8 @@ params![stamp.modified, stamp.scm, json],
     }
 
     fn model_list(&self) -> Result<Vec<NoteModel>, StoreError> {
-        let col = records::read_col(&self.conn)?;
-        let models = records::models_from_json(&col.models)?;
+        let models =
+            records::models_from_json(&records::read_col_models(&self.conn)?)?;
         if models.is_empty() && records::table_exists(&self.conn, "notetypes")?
         {
             return records::models_from_tables(&self.conn);
@@ -1214,8 +1214,7 @@ fn placeholders(start: i64, count: usize) -> String {
 }
 
 fn deck_list_from(conn: &Connection) -> Result<Vec<Deck>, StoreError> {
-    let col = records::read_col(conn)?;
-    let decks = records::decks_from_json(&col.decks)?;
+    let decks = records::decks_from_json(&records::read_col_decks(conn)?)?;
     if decks.is_empty() && records::table_exists(conn, "decks")? {
         return records::decks_from_tables(conn);
     }

@@ -29,6 +29,7 @@ use crate::answer_card;
 use crate::error::{ErrorCode, InterfaceError};
 use crate::save_card;
 const API_VERSION: u32 = 6;
+const EMPTY_PARAMS: Value = Value::Null;
 
 #[derive(Debug)]
 struct RpcError(InterfaceError);
@@ -123,15 +124,16 @@ pub fn serve(
         CliError::Message(format!("cannot listen on 127.0.0.1:{port}: {error}"))
     })?;
     let mut store = Collection::open(path)?;
+    let header =
+        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+            .map_err(|()| {
+                CliError::Message(String::from("invalid HTTP header"))
+            })?;
     for mut request in server.incoming_requests() {
         let response = read_and_dispatch(&mut store, &mut request, scheduler);
         let body = serde_json::to_string(&response)?;
-        let header =
-            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                .map_err(|()| {
-                    CliError::Message(String::from("invalid HTTP header"))
-                })?;
-        request.respond(Response::from_string(body).with_header(header))?;
+        request
+            .respond(Response::from_string(body).with_header(header.clone()))?;
     }
     Ok(())
 }
@@ -165,8 +167,8 @@ fn handle_body(
             request.version.unwrap_or_default()
         ));
     }
-    let params = request.params.unwrap_or_else(|| json!({}));
-    match dispatch(store, &request.action, &params, scheduler) {
+    let params = request.params.as_ref().unwrap_or(&EMPTY_PARAMS);
+    match dispatch(store, &request.action, params, scheduler) {
         Ok(result) => RpcResponse::ok(result),
         Err(error) => RpcResponse::error(error),
     }
@@ -625,6 +627,25 @@ mod tests {
     fn version_returns_six() {
         let (_dir, mut store) = fixture();
         assert_eq!(call(&mut store, "version", json!({})), json!(6));
+    }
+
+    #[test]
+    fn version_response_bytes_are_the_same_without_params() {
+        let (_dir, mut store) = fixture();
+        let bodies = [
+            br#"{"action":"version","version":6}"#.as_slice(),
+            br#"{"action":"version","version":6,"params":{}}"#.as_slice(),
+            br#"{"action":"version","version":6,"params":null}"#.as_slice(),
+        ];
+        let bytes: Vec<String> = bodies
+            .iter()
+            .map(|body| {
+                let response = handle_body(&mut store, body, &scheduler());
+                serde_json::to_string(&response).unwrap()
+            })
+            .collect();
+        assert!(bytes.iter().all(|text| text == &bytes[0]));
+        assert_eq!(bytes[0], r#"{"result":6,"error":null}"#);
     }
 
     #[test]
