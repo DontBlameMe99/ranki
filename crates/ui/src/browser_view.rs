@@ -1,13 +1,16 @@
 //! Card browser: store-backed search, result table, and card preview.
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::{
     app::{Root, UiAction},
     card_view::{self, CardRequest, MediaRef, RenderedCard},
     components::{
-        ButtonTone, Interaction, action_button, chip, icon, search_field_icon,
-        secondary_button,
+        ButtonTone, Interaction, action_button, chip, icon, icon_tile,
+        search_field_icon, secondary_button,
     },
     text_field::{EditHook, TextField},
     theme::{
@@ -35,6 +38,8 @@ pub struct BrowserRow {
     pub front_media: Vec<MediaRef>,
     pub back_media: Vec<MediaRef>,
     pub deck: SharedString,
+    /// Full deck path, including virtual parents, used to group results.
+    pub deck_path: SharedString,
     pub tags: SharedString,
     pub model: SharedString,
     /// Table-cell text prepared once with the rendered sides.
@@ -45,10 +50,34 @@ pub struct BrowserRow {
     pub menu_key: SharedString,
 }
 
+/// One expandable deck in the browse table.
+#[derive(Clone, Debug)]
+pub struct BrowseGroup {
+    pub path: String,
+    pub name: String,
+    pub depth: usize,
+    /// Cards in this deck and all of its subdecks.
+    pub count: usize,
+    pub has_children: bool,
+    pub expanded: bool,
+    pub key: SharedString,
+    pub chevron_key: SharedString,
+}
+
+/// One visible line of the grouped browse table.
+#[derive(Clone, Debug)]
+pub enum BrowseEntry {
+    Group(BrowseGroup),
+    Card { row: usize, depth: usize },
+}
+
 /// Search state. The generation drops results from an older query.
 pub struct BrowseState {
     pub search: Entity<TextField>,
     pub rows: Vec<BrowserRow>,
+    pub entries: Vec<BrowseEntry>,
+    /// Deck paths opened by the user or by a search with matches.
+    pub expanded: HashSet<String>,
     pub total: usize,
     pub selected: Option<Id>,
     pub error: Option<String>,
@@ -65,13 +94,11 @@ pub fn browser_row(
     models: &[NoteModel],
 ) -> Option<BrowserRow> {
     let model = models.iter().find(|model| model.id == note.model_id)?;
-    let deck = decks
-        .iter()
-        .find(|deck| deck.id == card.deck_id)
-        .map_or_else(
-            || format!("Deck {}", card.deck_id),
-            |deck| deck.name.clone(),
-        );
+    let found = decks.iter().find(|deck| deck.id == card.deck_id);
+    let deck = found.map_or_else(
+        || format!("Deck {}", card.deck_id),
+        |deck| deck.name.clone(),
+    );
     let front_rendered = card_view::render_card(
         model,
         note,
@@ -95,7 +122,8 @@ pub fn browser_row(
         front_media: front_rendered.media,
         back,
         back_media: back_rendered.media,
-        deck: SharedString::from(deck),
+        deck: SharedString::from(deck.clone()),
+        deck_path: SharedString::from(deck),
         tags: SharedString::from(note.tags.join(", ")),
         model: SharedString::from(model.name.clone()),
     })
@@ -164,6 +192,104 @@ pub fn sort_browser_rows(rows: &mut [BrowserRow]) {
     });
 }
 
+/// Paths from the root down to each matching card's deck. A search opens
+/// exactly these groups, so matches are visible without extra clicks.
+#[must_use]
+pub fn browse_expand_paths(rows: &[BrowserRow]) -> HashSet<String> {
+    let mut paths = HashSet::new();
+    for row in rows {
+        let path = row.deck_path.as_str();
+        let _ = paths.insert(path.to_owned());
+        for (index, _) in path.match_indices("::") {
+            let _ = paths.insert(path[..index].to_owned());
+        }
+    }
+    paths
+}
+
+/// Builds the visible table lines: deck groups and, for open groups, their
+/// cards. Cards sit only under their own deck, never under parent groups.
+#[must_use]
+pub fn build_browse_entries(
+    rows: &[BrowserRow],
+    expanded: &HashSet<String>,
+) -> Vec<BrowseEntry> {
+    let mut cards_by_path: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        cards_by_path
+            .entry(row.deck_path.to_string())
+            .or_default()
+            .push(index);
+    }
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for (path, cards) in &cards_by_path {
+        let _ = counts.insert(path.as_str(), cards.len());
+    }
+    for (path, cards) in &cards_by_path {
+        for (index, _) in path.match_indices("::") {
+            let count = counts.entry(&path[..index]).or_insert(0);
+            *count = count.saturating_add(cards.len());
+        }
+    }
+    let mut paths = cards_by_path.keys().cloned().collect::<HashSet<_>>();
+    for path in cards_by_path.keys() {
+        for (index, _) in path.match_indices("::") {
+            let _ = paths.insert(path[..index].to_owned());
+        }
+    }
+    let mut children: HashMap<String, Vec<String>> = HashMap::new();
+    let mut roots = Vec::new();
+    for path in paths {
+        match path.rsplit_once("::") {
+            Some((parent, _)) => children
+                .entry(parent.to_owned())
+                .or_default()
+                .push(path.clone()),
+            None => roots.push(path),
+        }
+    }
+    roots.sort();
+    for siblings in children.values_mut() {
+        siblings.sort();
+    }
+    let mut entries = Vec::with_capacity(rows.len().saturating_mul(2));
+    let mut stack = roots
+        .into_iter()
+        .rev()
+        .map(|path| (path, 0usize))
+        .collect::<Vec<_>>();
+    while let Some((path, depth)) = stack.pop() {
+        let cards = cards_by_path.get(&path).cloned().unwrap_or_default();
+        let has_children = children.contains_key(&path);
+        let open = expanded.contains(&path);
+        entries.push(BrowseEntry::Group(BrowseGroup {
+            name: path.rsplit("::").next().unwrap_or(&path).to_owned(),
+            count: counts.get(path.as_str()).copied().unwrap_or(0),
+            path: path.clone(),
+            depth,
+            has_children,
+            expanded: open,
+            key: SharedString::from(format!("browse-group-{path}")),
+            chevron_key: SharedString::from(format!("browse-chevron-{path}")),
+        }));
+        if !open {
+            continue;
+        }
+        for index in cards {
+            entries.push(BrowseEntry::Card {
+                row: index,
+                depth: depth + 1,
+            });
+        }
+        if let Some(kids) = children.get(&path) {
+            for child in kids.iter().rev() {
+                stack.push((child.clone(), depth.saturating_add(1)));
+            }
+        }
+    }
+    entries
+}
+
 impl Root {
     /// Refreshes the table after each edit, debounced by the search clock.
     pub(crate) fn browse_edit_hook(cx: &mut Context<Self>) -> EditHook {
@@ -201,7 +327,7 @@ impl Root {
             Ok(ids) => ids,
             Err(error) => {
                 self.browse.rows.clear();
-                self.browse.total = 0;
+                self.browse.entries.clear();
                 self.browse.selected = None;
                 self.browse.error =
                     Some(format!("Could not search cards: {error}"));
@@ -235,10 +361,32 @@ impl Root {
         {
             self.browse.selected = rows.first().map(|row| row.card.id);
         }
+        if !query.trim().is_empty() {
+            self.browse.expanded = browse_expand_paths(&rows);
+        }
         self.browse.total = total;
         self.browse.rows = rows;
+        self.rebuild_browse_entries();
         self.browse.error = None;
         self.browse.loading = false;
+        cx.notify();
+    }
+
+    /// Rebuilds the visible table lines after results or expansion change.
+    pub(crate) fn rebuild_browse_entries(&mut self) {
+        self.browse.entries =
+            build_browse_entries(&self.browse.rows, &self.browse.expanded);
+    }
+
+    pub(crate) fn toggle_browse_group(
+        &mut self,
+        path: String,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.browse.expanded.remove(&path) {
+            let _ = self.browse.expanded.insert(path);
+        }
+        self.rebuild_browse_entries();
         cx.notify();
     }
 
@@ -362,7 +510,19 @@ impl Root {
                 .child(browse_cell("DUE", 5, colors))
                 .child(div().w(px(BROWSE_ACTION_WIDTH)).flex_none()),
         );
-        for row in &self.browse.rows {
+        for entry in &self.browse.entries {
+            if let BrowseEntry::Group(group) = entry {
+                table = table.child(self.render_browse_group(group, cx));
+                continue;
+            }
+            let BrowseEntry::Card {
+                row: index,
+                depth: entry_depth,
+            } = entry
+            else {
+                continue;
+            };
+            let row = &self.browse.rows[*index];
             let id = row.card.id;
             let key = row.key.clone();
             let menu_key = row.menu_key.clone();
@@ -389,6 +549,7 @@ impl Root {
                 .gap(px(SPACE_GROUP))
                 .h(px(52.))
                 .px(px(SPACE_BLOCK))
+                .pl(px(SPACE_BLOCK + SPACE_SECTION * *entry_depth as f32))
                 .border_t_1()
                 .border_color(colors.surface0)
                 .bg(if active {
@@ -523,6 +684,102 @@ impl Root {
             .size_full()
             .child(content)
     }
+    fn render_browse_group(
+        &self,
+        group: &BrowseGroup,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = self.colors();
+        let path = group.path.clone();
+        let row_path = path.clone();
+        let bg = blend(colors.mantle, colors.surface0, 0.45);
+        let hover_bg = blend(bg, colors.surface1, 0.5);
+        let press_bg = blend(bg, colors.crust, 0.12);
+        let mut line = div()
+            .id(group.key.clone())
+            .debug_selector(|| group.key.to_string())
+            .flex()
+            .items_center()
+            .gap(px(SPACE_GROUP))
+            .h(px(48.))
+            .px(px(SPACE_BLOCK))
+            .pl(px(SPACE_BLOCK + SPACE_SECTION * group.depth as f32))
+            .border_t_1()
+            .border_color(colors.surface0)
+            .bg(bg)
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover_bg))
+            .active(move |style| style.bg(press_bg))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_browse_group(path.clone(), cx);
+            }));
+        if group.has_children {
+            line = line.child(
+                Interaction::surface(colors).apply(
+                    div()
+                        .id(group.chevron_key.clone())
+                        .debug_selector(|| group.chevron_key.to_string())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(24.))
+                        .h(px(24.))
+                        .flex_none()
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_browse_group(row_path.clone(), cx);
+                        }))
+                        .child(icon(
+                            if group.expanded {
+                                "icon-chevron-down"
+                            } else {
+                                "icon-chevron-right"
+                            },
+                            18.,
+                            colors.overlay,
+                        )),
+                ),
+            );
+        } else {
+            line = line.child(div().w(px(24.)).flex_none());
+        }
+        line.child(icon_tile(
+            if group.has_children {
+                "icon-layers"
+            } else {
+                "icon-book"
+            },
+            colors.mauve,
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .items_center()
+                .gap(px(SPACE_GROUP))
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(14.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_family(crate::theme::font_for_text(&group.name))
+                        .child(group.name.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(12.))
+                        .text_color(colors.subtext)
+                        .child(format!("{} cards", group.count)),
+                ),
+        )
+    }
+
     fn render_browse_empty(
         &self,
         error: Option<&str>,
@@ -703,13 +960,16 @@ const BROWSE_ACTION_WIDTH: f32 = 30.;
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use ranki_model::{
         Card, CardQueue, CardTemplate, CardType, DEFAULT_DECK_ID,
         DEFAULT_MODEL_ID, Deck, Id, Note, NoteModel, StockModelKind,
     };
 
     use super::{
-        browser_row, due_label, preview_line, queue_label, sort_browser_rows,
+        BrowseEntry, browse_expand_paths, browser_row, build_browse_entries,
+        due_label, preview_line, queue_label, sort_browser_rows,
     };
 
     fn card_with_id(id: Id, queue: CardQueue, interval: i32) -> Card {
@@ -764,6 +1024,94 @@ mod tests {
         assert_eq!(due_label(&card_with_id(1, CardQueue::Review, 12)), "12d");
         assert_eq!(due_label(&card_with_id(1, CardQueue::Suspended, 12)), "-");
         assert_eq!(due_label(&card_with_id(1, CardQueue::New, 0)), "Today");
+    }
+
+    #[test]
+    fn browse_entries_group_cards_by_deck_and_open_expanded_paths() {
+        let decks = [
+            Deck {
+                id: 1,
+                name: "Languages".to_owned(),
+                description: String::new(),
+            },
+            Deck {
+                id: 2,
+                name: "Languages::French".to_owned(),
+                description: String::new(),
+            },
+            Deck {
+                id: 3,
+                name: "Math".to_owned(),
+                description: String::new(),
+            },
+        ];
+        let model = model();
+        let mut rows = Vec::new();
+        for (id, deck_id, front) in [
+            (1, 2, "Bonjour"),
+            (2, 3, "Angle"),
+            (3, 2, "Merci"),
+            (4, 1, "Salut"),
+        ] {
+            let mut card = card_with_id(id, CardQueue::New, 0);
+            card.deck_id = deck_id;
+            let note = Note {
+                id,
+                guid: String::new(),
+                model_id: DEFAULT_MODEL_ID,
+                modified: 0,
+                usn: 0,
+                tags: Vec::new(),
+                fields: vec![front.to_owned(), "Answer".to_owned()],
+                sort_field: front.to_owned(),
+                checksum: 0,
+                flags: 0,
+                data: String::new(),
+            };
+            rows.push(
+                browser_row(&card, &note, &decks, std::slice::from_ref(&model))
+                    .unwrap(),
+            );
+        }
+        let expanded = browse_expand_paths(&rows);
+        assert!(expanded.contains("Languages"));
+        assert!(expanded.contains("Languages::French"));
+
+        for _ in 0..16 {
+            let entries = build_browse_entries(&rows, &expanded);
+            let lines = entries
+                .iter()
+                .map(|entry| match entry {
+                    BrowseEntry::Group(group) => {
+                        format!(
+                            "{}:{}:{}",
+                            group.path, group.count, group.depth
+                        )
+                    }
+                    BrowseEntry::Card { row, depth } => {
+                        format!("card:{}:{}", rows[*row].front, depth)
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                lines,
+                [
+                    "Languages:3:0",
+                    "card:Salut:1",
+                    "Languages::French:2:1",
+                    "card:Bonjour:2",
+                    "card:Merci:2",
+                    "Math:1:0",
+                    "card:Angle:1",
+                ]
+            );
+        }
+
+        let collapsed = build_browse_entries(&rows, &HashSet::new());
+        assert_eq!(collapsed.len(), 2);
+        assert!(
+            matches!(collapsed[0], BrowseEntry::Group(ref group) if group.path == "Languages" && !group.expanded)
+        );
     }
 
     #[test]
