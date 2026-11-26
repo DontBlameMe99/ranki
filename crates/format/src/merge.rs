@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -19,6 +17,7 @@ use crate::error::json_error;
 use crate::media::MediaRename;
 use crate::media::ReferenceMatcher;
 use crate::package::maybe_decompress;
+use crate::schema::current_time;
 use crate::schema::encode_json;
 
 const DAY_SECS: i64 = 86_400;
@@ -104,7 +103,7 @@ pub fn merge_collection(
     rewrite_incoming_notes(&transaction, renames)?;
     let destination = read_col(&transaction, "main")?;
     let incoming = read_col(&transaction, "incoming")?;
-    let now_secs = current_unix_seconds()?;
+    let now_secs = current_time()?;
     let day_delta = source_day_delta(now_secs, incoming.crt, destination.crt)?;
     let mut state = MergeState::new(
         global_next_id(&transaction, &destination, &incoming)?,
@@ -127,17 +126,6 @@ pub fn merge_collection(
         cards,
         media: media_count,
     })
-}
-
-fn current_unix_seconds() -> Result<i64, FormatError> {
-    let elapsed =
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| {
-                FormatError::with_source("cannot read system clock", error)
-            })?;
-    i64::try_from(elapsed.as_secs())
-        .map_err(|_| FormatError::new("system clock out of range"))
 }
 
 fn day_number(now_secs: i64, crt: i64) -> Result<i64, FormatError> {
@@ -659,12 +647,7 @@ fn merge_dconf(
 
     for (key, mut value) in incoming_configs {
         let old_id = entry_id(&key, &value, "deck config")?;
-        let new_id = if used.contains(&old_id) {
-            allocate(&mut used, state)?
-        } else {
-            let _ = used.insert(old_id);
-            old_id
-        };
+        let new_id = claim_id(&mut used, state, old_id)?;
         let config_name =
             value.get("name").and_then(Value::as_str).map(str::to_owned);
         let existing = configs
@@ -797,11 +780,8 @@ impl DeckRemapper<'_> {
         if let Some(old_id) = object.get("id").and_then(Value::as_i64) {
             let new_id = if let Some(id) = merged {
                 id
-            } else if self.used.contains(&old_id) {
-                allocate(&mut self.used, self.state)?
             } else {
-                let _ = self.used.insert(old_id);
-                old_id
+                claim_id(&mut self.used, self.state, old_id)?
             };
             object.insert("id".to_owned(), Value::from(new_id));
             self.mapping.insert(old_id, new_id);
@@ -851,12 +831,7 @@ fn merge_models(
             state.imported_notetypes.push((old_id, *id));
             continue;
         }
-        let new_id = if used.contains(&old_id) {
-            allocate(&mut used, state)?
-        } else {
-            let _ = used.insert(old_id);
-            old_id
-        };
+        let new_id = claim_id(&mut used, state, old_id)?;
         set_id(&mut value, new_id, "model")?;
         remap_model_decks(&mut value, &deck_map);
         mapping.insert(old_id, new_id);
@@ -997,6 +972,18 @@ fn allocate(
     }
 }
 
+fn claim_id(
+    used: &mut BTreeSet<i64>,
+    state: &mut MergeState,
+    preferred: i64,
+) -> Result<i64, FormatError> {
+    if used.insert(preferred) {
+        Ok(preferred)
+    } else {
+        allocate(used, state)
+    }
+}
+
 fn increment(count: usize) -> Result<usize, FormatError> {
     count
         .checked_add(1)
@@ -1122,12 +1109,7 @@ fn merge_notes(
             state.note_map.insert(row.id, None);
             continue;
         }
-        let id = if used.contains(&row.id) {
-            allocate(&mut used, state)?
-        } else {
-            let _ = used.insert(row.id);
-            row.id
-        };
+        let id = claim_id(&mut used, state, row.id)?;
         let model_id =
             state.model_map.get(&row.mid).copied().unwrap_or(row.mid);
         insert
@@ -1234,12 +1216,7 @@ fn insert_cards(
                 .copied()
                 .unwrap_or(row.original_deck_id)
         };
-        let id = if used.contains(&row.id) {
-            allocate(&mut used, state)?
-        } else {
-            let _ = used.insert(row.id);
-            row.id
-        };
+        let id = claim_id(&mut used, state, row.id)?;
         // Review dues stay day numbers even while suspended or buried.
         let day_delta = state.source_day_delta;
         let due = shifted_due(row.due, row, day_delta)?;
@@ -1332,12 +1309,7 @@ fn merge_revlog(
         else {
             continue;
         };
-        let id = if used.contains(&row.id) {
-            allocate(&mut used, state)?
-        } else {
-            let _ = used.insert(row.id);
-            row.id
-        };
+        let id = claim_id(&mut used, state, row.id)?;
         insert
             .execute(params![
                 id,

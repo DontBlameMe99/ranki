@@ -157,7 +157,8 @@ pub fn copy_media(
         let final_name = unique_name(&preferred, hash, &mut cache)?;
         let destination = media_dir.join(&final_name);
         if !cache.contains(&final_name) {
-            write_new_file(&destination, &entry.bytes)?;
+            let context = format!("media file {}", destination.display());
+            write_new_file(&destination, &entry.bytes, &context)?;
             cache.record(&final_name, hash);
         }
 
@@ -177,19 +178,18 @@ pub fn copy_media(
     Ok(renames)
 }
 
-fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), FormatError> {
+pub fn write_new_file(
+    path: &Path,
+    bytes: &[u8],
+    context: &str,
+) -> Result<(), FormatError> {
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(io_error(format!(
-            "cannot create media file {}",
-            path.display()
-        )))?;
-    file.write_all(bytes).map_err(io_error(format!(
-        "cannot write media file {}",
-        path.display()
-    )))
+        .map_err(io_error(format!("cannot create {context}")))?;
+    file.write_all(bytes)
+        .map_err(io_error(format!("cannot write {context}")))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

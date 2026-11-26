@@ -104,8 +104,13 @@ fn invalid(message: impl Into<String>) -> ErrorData {
     ErrorData::invalid_params(Cow::Owned(message.into()), None)
 }
 
-fn confirm_failure() -> ToolError {
-    ToolError::call("this tool requires confirm: true to make changes")
+fn require_confirm(confirm: bool) -> Result<(), ToolError> {
+    if !confirm {
+        return Err(ToolError::call(
+            "this tool requires confirm: true to make changes",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_limit(limit: usize) -> Result<usize, ErrorData> {
@@ -629,9 +634,7 @@ impl RankiMcp {
         &self,
         Parameters(input): Parameters<CreateDeckInput>,
     ) -> ToolOutcome<DeckView> {
-        if !input.confirm {
-            return Err(confirm_failure());
-        }
+        require_confirm(input.confirm)?;
         let name = validate_deck_name(&input.name)?;
         let deck = self.store()?.create_deck(name)?;
         Ok(Json(deck_view(&deck)))
@@ -649,9 +652,7 @@ impl RankiMcp {
         &self,
         Parameters(input): Parameters<RenameDeckInput>,
     ) -> ToolOutcome<DeckView> {
-        if !input.confirm {
-            return Err(confirm_failure());
-        }
+        require_confirm(input.confirm)?;
         let name = validate_deck_name(&input.name)?;
         let deck = self.store()?.rename_deck(input.id, name)?;
         Ok(Json(deck_view(&deck)))
@@ -669,9 +670,7 @@ impl RankiMcp {
         &self,
         Parameters(input): Parameters<RemoveDeckInput>,
     ) -> ToolOutcome<DeckView> {
-        if !input.confirm {
-            return Err(confirm_failure());
-        }
+        require_confirm(input.confirm)?;
         let mut store = self.store()?;
         let deck = store
             .decks()?
@@ -764,9 +763,7 @@ impl RankiMcp {
         &self,
         Parameters(input): Parameters<AddNoteInput>,
     ) -> ToolOutcome<NoteCards> {
-        if !input.confirm {
-            return Err(confirm_failure());
-        }
+        require_confirm(input.confirm)?;
         if input.fields.is_empty() || input.fields.iter().any(String::is_empty)
         {
             return Err(invalid(
@@ -796,9 +793,7 @@ impl RankiMcp {
         &self,
         Parameters(input): Parameters<AnswerCardInput>,
     ) -> ToolOutcome<ReviewResult> {
-        if !input.confirm {
-            return Err(confirm_failure());
-        }
+        require_confirm(input.confirm)?;
         let now = crate::now_secs()?;
         let mut store = self.store()?;
         let card = store.card(input.card_id)?.ok_or_else(|| {
@@ -859,9 +854,7 @@ impl RankiMcp {
         &self,
         Parameters(input): Parameters<PackageInput>,
     ) -> ToolOutcome<ImportResult> {
-        if !input.confirm {
-            return Err(confirm_failure());
-        }
+        require_confirm(input.confirm)?;
         let path = self.file(&input.path)?;
         if !path.is_file() {
             return Err(ToolError::call(format!(
@@ -894,9 +887,7 @@ impl RankiMcp {
         &self,
         Parameters(input): Parameters<PackageInput>,
     ) -> ToolOutcome<ExportResult> {
-        if !input.confirm {
-            return Err(confirm_failure());
-        }
+        require_confirm(input.confirm)?;
         let path = self.file(&input.path)?;
         if path.exists() {
             return Err(ToolError::call(format!(

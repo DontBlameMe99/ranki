@@ -2,6 +2,7 @@
 
 use std::mem;
 
+use crate::deck_subtree_ids;
 use ranki_model::Deck;
 use ranki_model::Id;
 use ranki_model::NoteModel;
@@ -115,23 +116,12 @@ fn deck_condition(
     let mut ids = Vec::new();
     for deck in decks {
         if deck_matches(&deck.name, value) {
-            ids.extend(subtree_ids(deck, decks));
+            ids.extend(deck_subtree_ids(decks, &deck.name));
         }
     }
     ids.sort_unstable();
     ids.dedup();
     id_condition("c.did", &ids, params)
-}
-
-fn subtree_ids(deck: &Deck, decks: &[Deck]) -> Vec<Id> {
-    let prefix = format!("{}::", deck.name);
-    decks
-        .iter()
-        .filter(|candidate| {
-            candidate.id == deck.id || candidate.name.starts_with(&prefix)
-        })
-        .map(|candidate| candidate.id)
-        .collect()
 }
 
 fn model_condition(

@@ -11,7 +11,8 @@ use gpui::{
 use crate::{
     app::{self, Root, UiAction, due_total, leaf_deck_totals},
     components::{
-        ButtonTone, Interaction, action_button, icon, icon_tile, keycap,
+        ButtonTone, Interaction, action_button, icon, icon_tile, keycap, panel,
+        same_press,
     },
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED,
@@ -410,16 +411,11 @@ impl Root {
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_col()
+                panel(colors)
                     .w(px(320.))
                     .flex_none()
-                    .p(px(SPACE_SECTION))
-                    .rounded(px(24.))
-                    .bg(colors.mantle)
-                    .border_1()
-                    .border_color(colors.surface0)
+                    // The forecast supplies its own top margin.
+                    .gap(px(0.))
                     .child(
                         div()
                             .flex()
@@ -751,20 +747,10 @@ impl Root {
                 )
                 .on_click(cx.listener(
                     move |this, event: &ClickEvent, _, cx| {
-                        let same_press = match event {
-                            gpui::ClickEvent::Mouse(click) => this
-                                .deck_menu_dismissed_press
-                                .as_ref()
-                                .is_some_and(|down| {
-                                    down.button == click.down.button
-                                        && down.position == click.down.position
-                                        && down.click_count
-                                            == click.down.click_count
-                                        && down.first_mouse
-                                            == click.down.first_mouse
-                                }),
-                            gpui::ClickEvent::Keyboard(_) => false,
-                        };
+                        let same_press = same_press(
+                            event,
+                            this.deck_menu_dismissed_press.as_ref(),
+                        );
                         cx.stop_propagation();
                         this.deck_menu_dismissed_press = None;
                         if !same_press {

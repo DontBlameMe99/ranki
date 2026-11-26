@@ -17,8 +17,8 @@ use ranki_sync::{
 
 use crate::{
     app::{Root, ToastKind},
-    components::{ButtonTone, action_button, icon},
-    theme::{Palette, SPACE_BLOCK, SPACE_GROUP, SPACE_RELATED, SPACE_SECTION},
+    components::{ButtonTone, action_button, icon, panel},
+    theme::{Palette, SPACE_GROUP, SPACE_RELATED, SPACE_SECTION},
 };
 
 /// Reads the local sync state without changing it.
@@ -246,16 +246,8 @@ impl Root {
                 );
         }
 
-        div()
+        panel(colors)
             .id("settings-sync")
-            .flex()
-            .flex_col()
-            .gap(px(SPACE_BLOCK))
-            .p(px(SPACE_SECTION))
-            .rounded(px(24.))
-            .bg(colors.mantle)
-            .border_1()
-            .border_color(colors.surface0)
             .child(
                 div()
                     .flex()

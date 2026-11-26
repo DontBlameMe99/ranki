@@ -1,5 +1,7 @@
 # FSRS desired retention and optimizer research for Ranki
 
+Historical snapshot: the "current state" below describes Ranki at the research date. Current scheduler, preset, and optimizer code is in `crates/core/src/{lib,fsrs,optimizer}.rs` and `crates/model/src/config.rs`. See `docs/architecture.md` for the current crate layout.
+
 Scope: Anki source at pinned commit `be56085c32a9d02b506fa880cfa63c756c1779fc`, which pins `fsrs` crate version `6.6.2`. Ranki files read: `crates/core/src/{lib,fsrs,shared,tests}.rs`, `crates/model/src/config.rs`, `crates/bin/src/config.rs`, `docs/anki-compatibility.md`, `docs/card-types-research.md`.
 
 ## 1\. What Ranki does today

@@ -31,6 +31,7 @@ use crate::media::MediaEntry;
 use crate::media::MediaFile;
 use crate::media::collect_media_files;
 use crate::media::sanitize_filename;
+use crate::media::write_new_file;
 use crate::schema;
 
 const PACKAGE_META_LEGACY_2: &[u8] = &[0x08, 0x02];
@@ -144,7 +145,11 @@ pub fn extract_colpkg(
     }
     let collection_bytes =
         maybe_decompress(read_bytes(&mut archive, collection_name)?)?;
-    write_new_file(&destination, &collection_bytes)?;
+    write_new_file(
+        &destination,
+        &collection_bytes,
+        &destination.display().to_string(),
+    )?;
 
     let media_dir = destination_dir.join("media");
     fs::create_dir_all(&media_dir).map_err(io_error(format!(
@@ -164,7 +169,11 @@ pub fn extract_colpkg(
         let meta_path = destination_dir.join("meta");
         if !meta_path.exists() {
             let bytes = read_bytes(&mut archive, "meta")?;
-            write_new_file(&meta_path, &bytes)?;
+            write_new_file(
+                &meta_path,
+                &bytes,
+                &meta_path.display().to_string(),
+            )?;
         }
     }
     Ok(destination)
@@ -214,7 +223,7 @@ fn extract_media_file(
         return Ok(());
     }
     let bytes = maybe_decompress(read_bytes(archive, entry)?)?;
-    write_new_file(&target, &bytes)
+    write_new_file(&target, &bytes, &target.display().to_string())
 }
 
 fn is_numbered_entry(name: &str) -> bool {
@@ -557,14 +566,4 @@ fn write_json_entry<T: Serialize>(
     let bytes = serde_json::to_vec(value)
         .map_err(json_error(format!("cannot encode {name}")))?;
     write_zip_entry(writer, name, &bytes)
-}
-
-fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), FormatError> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(io_error(format!("cannot create {}", path.display())))?;
-    file.write_all(bytes)
-        .map_err(io_error(format!("cannot write {}", path.display())))
 }

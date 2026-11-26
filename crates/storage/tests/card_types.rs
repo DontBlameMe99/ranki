@@ -122,7 +122,6 @@ fn pb_string(field: u32, text: &str) -> Vec<u8> {
 
 #[expect(
     clippy::too_many_arguments,
-    clippy::type_complexity,
     reason = "fixture rows mirror the normalized Anki tables"
 )]
 fn insert_model(
@@ -131,7 +130,7 @@ fn insert_model(
     name: &str,
     config: Vec<u8>,
     fields: &[(&str, Vec<u8>)],
-    templates: &[(&str, &str, &str, Vec<u8>)],
+    templates: &[(&str, Vec<u8>)],
 ) {
     conn.execute(
         "INSERT INTO notetypes (id, name, mtime_secs, usn, config) VALUES (?1, ?2, 0, 0, ?3)",
@@ -150,8 +149,7 @@ fn insert_model(
         )
         .expect("field");
     }
-    for (ord, (name, question, answer, config)) in templates.iter().enumerate()
-    {
+    for (ord, (name, config)) in templates.iter().enumerate() {
         conn.execute(
             "INSERT INTO templates (ntid, ord, name, mtime_secs, usn, config)
              VALUES (?1, ?2, ?3, 0, 0, ?4)",
@@ -163,7 +161,6 @@ fn insert_model(
             ],
         )
         .expect("template");
-        let _ = (question, answer);
     }
 }
 
@@ -380,16 +377,11 @@ fn schema18_models_keep_kind_stock_kind_tags_ords_and_raw_config() {
         "Cloze",
         config.clone(),
         &[("Text", Vec::new()), ("Back Extra", Vec::new())],
-        &[(
-            "Cloze",
-            "{{cloze:Text}}",
-            "{{cloze:Text}}<br>{{Back Extra}}",
-            {
-                let mut blob = pb_string(1, "{{cloze:Text}}");
-                blob.extend(pb_string(2, "{{cloze:Text}}<br>{{Back Extra}}"));
-                blob
-            },
-        )],
+        &[("Cloze", {
+            let mut blob = pb_string(1, "{{cloze:Text}}");
+            blob.extend(pb_string(2, "{{cloze:Text}}<br>{{Back Extra}}"));
+            blob
+        })],
     );
     drop(conn);
 
@@ -419,16 +411,11 @@ fn cloze_tags_keep_the_extra_field_when_the_text_field_is_not_first() {
             config
         },
         &[("Back Extra", Vec::new()), ("Text", Vec::new())],
-        &[(
-            "Cloze",
-            "{{cloze:Text}}",
-            "{{cloze:Text}}<br>{{Back Extra}}",
-            {
-                let mut blob = pb_string(1, "{{cloze:Text}}");
-                blob.extend(pb_string(2, "{{cloze:Text}}<br>{{Back Extra}}"));
-                blob
-            },
-        )],
+        &[("Cloze", {
+            let mut blob = pb_string(1, "{{cloze:Text}}");
+            blob.extend(pb_string(2, "{{cloze:Text}}<br>{{Back Extra}}"));
+            blob
+        })],
     );
     drop(conn);
 
@@ -484,7 +471,7 @@ fn models_to_json_keeps_raw_config_for_export() {
         "Basic",
         config.clone(),
         &[("Front", Vec::new()), ("Back", Vec::new())],
-        &[("Card 1", "{{Front}}", "{{Back}}", pb_string(1, "{{Front}}"))],
+        &[("Card 1", pb_string(1, "{{Front}}"))],
     );
     drop(conn);
 

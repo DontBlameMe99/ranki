@@ -250,15 +250,28 @@ fn param_ids(params: &Value, key: &str) -> Result<Vec<Id>, RpcError> {
         .collect()
 }
 
+fn find_deck<'a>(decks: &'a [Deck], name: &str) -> Option<&'a Deck> {
+    decks
+        .iter()
+        .find(|deck| deck.name.eq_ignore_ascii_case(name))
+}
+
+fn find_model<'a>(
+    models: &'a [NoteModel],
+    name: &str,
+) -> Option<&'a NoteModel> {
+    models
+        .iter()
+        .find(|model| model.name.eq_ignore_ascii_case(name))
+}
+
 fn model_field_names(
     store: &Collection,
     params: &Value,
 ) -> Result<Value, RpcError> {
     let requested = param_str(params, "modelName")?;
-    let model = store
-        .models()?
-        .into_iter()
-        .find(|model| model.name.eq_ignore_ascii_case(requested))
+    let models = store.models()?;
+    let model = find_model(&models, requested)
         .ok_or_else(|| format!("model not found: {requested}"))?;
     Ok(json!(model.fields))
 }
@@ -275,15 +288,11 @@ fn add_note(store: &mut Collection, params: &Value) -> Result<Value, RpcError> {
         .as_object()
         .ok_or("invalid parameter: fields")?;
 
-    let deck = store
-        .decks()?
-        .into_iter()
-        .find(|deck| deck.name.eq_ignore_ascii_case(deck_name))
+    let decks = store.decks()?;
+    let models = store.models()?;
+    let deck = find_deck(&decks, deck_name)
         .ok_or_else(|| format!("deck not found: {deck_name}"))?;
-    let model = store
-        .models()?
-        .into_iter()
-        .find(|model| model.name.eq_ignore_ascii_case(model_name))
+    let model = find_model(&models, model_name)
         .ok_or_else(|| format!("model not found: {model_name}"))?;
 
     for key in fields.keys() {
@@ -483,13 +492,10 @@ fn deck_id_param(store: &Collection, params: &Value) -> Result<Id, RpcError> {
         return Ok(id);
     }
     let name = required_string(params, "deck")?;
-    let deck = store
-        .decks()?
-        .into_iter()
-        .find(|deck| deck.name.eq_ignore_ascii_case(name))
-        .ok_or_else(|| {
-            ranki_model::StoreError::NotFound(format!("deck not found: {name}"))
-        })?;
+    let decks = store.decks()?;
+    let deck = find_deck(&decks, name).ok_or_else(|| {
+        ranki_model::StoreError::NotFound(format!("deck not found: {name}"))
+    })?;
     Ok(deck.id)
 }
 
@@ -545,10 +551,8 @@ fn change_deck(
     params: &Value,
 ) -> Result<Value, RpcError> {
     let deck_name = param_str(params, "deck")?;
-    let deck = store
-        .decks()?
-        .into_iter()
-        .find(|deck| deck.name.eq_ignore_ascii_case(deck_name))
+    let decks = store.decks()?;
+    let deck = find_deck(&decks, deck_name)
         .ok_or_else(|| format!("deck not found: {deck_name}"))?;
     for id in param_ids(params, "cards")? {
         let Some(mut card) = store.card(id)? else {

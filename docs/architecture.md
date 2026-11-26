@@ -13,8 +13,10 @@ directly, so a collection created here opens in Anki and vice versa.
   `ranki_model::Store` against Anki's `col`, `notes`, `cards`, `revlog` and
   `graves` tables.
 - `crates/format` (`ranki-format`): `.apkg` import/export and media mapping.
-- `crates/ui` (`ranki-ui`): egui/eframe GUI with Wayland support; deck list,
+- `crates/sync` (`ranki-sync`): AnkiWeb v11 sync client.
+- `crates/ui` (`ranki-ui`): GPUI application with Wayland support; deck list,
   review screen, editor, stats.
+- `crates/bench` (`ranki-bench`): headless benchmark harness for Ranki surfaces.
 - `crates/bin` (`ranki`): CLI and AnkiConnect-compatible JSON-RPC server.
 
 ## Contract
@@ -31,7 +33,7 @@ card's `due` is a queue position.
 
 ## Development
 
-- Toolchain: `nix develop --command cargo test --workspace`.
-- Lints come from the workspace; code must pass `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check`.
+- Toolchain: `nix develop --command cargo test --workspace --all-targets --no-fail-fast`.
+- Lints come from the workspace; code must pass `nix develop --command cargo clippy --workspace --all-features --all-targets -- -D warnings` and `nix develop --command cargo fmt --all -- --check`.
 - Keep dependencies in the crate's own `Cargo.toml`; do not edit the workspace
   manifest from a worktree.

@@ -1,5 +1,7 @@
 # Ranki Nix and Home Manager research
 
+Historical snapshot: the config facts below describe the code at the research date. Current config loading and TOML parsing live in `crates/bin/src/config.rs` and `crates/model/src/config.rs`. See `docs/architecture.md` for the current crate layout.
+
 Research only. No source or flake files were changed. Verified with Nix 2.35.6 on this system.
 
 ## System snapshot

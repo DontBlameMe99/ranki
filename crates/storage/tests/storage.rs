@@ -1,6 +1,7 @@
 #![expect(clippy::expect_used, reason = "test setup panics on failure")]
 //! Integration tests for the Anki-compatible collection store.
 
+use std::env;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -54,7 +55,7 @@ fn note(fields: &[&str], tags: &[&str]) -> NewNote {
 }
 
 #[test]
-fn due_query_uses_the_queue_index_for_each_priority_branch() {
+fn due_query_uses_the_queue_index_for_learning_cards() {
     let (_directory, path) = fixture();
     let store = Collection::open(&path).expect("open");
     let _ = store.due_cards(None, 1, now_secs()).expect("due");
@@ -737,12 +738,12 @@ fn repeated_review_gets_a_unique_log_id() {
     store
         .add_note(&note(&["race", "answer"], &[]))
         .expect("add");
-    let now = now_secs();
     let card = store
-        .due_cards(None, 1, now)
+        .due_cards(None, 1, now_secs())
         .expect("due")
         .pop()
         .expect("card");
+    let now = card.modified;
     let scheduler = FsrsScheduler::default();
     let first = scheduler.schedule(
         &card,
@@ -945,17 +946,18 @@ fn open_does_not_rewrite_existing_collection_json() {
 
 #[test]
 fn reads_a_real_anki_collection_without_touching_the_original() {
-    let source =
-        Path::new("/home/user/.local/share/Anki2/main/collection.anki2");
-    if !source.exists() {
+    let Some(source) = env::var_os("RANKI_TEST_COLLECTION")
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+    else {
         eprintln!("skipping: real Anki collection not present");
         return;
-    }
-    let original = fs::read(source).expect("read original");
+    };
+    let original = fs::read(&source).expect("read original");
     let original_hash = Sha1::digest(&original);
     let directory = tempfile::tempdir().expect("tempdir");
     let copy = directory.path().join("collection.anki2");
-    fs::copy(source, &copy).expect("copy");
+    fs::copy(&source, &copy).expect("copy");
     let store = Collection::open(&copy).expect("open copy");
     let conn = read_only(&copy);
     let tables: Vec<String> = conn
@@ -999,7 +1001,7 @@ fn reads_a_real_anki_collection_without_touching_the_original() {
     drop(conn);
     drop(store);
     assert_eq!(
-        Sha1::digest(fs::read(source).expect("read again")),
+        Sha1::digest(fs::read(&source).expect("read again")),
         original_hash
     );
 }

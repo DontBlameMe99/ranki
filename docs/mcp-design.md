@@ -1,6 +1,6 @@
 # Builtin MCP server design
 
-Research and proposal only. Nothing here is implemented yet.
+Status: this document began as research and a proposal. The stdio server is implemented in `crates/bin/src/mcp.rs`. The "Tool surface" section below reflects the registered tools. Earlier sections describe the original research.
 
 ## What "artcraft" is
 
@@ -146,6 +146,23 @@ stderr through `tracing-subscriber`.
 
 ## Tool surface
 
+The registered stdio tools are:
+
+| Tool | Behavior |
+| --- | --- |
+| `add_note` | Add a note and its generated cards. Requires `confirm: true`. |
+| `answer_card` | Apply the FSRS result and record a review. Requires `confirm: true`. |
+| `create_deck` | Create a deck. Requires `confirm: true`. |
+| `due_cards` | List due cards. `limit` is 1 to 200 and defaults to 20. |
+| `export_apkg` | Export to a new `.apkg` inside the collection directory. Requires `confirm: true`. Fails if the target exists. |
+| `find_cards` | Find card ids with an Anki search query. |
+| `get_card` | Read a card and its note. Both are `null` when missing. |
+| `import_apkg` | Import a `.apkg` inside the collection directory. Requires `confirm: true`. |
+| `list_decks` | List decks in the active collection. |
+| `remove_deck` | Remove a deck, its subdecks, and their cards. Requires `confirm: true`. Destructive. |
+| `rename_deck` | Rename a deck and its subdecks. Requires `confirm: true`. |
+| `stats` | Return card counts for a deck. |
+
 All names are snake\_case. Outputs are JSON text in `content` plus `structuredContent`
 where the client supports it. `Deck`, `Card`, `Note`, `RevLog` and `Stats` below use the
 field names and numeric codes from `crates/model/src/lib.rs`. `Card.due` keeps its
@@ -170,8 +187,7 @@ RevLog= {id:int, card_id:int, usn:int, ease:"again"|"hard"|"good"|"easy",
 Stats = {new_cards:int, learning_cards:int, review_cards:int, total_cards:int}
 ```
 
-Input and output schemas. Generated DTO schemas set `additionalProperties: false`. Optional
-fields are omitted when absent.
+The original proposal's JSON schemas for nine tools are kept below for context. The table above lists all twelve registered tools. Generated DTO schemas set `additionalProperties: false`, and optional fields are omitted when absent.
 
 ```json
 {
@@ -259,11 +275,10 @@ Mapping to the `Store` trait:
   become tool errors with the storage message. `Unsupported` says the operation is not
   available. A poisoned mutex is an internal error. Never panic in a tool, never include a
   backtrace, and never write logs to stdout.
-- Writes (`add_note`, `answer_card`, `import_apkg`, `export_apkg`) require `confirm: true`. A missing or false value performs no write and returns a tool error. Tool
-  annotations mark them non-idempotent and not destructive.
-- Expose no delete, suspend, bury, reset, empty-deck or schema-changing tool. If a later
-  change needs one, it gets its own design.
-- The collection comes from `ranki mcp --collection PATH` or `RANKI_COLLECTION`. Missing
+- Writes (`create_deck`, `rename_deck`, `remove_deck`, `add_note`, `answer_card`, `import_apkg`, `export_apkg`) require `confirm: true`. A missing or false value performs no write and returns a tool error. Tool
+  annotations mark them non-idempotent. `remove_deck` is destructive and the others are not.
+- The original proposal excluded delete, suspend, bury, reset, empty-deck and schema-changing tools. The registered surface includes `remove_deck` with `confirm: true` and a destructive annotation. The other exclusions still apply.
+- The collection comes from `ranki mcp --collection PATH`, `RANKI_COLLECTION`, or `[general].collection`. Missing
   collection is a startup error; do not create one implicitly. Relative paths resolve
   against the server's launch directory and are canonicalized at startup.
 - Filesystem access is limited to the collection's directory. `import_apkg` reads only a

@@ -12,7 +12,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::Builder;
 
 const CLOCK_SKEW_SECONDS: i64 = 300;
@@ -240,9 +240,7 @@ impl<T: SyncTransport> SyncClient<T> {
         }
         self.state.last_mod = Some(info.mod_time);
         self.state.last_scm = Some(info.scm);
-        self.state.last_success = Some(now_secs()?);
-        self.state.failures = 0;
-        self.state.save(&self.state_path)?;
+        self.record_success()?;
         Ok(())
     }
 
@@ -283,9 +281,7 @@ impl<T: SyncTransport> SyncClient<T> {
             .map_err(|error| SyncError::Io(error.to_string()))?;
         self.state.last_mod = Some(info.mod_time);
         self.state.last_scm = Some(info.scm);
-        self.state.last_success = Some(now_secs()?);
-        self.state.failures = 0;
-        self.state.save(&self.state_path)?;
+        self.record_success()?;
         Ok(())
     }
 
@@ -392,6 +388,12 @@ impl<T: SyncTransport> SyncClient<T> {
         } else {
             Ok(())
         }
+    }
+
+    fn record_success(&mut self) -> Result<()> {
+        self.state.last_success = Some(now_secs()?);
+        self.state.failures = 0;
+        self.state.save(&self.state_path)
     }
 
     #[expect(
@@ -708,20 +710,20 @@ fn is_server_error(status: u16) -> bool {
     (500..600).contains(&status)
 }
 
-fn now_secs() -> Result<i64> {
-    let seconds = SystemTime::now()
+fn unix_duration() -> Result<Duration> {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| SyncError::State(error.to_string()))?
-        .as_secs();
+        .map_err(|error| SyncError::State(error.to_string()))
+}
+
+fn now_secs() -> Result<i64> {
+    let seconds = unix_duration()?.as_secs();
     i64::try_from(seconds)
         .map_err(|_| SyncError::State("clock is out of range".to_owned()))
 }
 
 fn now_ms() -> Result<i64> {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| SyncError::State(error.to_string()))?
-        .as_millis();
+    let millis = unix_duration()?.as_millis();
     i64::try_from(millis)
         .map_err(|_| SyncError::State("clock is out of range".to_owned()))
 }

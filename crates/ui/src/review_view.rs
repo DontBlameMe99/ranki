@@ -748,20 +748,7 @@ fn rating_row(
     .enumerate()
     {
         let code = rating.code();
-        let action = match rating {
-            ranki_model::Rating::Again => {
-                UiAction::Grade(ranki_model::Rating::Again)
-            }
-            ranki_model::Rating::Hard => {
-                UiAction::Grade(ranki_model::Rating::Hard)
-            }
-            ranki_model::Rating::Good => {
-                UiAction::Grade(ranki_model::Rating::Good)
-            }
-            ranki_model::Rating::Easy => {
-                UiAction::Grade(ranki_model::Rating::Easy)
-            }
-        };
+        let action = UiAction::Grade(rating);
         let theme = theme_from(colors);
         let hue = rating_fill(code, theme);
         let label_color = rating_label(code, theme);

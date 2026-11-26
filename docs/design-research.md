@@ -1,5 +1,7 @@
 # Ranki review UI design direction
 
+Historical snapshot: this research describes the former egui/eframe review screen. The UI is now GPUI in `crates/ui`. See `docs/architecture.md` for the current application.
+
 Research date: 2026-11-22. Scope: the egui/eframe review screen only. No code was
 changed.
 

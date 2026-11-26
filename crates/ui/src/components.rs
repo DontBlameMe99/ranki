@@ -1,15 +1,16 @@
 //! Shared GPUI elements for the three views.
 
 use gpui::{
-    App, ClickEvent, Div, InteractiveElement, IntoElement, ParentElement, Rgba,
-    SharedString, Stateful, StatefulInteractiveElement, Styled, Svg, Window,
-    div, px, svg,
+    App, ClickEvent, Div, InteractiveElement, IntoElement, MouseDownEvent,
+    ParentElement, Rgba, SharedString, Stateful, StatefulInteractiveElement,
+    Styled, Svg, Window, div, px, svg,
 };
 
 use crate::theme::{
     BUTTON_HEIGHT, BUTTON_PADDING_X, BUTTON_RADIUS, BUTTON_TEXT_SIZE, Palette,
-    SPACE_GROUP, SPACE_INLINE, SPACE_RELATED, Style, accent_hover,
-    accent_press, alpha, blend, danger_hover, danger_press, keycap_ink,
+    SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED, SPACE_SECTION,
+    Style, accent_hover, accent_press, alpha, blend, danger_hover,
+    danger_press, keycap_ink,
 };
 
 pub type ClickHandler =
@@ -237,6 +238,34 @@ pub fn action_button(
         tone_shades(tone, style),
         on_click,
     )
+}
+
+/// Standard panel surface used by screens, sync, and dialogs.
+#[must_use]
+pub fn panel(colors: Palette) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(SPACE_BLOCK))
+        .p(px(SPACE_SECTION))
+        .rounded(px(24.))
+        .bg(colors.mantle)
+        .border_1()
+        .border_color(colors.surface0)
+}
+
+/// Whether a click repeats the mouse press that dismissed a popup.
+#[must_use]
+pub fn same_press(event: &ClickEvent, press: Option<&MouseDownEvent>) -> bool {
+    match event {
+        ClickEvent::Mouse(click) => press.is_some_and(|down| {
+            down.button == click.down.button
+                && down.position == click.down.position
+                && down.click_count == click.down.click_count
+                && down.first_mouse == click.down.first_mouse
+        }),
+        ClickEvent::Keyboard(_) => false,
+    }
 }
 
 /// Outline button for the alternative to a primary action.

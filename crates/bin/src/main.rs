@@ -24,6 +24,7 @@ use ranki_model::StockModelKind;
 use ranki_model::Store;
 use ranki_model::parse_image_occlusion_field;
 use ranki_storage::Collection;
+use ranki_sync::SyncOutcome;
 use ranki_sync::SyncTransport;
 use ranki_ui::occlusion::{
     MaskShape, NormalizedRect, OcclusionMask, occlusion_field,
@@ -307,18 +308,10 @@ fn run_with_sync(
         manual_sync,
     );
 
-    if auto_sync {
-        match sync::sync_once(
-            sync::TransportRef(transport),
-            &settings,
-            auth.as_ref(),
-        ) {
-            Ok(outcome) => {
-                sync::warn_outcome(&outcome);
-                maybe_optimize(config, &settings);
-            }
-            Err(error) => eprintln!("ranki: sync: {error}"),
-        }
+    if auto_sync
+        && sync_once_and_warn(transport, &settings, auth.as_ref()).is_some()
+    {
+        maybe_optimize(config, &settings);
     }
 
     let scheduler = ranki_core::from_settings(&settings);
@@ -409,16 +402,30 @@ fn run_with_sync(
         manual_sync,
     );
     if shutdown_sync {
-        match sync::sync_once(
-            sync::TransportRef(transport),
+        let _ = sync_once_and_warn(
+            transport,
             &final_settings,
             shutdown_auth.as_ref(),
-        ) {
-            Ok(outcome) => sync::warn_outcome(&outcome),
-            Err(error) => eprintln!("ranki: sync: {error}"),
-        }
+        );
     }
     result
+}
+
+fn sync_once_and_warn(
+    transport: &mut dyn SyncTransport,
+    settings: &config::Settings,
+    auth: Option<&sync::SyncAuth>,
+) -> Option<SyncOutcome> {
+    match sync::sync_once(sync::TransportRef(transport), settings, auth) {
+        Ok(outcome) => {
+            sync::warn_outcome(&outcome);
+            Some(outcome)
+        }
+        Err(error) => {
+            eprintln!("ranki: sync: {error}");
+            None
+        }
+    }
 }
 
 #[expect(
@@ -469,8 +476,7 @@ fn maybe_optimize(config: &mut config::Config, settings: &config::Settings) {
 
 #[expect(
     clippy::too_many_arguments,
-    clippy::too_many_lines,
-    reason = "the CLI dispatch table maps each subcommand once"
+    reason = "store dispatch needs the collection, command, scheduler, and media paths"
 )]
 fn run_store_command(
     collection: &mut Collection,
@@ -488,20 +494,8 @@ fn run_store_command(
         Command::DeckCreate { .. }
         | Command::DeckRename { .. }
         | Command::DeckRemove { .. } => run_deck_command(collection, command),
-        Command::Due { deck, limit } => {
-            let cards =
-                collection.due_cards(deck, limit.unwrap_or(20), now_secs()?)?;
-            for card in cards {
-                println!("{}\t{}\t{}", card.id, card.deck_id, card.due);
-            }
-            Ok(())
-        }
-        Command::Search { query } => {
-            for id in collection.find_cards(&query)? {
-                println!("{id}");
-            }
-            Ok(())
-        }
+        Command::Due { deck, limit } => print_due(collection, deck, limit),
+        Command::Search { query } => print_search(collection, &query),
         Command::AddNote {
             model,
             deck_id,
@@ -542,48 +536,11 @@ fn run_store_command(
             comments.as_deref(),
             &tags,
         ),
-        Command::Models => {
-            for model in collection.models()? {
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    model.id,
-                    model.name,
-                    model.fields.len(),
-                    model.templates.len()
-                );
-            }
-            for model in ranki_model::stock_models() {
-                println!(
-                    "stock\t{}\t{}\t{}",
-                    model.name,
-                    model.fields.len(),
-                    model.templates.len()
-                );
-            }
-            Ok(())
-        }
+        Command::Models => print_models(collection),
         Command::Answer { card_id, rating } => {
-            let decision = answer_card(
-                collection,
-                card_id,
-                rating,
-                now_secs()?,
-                scheduler,
-            )?;
-            println!("{}\t{}", card_id, decision.card.due);
-            Ok(())
+            print_answer(collection, card_id, rating, scheduler)
         }
-        Command::Stats { deck } => {
-            let stats = collection.stats(deck, now_secs()?)?;
-            println!(
-                "new={} learning={} review={} total={}",
-                stats.new_cards,
-                stats.learning_cards,
-                stats.review_cards,
-                stats.total_cards
-            );
-            Ok(())
-        }
+        Command::Stats { deck } => print_stats(collection, deck),
         Command::Gui
         | Command::Import { .. }
         | Command::Export { .. }
@@ -593,6 +550,74 @@ fn run_store_command(
         | Command::Sync { .. }
         | Command::Mcp => Ok(()),
     }
+}
+
+fn print_due(
+    collection: &Collection,
+    deck: Option<Id>,
+    limit: Option<usize>,
+) -> CliResult<()> {
+    let cards = collection.due_cards(deck, limit.unwrap_or(20), now_secs()?)?;
+    for card in cards {
+        println!("{}\t{}\t{}", card.id, card.deck_id, card.due);
+    }
+    Ok(())
+}
+
+fn print_search(collection: &Collection, query: &str) -> CliResult<()> {
+    for id in collection.find_cards(query)? {
+        println!("{id}");
+    }
+    Ok(())
+}
+
+fn print_models(collection: &Collection) -> CliResult<()> {
+    for model in collection.models()? {
+        println!(
+            "{}\t{}\t{}\t{}",
+            model.id,
+            model.name,
+            model.fields.len(),
+            model.templates.len()
+        );
+    }
+    for model in ranki_model::stock_models() {
+        println!(
+            "stock\t{}\t{}\t{}",
+            model.name,
+            model.fields.len(),
+            model.templates.len()
+        );
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "answering needs the store, card, rating, and scheduler"
+)]
+fn print_answer(
+    collection: &mut Collection,
+    card_id: Id,
+    rating: Rating,
+    scheduler: &FsrsScheduler,
+) -> CliResult<()> {
+    let decision =
+        answer_card(collection, card_id, rating, now_secs()?, scheduler)?;
+    println!("{}\t{}", card_id, decision.card.due);
+    Ok(())
+}
+
+fn print_stats(collection: &Collection, deck: Option<Id>) -> CliResult<()> {
+    let stats = collection.stats(deck, now_secs()?)?;
+    println!(
+        "new={} learning={} review={} total={}",
+        stats.new_cards,
+        stats.learning_cards,
+        stats.review_cards,
+        stats.total_cards
+    );
+    Ok(())
 }
 
 fn open_gui(
@@ -641,16 +666,32 @@ fn import_package(
     Ok(())
 }
 
+type Exporter =
+    fn(&Path, &Path, &Path) -> Result<(), ranki_format::FormatError>;
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the export helper needs collection, media, destination, and exporter"
+)]
+fn export_with_checkpoint(
+    path: &Path,
+    media_dir: &Path,
+    package: &Path,
+    exporter: Exporter,
+) -> CliResult<()> {
+    let collection = open_or_create(path)?;
+    collection.checkpoint()?;
+    collection.close()?;
+    exporter(path, media_dir, package)?;
+    Ok(())
+}
+
 fn export_package(
     path: &Path,
     media_dir: &Path,
     package: &Path,
 ) -> CliResult<()> {
-    let collection = open_or_create(path)?;
-    collection.checkpoint()?;
-    collection.close()?;
-    export_apkg(path, media_dir, package)?;
-    Ok(())
+    export_with_checkpoint(path, media_dir, package, export_apkg)
 }
 
 fn export_colpkg_package(
@@ -658,11 +699,7 @@ fn export_colpkg_package(
     media_dir: &Path,
     package: &Path,
 ) -> CliResult<()> {
-    let collection = open_or_create(path)?;
-    collection.checkpoint()?;
-    collection.close()?;
-    export_colpkg(path, media_dir, package)?;
-    Ok(())
+    export_with_checkpoint(path, media_dir, package, export_colpkg)
 }
 
 pub(crate) fn default_collection_path(
@@ -823,22 +860,10 @@ fn shapes(rects: &[MaskRect], ellipses: &[MaskRect]) -> Vec<OcclusionMask> {
         .collect()
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the image occlusion command maps one flag per note field"
-)]
-fn add_image_occlusion(
-    collection: &mut Collection,
-    media_dir: &Path,
-    deck_id: Id,
-    image: &Path,
+fn occlusion_text(
     occlusions: &[String],
     masks: &[OcclusionMask],
-    header: Option<&str>,
-    back_extra: Option<&str>,
-    comments: Option<&str>,
-    tags: &[String],
-) -> CliResult<()> {
+) -> CliResult<String> {
     let built = occlusion_field(masks);
     let raw = occlusions.join("<br>");
     let occlusion = [built, raw]
@@ -852,6 +877,10 @@ fn add_image_occlusion(
             "no image-occlusion markers found".to_owned(),
         ));
     }
+    Ok(occlusion)
+}
+
+fn image_occlusion_model(collection: &mut Collection) -> CliResult<Id> {
     let model_id = resolve_model(
         collection,
         &ModelRef::Name("Image Occlusion".to_owned()),
@@ -869,15 +898,50 @@ fn add_image_occlusion(
             model.fields.len()
         )));
     }
-    let media_name = image
+    Ok(model_id)
+}
+
+fn safe_media_name(image: &Path) -> CliResult<&str> {
+    let name = image
         .file_name()
         .and_then(OsStr::to_str)
         .ok_or_else(|| CliError::Message("invalid image file name".into()))?;
-    if media_name.is_empty() || media_name.contains(['"', '<', '>']) {
+    if name.is_empty() || name.contains(['"', '<', '>']) {
         return Err(CliError::Message("unsafe image file name".into()));
     }
+    Ok(name)
+}
+
+fn stage_image(
+    media_dir: &Path,
+    image: &Path,
+    media_name: &str,
+) -> CliResult<()> {
     fs::create_dir_all(media_dir)?;
     fs::copy(image, media_dir.join(media_name))?;
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the image occlusion command maps one flag per note field"
+)]
+fn add_image_occlusion(
+    collection: &mut Collection,
+    media_dir: &Path,
+    deck_id: Id,
+    image: &Path,
+    occlusions: &[String],
+    masks: &[OcclusionMask],
+    header: Option<&str>,
+    back_extra: Option<&str>,
+    comments: Option<&str>,
+    tags: &[String],
+) -> CliResult<()> {
+    let occlusion = occlusion_text(occlusions, masks)?;
+    let model_id = image_occlusion_model(collection)?;
+    let media_name = safe_media_name(image)?;
+    stage_image(media_dir, image, media_name)?;
     let fields = vec![
         occlusion,
         format!("<img src=\"{media_name}\">"),
@@ -907,6 +971,11 @@ pub(crate) fn open_or_create(path: &Path) -> CliResult<Collection> {
     Ok(Collection::create(path)?)
 }
 
+fn unix_i64(value: u128) -> CliResult<i64> {
+    i64::try_from(value)
+        .map_err(|_| CliError::Message("timestamp too large".into()))
+}
+
 pub(crate) fn now_secs() -> CliResult<i64> {
     let pinned = env::var("RANKI_DEV_NOW_SECS")
         .ok()
@@ -917,16 +986,14 @@ pub(crate) fn now_secs() -> CliResult<i64> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| CliError::Message(error.to_string()))?;
-    i64::try_from(duration.as_secs())
-        .map_err(|_| CliError::Message("timestamp too large".into()))
+    unix_i64(duration.as_secs().into())
 }
 
 pub(crate) fn now_ms() -> CliResult<i64> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| CliError::Message(error.to_string()))?;
-    i64::try_from(duration.as_millis())
-        .map_err(|_| CliError::Message("timestamp too large".into()))
+    unix_i64(duration.as_millis())
 }
 
 #[expect(

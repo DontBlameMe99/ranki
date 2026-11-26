@@ -8,10 +8,9 @@ use gpui::{
 use crate::{
     ThemeChoice,
     app::{Root, UiAction},
-    components::{Interaction, icon},
+    components::{Interaction, icon, panel},
     theme::{
-        PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_INLINE, SPACE_RELATED,
-        SPACE_SECTION, alpha,
+        PAGE_X, PAGE_Y, SPACE_INLINE, SPACE_RELATED, SPACE_SECTION, alpha,
     },
 };
 
@@ -99,15 +98,7 @@ impl Root {
                     .child("Settings"),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(SPACE_BLOCK))
-                    .p(px(SPACE_SECTION))
-                    .rounded(px(24.))
-                    .bg(colors.mantle)
-                    .border_1()
-                    .border_color(colors.surface0)
+                panel(colors)
                     .child(
                         div()
                             .flex()
