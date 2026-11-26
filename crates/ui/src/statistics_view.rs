@@ -1,46 +1,81 @@
-//! Statistics screen: today's reviews, a seven-day forecast, and card counts.
+//! Statistics screen: a review heatmap, a seven-day forecast, and card counts.
 
 use std::{collections::HashMap, time::Duration};
 
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Rgba,
-    StatefulInteractiveElement, Styled, div, px,
+    Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
+    Rgba, StatefulInteractiveElement, Styled, div, px,
 };
 use ranki_model::{Rating, RevLog, RevLogKind};
 
 use crate::{
-    app::{Root, duration_label},
-    components::panel,
+    app::{Root, date_label, duration_label},
+    components::{icon, panel},
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE,
-        SPACE_RELATED, SPACE_SECTION, Style, alpha, queue_text, rating_fill,
-        rating_label,
+        SPACE_SECTION, Style, alpha, blend, queue_text,
     },
 };
 
 const SECONDS_PER_DAY: i64 = 86_400;
 const DAYS: usize = 7;
+/// Six months of review days plus one partial week for Sunday alignment.
+const HEATMAP_WEEKS: usize = 24;
+pub const HEATMAP_DAYS: usize = HEATMAP_WEEKS * 7;
+const HEATMAP_COLUMNS: usize = HEATMAP_WEEKS + 1;
+const HEATMAP_CELL: f32 = 26.0;
+const HEATMAP_GAP: f32 = 4.0;
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-/// One bar of the seven-day history, oldest first.
+/// One day of the review heatmap, oldest first.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DayReviews {
     pub day: i64,
     pub reviews: usize,
+    pub millis: u64,
+    /// `Again`, `Hard`, `Good`, and `Easy` counts.
+    pub ratings: [usize; 4],
+}
+
+impl DayReviews {
+    /// Percentage of a day's answers that were not Again.
+    #[must_use]
+    pub fn accuracy_percent(&self) -> Option<u8> {
+        if self.reviews == 0 {
+            return None;
+        }
+        let correct = self.reviews.saturating_sub(self.ratings[0]);
+        let percent = correct.saturating_mul(100) / self.reviews;
+        u8::try_from(percent).ok()
+    }
 }
 
 /// Review history aggregated for the statistics screen.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Statistics {
     pub reviews_today: usize,
     pub millis_today: u64,
     /// `Again`, `Hard`, `Good`, and `Easy` counts for today.
     pub ratings_today: [usize; 4],
-    /// Seven days ending today, oldest first.
-    pub days: [DayReviews; DAYS],
+    /// Days ending today, oldest first.
+    pub days: [DayReviews; HEATMAP_DAYS],
     pub streak: usize,
     pub total_reviews: usize,
     pub total_millis: u64,
+}
+
+impl Default for Statistics {
+    fn default() -> Self {
+        Self {
+            reviews_today: 0,
+            millis_today: 0,
+            ratings_today: [0; 4],
+            days: [DayReviews::default(); HEATMAP_DAYS],
+            streak: 0,
+            total_reviews: 0,
+            total_millis: 0,
+        }
+    }
 }
 
 impl Statistics {
@@ -58,19 +93,47 @@ impl Statistics {
 }
 
 /// Anki numbers days from the collection's creation time, not from midnight.
+#[must_use]
 pub fn day_number(timestamp_secs: i64, collection_start_secs: i64) -> i64 {
     timestamp_secs
         .saturating_sub(collection_start_secs)
         .div_euclid(SECONDS_PER_DAY)
 }
 
-/// Weekday names for the history bars, using the Unix epoch as the anchor.
-pub fn weekday(day: i64, collection_start_secs: i64) -> &'static str {
+/// Index of a day in the Sunday-first week grid.
+#[must_use]
+pub fn weekday_index(day: i64, collection_start_secs: i64) -> usize {
     let absolute = collection_start_secs
         .div_euclid(SECONDS_PER_DAY)
         .saturating_add(day);
     let index = absolute.saturating_add(4).rem_euclid(7);
-    WEEKDAYS[usize::try_from(index).unwrap_or(0)]
+    usize::try_from(index).unwrap_or(0)
+}
+
+/// Sunday of the week containing the first heatmap day.
+#[must_use]
+pub fn heatmap_start(first_day: i64, collection_start_secs: i64) -> i64 {
+    first_day.saturating_sub(
+        i64::try_from(weekday_index(first_day, collection_start_secs))
+            .unwrap_or(0),
+    )
+}
+
+/// Weekday name for a heatmap day, using the Unix epoch as the anchor.
+#[must_use]
+pub fn weekday(day: i64, collection_start_secs: i64) -> &'static str {
+    WEEKDAYS
+        .get(weekday_index(day, collection_start_secs))
+        .copied()
+        .unwrap_or("Sun")
+}
+
+/// Calendar label for a heatmap day.
+#[must_use]
+pub fn day_label(day: i64, collection_start_secs: i64) -> String {
+    let seconds = collection_start_secs
+        .saturating_add(day.saturating_mul(SECONDS_PER_DAY));
+    date_label(u64::try_from(seconds).unwrap_or_default())
 }
 
 /// One bar in the forecast chart: past reviews or upcoming dues.
@@ -90,7 +153,9 @@ pub fn forecast_days(
     due: &[usize],
 ) -> [ForecastDay; DAYS * 2] {
     let mut days = [ForecastDay::default(); DAYS * 2];
-    for (index, history) in stats.days.iter().enumerate() {
+    for (index, history) in
+        stats.days.iter().skip(HEATMAP_DAYS - DAYS).enumerate()
+    {
         days[index] = ForecastDay {
             day: history.day,
             reviews: history.reviews,
@@ -117,10 +182,11 @@ pub fn build_statistics(
     collection_start_secs: i64,
 ) -> Statistics {
     let today = day_number(now_secs, collection_start_secs);
-    let mut days = [DayReviews::default(); DAYS];
+    let mut days = [DayReviews::default(); HEATMAP_DAYS];
     for (index, day) in days.iter_mut().enumerate() {
-        day.day =
-            today.saturating_sub(i64::try_from(DAYS - 1 - index).unwrap_or(0));
+        day.day = today.saturating_sub(
+            i64::try_from(HEATMAP_DAYS - 1 - index).unwrap_or(0),
+        );
     }
 
     let mut per_day: HashMap<i64, usize> = HashMap::new();
@@ -135,18 +201,23 @@ pub fn build_statistics(
         stats.total_reviews += 1;
         stats.total_millis = stats.total_millis.saturating_add(millis);
 
+        let rating = match log.ease {
+            Rating::Again => 0,
+            Rating::Hard => 1,
+            Rating::Good => 2,
+            Rating::Easy => 3,
+        };
         let offset = today.saturating_sub(day);
-        if day <= today && offset < i64::try_from(DAYS).unwrap_or(7) {
-            let index = DAYS - 1 - usize::try_from(offset).unwrap_or(DAYS);
-            days[index].reviews += 1;
+        if day <= today && offset < i64::try_from(HEATMAP_DAYS).unwrap_or(168) {
+            let index = HEATMAP_DAYS
+                - 1
+                - usize::try_from(offset).unwrap_or(HEATMAP_DAYS);
+            let bucket = &mut days[index];
+            bucket.reviews += 1;
+            bucket.millis = bucket.millis.saturating_add(millis);
+            bucket.ratings[rating] += 1;
         }
         if day == today {
-            let rating = match log.ease {
-                Rating::Again => 0,
-                Rating::Hard => 1,
-                Rating::Good => 2,
-                Rating::Easy => 3,
-            };
             stats.ratings_today[rating] += 1;
             stats.reviews_today += 1;
             stats.millis_today = stats.millis_today.saturating_add(millis);
@@ -168,7 +239,7 @@ pub fn build_statistics(
 impl Root {
     pub(crate) fn render_statistics(
         &self,
-        _cx: &Context<Self>,
+        cx: &Context<Self>,
     ) -> impl IntoElement {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
@@ -189,17 +260,172 @@ impl Root {
                     .font_weight(gpui::FontWeight::BOLD)
                     .child("Statistics"),
             )
-            .child(Self::render_today(stats, style))
+            .child(self.render_activity(stats, style, cx))
             .child(self.render_history(stats, style))
             .child(Self::render_card_counts(totals, style))
     }
 
-    fn render_today(stats: &Statistics, style: Style) -> impl IntoElement {
+    fn render_activity(
+        &self,
+        stats: &Statistics,
+        style: Style,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let colors = style.colors;
+        let collection_start = self.collection_start;
+        let today = stats.days.last().map_or(0, |day| day.day);
+        let oldest = stats.days.first().map_or(0, |day| day.day);
+        let start = heatmap_start(oldest, collection_start);
+        let peak = stats
+            .days
+            .iter()
+            .map(|day| day.reviews)
+            .max()
+            .unwrap_or_default();
+        let total = stats
+            .days
+            .iter()
+            .fold(0_usize, |sum, day| sum.saturating_add(day.reviews));
+        let level_fill = |level: u8| {
+            if level == 0 {
+                alpha(colors.surface1, 0.55)
+            } else {
+                blend(colors.surface1, colors.mauve, f32::from(level) / 4.0)
+            }
+        };
+
+        let mut legend =
+            div().flex().items_center().gap(px(SPACE_INLINE)).child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(colors.overlay)
+                    .child("Less"),
+            );
+        for level in 0..=4 {
+            legend = legend.child(
+                div()
+                    .w(px(12.))
+                    .h(px(12.))
+                    .rounded(px(3.))
+                    .bg(level_fill(level)),
+            );
+        }
+        legend = legend.child(
+            div()
+                .text_size(px(11.))
+                .text_color(colors.overlay)
+                .child("More"),
+        );
+
+        let mut labels =
+            div().flex().flex_col().gap(px(HEATMAP_GAP)).w(px(32.));
+        for label in WEEKDAYS {
+            labels = labels.child(
+                div()
+                    .h(px(HEATMAP_CELL))
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.))
+                    .text_color(colors.subtext)
+                    .child(label),
+            );
+        }
+
+        let mut columns = div().flex().gap(px(HEATMAP_GAP));
+        for week in 0..HEATMAP_COLUMNS {
+            let mut column = div().flex().flex_col().gap(px(HEATMAP_GAP));
+            for row in 0..7 {
+                let index = week * 7 + row;
+                let day =
+                    start.saturating_add(i64::try_from(index).unwrap_or(0));
+                let entry = if day >= oldest && day <= today {
+                    usize::try_from(today.saturating_sub(day))
+                        .ok()
+                        .filter(|&offset| offset < HEATMAP_DAYS)
+                        .and_then(|offset| {
+                            stats.days.get(HEATMAP_DAYS - 1 - offset)
+                        })
+                } else {
+                    None
+                };
+                let reviews = entry.map_or(0, |day| day.reviews);
+                let level = if reviews == 0 || peak == 0 {
+                    0
+                } else {
+                    u8::try_from(reviews.saturating_mul(4) / peak)
+                        .unwrap_or(4)
+                        .clamp(1, 4)
+                };
+                let fill = if entry.is_none() {
+                    alpha(colors.surface1, 0.2)
+                } else {
+                    level_fill(level)
+                };
+                let border = if self.heatmap_hover == Some(day) {
+                    colors.text
+                } else if day == today {
+                    colors.peach
+                } else {
+                    alpha(colors.text, 0.0)
+                };
+                let mut cell = div()
+                    .id(ElementId::named_usize("statistics-heatmap", index))
+                    .w(px(HEATMAP_CELL))
+                    .h(px(HEATMAP_CELL))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(border)
+                    .bg(fill);
+                if entry.is_some() {
+                    cell = cell.on_hover(cx.listener(
+                        move |root, hovered: &bool, _, cx| {
+                            if *hovered {
+                                root.heatmap_hover = Some(day);
+                                cx.notify();
+                            } else if root.heatmap_hover == Some(day) {
+                                root.heatmap_hover = None;
+                                cx.notify();
+                            }
+                        },
+                    ));
+                }
+                column = column.child(cell);
+            }
+            columns = columns.child(column);
+        }
+
+        let detail = if let Some(entry) = self
+            .heatmap_hover
+            .and_then(|day| stats.days.iter().find(|entry| entry.day == day))
+        {
+            let accuracy = entry
+                .accuracy_percent()
+                .map_or_else(|| String::from("-"), |value| format!("{value}%"));
+            div()
+                .flex()
+                .items_center()
+                .gap(px(SPACE_GROUP))
+                .child(icon("icon-chart", 14., colors.mauve))
+                .child(div().text_size(px(13.)).text_color(colors.text).child(
+                    format!(
+                        "{} · {} reviews · {} accuracy · {}",
+                        day_label(entry.day, collection_start),
+                        entry.reviews,
+                        accuracy,
+                        duration_label(Duration::from_millis(entry.millis)),
+                    ),
+                ))
+        } else {
+            div()
+                .text_size(px(13.))
+                .text_color(colors.subtext)
+                .child("Hover a day to see its reviews")
+        };
+
         let accuracy = stats
             .accuracy_percent()
             .map_or_else(|| String::from("-"), |value| format!("{value}%"));
-        let metric = |label: &str, value: String, hue: Rgba| {
+        let metric = |label: &str, value: Div, hue: Rgba| {
             div()
                 .flex()
                 .flex_col()
@@ -210,116 +436,85 @@ impl Root {
                         .text_color(colors.subtext)
                         .child(label.to_owned()),
                 )
-                .child(
-                    div()
-                        .text_size(px(22.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(hue)
-                        .child(value),
-                )
+                .child(value.text_size(px(22.)).text_color(hue))
         };
-        let mut panel = div().flex().gap(px(SPACE_SECTION)).child(
-            div()
-                .flex()
-                .flex_1()
-                .flex_col()
-                .p(px(SPACE_SECTION))
-                .rounded(px(24.))
-                .bg(colors.surface0)
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(colors.subtext)
-                        .child("Reviews today"),
-                )
-                .child(
-                    div()
-                        .text_size(px(56.))
-                        .line_height(px(60.))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(colors.mauve)
-                        .child(format!("{}", stats.reviews_today)),
-                )
-                .child(
-                    div()
-                        .mt(px(SPACE_RELATED))
-                        .pt(px(SPACE_BLOCK))
-                        .flex()
-                        .gap(px(SPACE_GUTTER))
-                        .border_t_1()
-                        .border_color(colors.surface1)
-                        .child(metric("Accuracy", accuracy, colors.green))
-                        .child(metric(
-                            "Time",
-                            duration_label(Duration::from_millis(
-                                stats.millis_today,
-                            )),
-                            colors.text,
-                        ))
-                        .child(metric(
-                            "Streak",
-                            format!(
-                                "{} day{}",
-                                stats.streak,
-                                if stats.streak == 1 { "" } else { "s" }
-                            ),
-                            colors.peach,
-                        )),
-                ),
-        );
 
-        let labels = ["Again", "Hard", "Good", "Easy"];
-        let mut ratings = div()
-            .flex()
-            .flex_col()
-            .w(px(320.))
-            .gap(px(SPACE_GROUP))
-            .rounded(px(24.))
-            .bg(colors.mantle)
-            .border_1()
-            .border_color(colors.surface0)
-            .p(px(SPACE_SECTION))
+        panel(colors)
             .child(
-                div()
-                    .pb(px(SPACE_GROUP))
-                    .text_size(px(14.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Today's answers"),
-            );
-        for (index, label) in labels.iter().enumerate() {
-            let code = u8::try_from(index.saturating_add(1)).unwrap_or(1);
-            let dot = rating_fill(code, style.theme);
-            let hue = rating_label(code, style.theme);
-            ratings = ratings.child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .rounded(px(10.))
-                    .bg(alpha(colors.surface0, 0.7))
-                    .px(px(SPACE_RELATED))
-                    .py(px(SPACE_GROUP))
+                    .child(
+                        div()
+                            .text_size(px(16.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Review activity"),
+                    )
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(SPACE_GROUP))
-                            .text_size(px(13.))
-                            .text_color(colors.subtext)
-                            .child(crate::components::dot(dot, 8.))
-                            .child((*label).to_owned()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(hue)
-                            .child(format!("{}", stats.ratings_today[index])),
+                            .gap(px(SPACE_SECTION))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(colors.subtext)
+                                    .child(format!(
+                                        "{HEATMAP_DAYS} days · {total} reviews"
+                                    )),
+                            )
+                            .child(legend),
                     ),
-            );
-        }
-        panel = panel.child(ratings);
-        panel
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_center()
+                    .gap(px(SPACE_GROUP))
+                    .child(labels)
+                    .child(columns),
+            )
+            .child(detail)
+            .child(
+                div()
+                    .flex()
+                    .gap(px(SPACE_GUTTER))
+                    .border_t_1()
+                    .border_color(colors.surface1)
+                    .pt(px(SPACE_BLOCK))
+                    .child(metric(
+                        "Accuracy",
+                        div()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(accuracy),
+                        colors.green,
+                    ))
+                    .child(metric(
+                        "Time spent learning",
+                        div().font_weight(gpui::FontWeight::SEMIBOLD).child(
+                            duration_label(Duration::from_millis(
+                                stats.millis_today,
+                            )),
+                        ),
+                        colors.text,
+                    ))
+                    .child(metric(
+                        "Streak",
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(SPACE_INLINE))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(icon("icon-flame", 20., colors.peach))
+                            .child(format!(
+                                "{} day{}",
+                                stats.streak,
+                                if stats.streak == 1 { "" } else { "s" }
+                            )),
+                        colors.peach,
+                    )),
+            )
     }
 
     fn render_history(
@@ -507,7 +702,9 @@ mod tests {
     use ranki_model::{Rating, RevLog, RevLogKind};
 
     use super::{
-        ForecastDay, build_statistics, day_number, forecast_days, weekday,
+        ForecastDay, HEATMAP_COLUMNS, HEATMAP_DAYS, build_statistics,
+        day_label, day_number, forecast_days, heatmap_start, weekday,
+        weekday_index,
     };
 
     const START: i64 = 1_700_000_000;
@@ -549,19 +746,64 @@ mod tests {
         assert_eq!(stats.total_reviews, 4);
         assert_eq!(stats.total_millis, 5000);
         assert_eq!(stats.days.last().map(|day| day.reviews), Some(3));
-        assert_eq!(stats.days[5].reviews, 1);
+        assert_eq!(stats.days[HEATMAP_DAYS - 2].reviews, 1);
     }
 
     #[test]
-    fn history_is_seven_days_ending_today() {
+    fn heatmap_covers_the_full_window() {
         let logs: Vec<_> =
             (0..7).map(|day| log(day, Rating::Good, 100)).collect();
         let stats = build_statistics(&logs, START + 6 * 86_400, START);
-        let counts = stats.days.map(|day| day.reviews);
-        assert_eq!(counts, [1, 1, 1, 1, 1, 1, 1]);
-        assert_eq!(stats.days[0].day, 0);
-        assert_eq!(stats.days[6].day, 6);
+        let recent: Vec<_> = stats
+            .days
+            .iter()
+            .skip(HEATMAP_DAYS - 7)
+            .map(|day| day.reviews)
+            .collect();
+        assert_eq!(recent, [1, 1, 1, 1, 1, 1, 1]);
+        assert!(
+            stats.days[..HEATMAP_DAYS - 7]
+                .iter()
+                .all(|day| day.reviews == 0)
+        );
+        assert_eq!(stats.days[0].day, -161);
+        assert_eq!(stats.days[HEATMAP_DAYS - 1].day, 6);
         assert_eq!(stats.streak, 7);
+    }
+
+    #[test]
+    fn heatmap_grid_holds_every_stat_day() {
+        let today = 6;
+        let oldest = today - i64::try_from(HEATMAP_DAYS - 1).unwrap_or(0);
+        let start = heatmap_start(oldest, START);
+        let last_cell = start
+            .saturating_add(i64::try_from(HEATMAP_COLUMNS * 7).unwrap_or(0))
+            .saturating_sub(1);
+        assert_eq!(weekday_index(start, START), 0);
+        assert!(start <= oldest);
+        assert!(last_cell >= today);
+    }
+
+    #[test]
+    fn heatmap_days_keep_time_and_ratings() {
+        let logs = [
+            log(3, Rating::Again, 500),
+            log(3, Rating::Good, 1000),
+            log(1, Rating::Easy, 2000),
+        ];
+        let stats = build_statistics(&logs, START + 3 * 86_400 + 100, START);
+        let today = stats.days.last().unwrap();
+        assert_eq!(today.reviews, 2);
+        assert_eq!(today.millis, 1500);
+        assert_eq!(today.ratings, [1, 0, 1, 0]);
+        assert_eq!(today.accuracy_percent(), Some(50));
+
+        let older = stats.days.get(HEATMAP_DAYS - 3).unwrap();
+        assert_eq!(older.day, 1);
+        assert_eq!(older.reviews, 1);
+        assert_eq!(older.millis, 2000);
+        assert_eq!(older.ratings, [0, 0, 0, 1]);
+        assert_eq!(day_label(older.day, START), "Wednesday, 15 November");
     }
 
     #[test]
