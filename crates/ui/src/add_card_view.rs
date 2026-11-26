@@ -991,12 +991,18 @@ fn cloze_tags(number: u32) -> (String, String) {
 }
 
 /// Buttons that wrap the selected field text in Anki markup.
-const MARKUP_BUTTONS: [(&str, &str, &str, bool); 5] = [
-    ("B", "<b>", "</b>", true),
-    ("I", "<i>", "</i>", false),
-    ("U", "<u>", "</u>", false),
-    ("Code", "<pre><code>", "</code></pre>", false),
-    ("Math", "\\[", "\\]", false),
+const MARKUP_BUTTONS: [(&str, &str, &str, bool, Option<&'static str>); 5] = [
+    ("B", "<b>", "</b>", true, None),
+    ("I", "<i>", "</i>", false, None),
+    ("U", "<u>", "</u>", false, None),
+    (
+        "Code",
+        "<pre><code>",
+        "</code></pre>",
+        false,
+        Some("icon-code"),
+    ),
+    ("Math", "\\[", "\\]", false, Some("icon-math")),
 ];
 
 /// Field formatting bar plus the keyboard hint, under the first field.
@@ -1034,7 +1040,10 @@ fn formatting_toolbar(
         );
         handler
     };
-    let button = |label: &'static str, bold: bool, on_click: ClickHandler| {
+    let button = |label: &'static str,
+                  icon_name: Option<&'static str>,
+                  bold: bool,
+                  on_click: ClickHandler| {
         let button = Interaction::surface(colors)
             .apply(
                 div()
@@ -1056,7 +1065,11 @@ fn formatting_toolbar(
                     .cursor_pointer(),
             )
             .on_click(on_click);
-        button.child(label)
+        let child = match icon_name {
+            Some(name) => icon(name, 16., colors.subtext).into_any_element(),
+            None => label.into_any_element(),
+        };
+        button.child(child)
     };
     let mut toolbar = div()
         .mt(px(SPACE_RELATED))
@@ -1067,9 +1080,10 @@ fn formatting_toolbar(
         .flex_wrap()
         .items_center()
         .gap(px(SPACE_INLINE));
-    for (label, open, close, bold) in MARKUP_BUTTONS {
+    for (label, open, close, bold, icon_name) in MARKUP_BUTTONS {
         toolbar = toolbar.child(button(
             label,
+            icon_name,
             bold,
             wrap((open, close), field.clone(), handle.clone()),
         ));
@@ -1079,6 +1093,7 @@ fn formatting_toolbar(
     let image_handle = handle.clone();
     toolbar = toolbar.child(button(
         "Image",
+        Some("icon-image"),
         false,
         Box::new(move |_, window, cx| {
             let field = image_field.clone();
@@ -1092,6 +1107,7 @@ fn formatting_toolbar(
         for (label, number) in CLOZE_BUTTONS {
             toolbar = toolbar.child(button(
                 label,
+                None,
                 false,
                 wrap_cloze(number, field.clone(), handle.clone()),
             ));
@@ -1338,7 +1354,7 @@ mod tests {
 
     #[test]
     fn formatting_markup_wraps_the_selected_text() {
-        for (label, open, close, _) in super::MARKUP_BUTTONS {
+        for (label, open, close, _, _) in super::MARKUP_BUTTONS {
             let (text, caret) =
                 crate::text_field::wrap_selection("word", 0..4, (open, close));
             assert_eq!(text, format!("{open}word{close}"), "{label}");
