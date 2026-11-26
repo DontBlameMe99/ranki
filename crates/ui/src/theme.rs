@@ -97,6 +97,142 @@ pub const fn palette(theme: Theme) -> Palette {
     }
 }
 
+/// A preset offered by the card color picker.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColorSwatch {
+    pub name: &'static str,
+    /// CSS value written into the card markup. `inherit` clears an override.
+    pub hex: &'static str,
+    pub color: Option<Rgba>,
+}
+
+const MOCHA_SWATCHES: [ColorSwatch; 9] = [
+    ColorSwatch {
+        name: "Default",
+        hex: "inherit",
+        color: None,
+    },
+    ColorSwatch {
+        name: "Text",
+        hex: "#cdd6f4",
+        color: Some(MOCHA.text),
+    },
+    ColorSwatch {
+        name: "Mauve",
+        hex: "#cba6f7",
+        color: Some(MOCHA.mauve),
+    },
+    ColorSwatch {
+        name: "Red",
+        hex: "#f38ba8",
+        color: Some(MOCHA.red),
+    },
+    ColorSwatch {
+        name: "Peach",
+        hex: "#fab387",
+        color: Some(MOCHA.peach),
+    },
+    ColorSwatch {
+        name: "Yellow",
+        hex: "#f9e2af",
+        color: Some(c(0xf9e2af)),
+    },
+    ColorSwatch {
+        name: "Green",
+        hex: "#a6e3a1",
+        color: Some(MOCHA.green),
+    },
+    ColorSwatch {
+        name: "Teal",
+        hex: "#94e2d5",
+        color: Some(MOCHA.teal),
+    },
+    ColorSwatch {
+        name: "Blue",
+        hex: "#89b4fa",
+        color: Some(MOCHA.blue),
+    },
+];
+
+const LATTE_SWATCHES: [ColorSwatch; 9] = [
+    ColorSwatch {
+        name: "Default",
+        hex: "inherit",
+        color: None,
+    },
+    ColorSwatch {
+        name: "Text",
+        hex: "#4c4f69",
+        color: Some(LATTE.text),
+    },
+    ColorSwatch {
+        name: "Mauve",
+        hex: "#8839ef",
+        color: Some(LATTE.mauve),
+    },
+    ColorSwatch {
+        name: "Red",
+        hex: "#d20f39",
+        color: Some(LATTE.red),
+    },
+    ColorSwatch {
+        name: "Peach",
+        hex: "#fe640b",
+        color: Some(LATTE.peach),
+    },
+    ColorSwatch {
+        name: "Yellow",
+        hex: "#e5c890",
+        color: Some(c(0xe5c890)),
+    },
+    ColorSwatch {
+        name: "Green",
+        hex: "#40a02b",
+        color: Some(LATTE.green),
+    },
+    ColorSwatch {
+        name: "Teal",
+        hex: "#179299",
+        color: Some(LATTE.teal),
+    },
+    ColorSwatch {
+        name: "Blue",
+        hex: "#1e66f5",
+        color: Some(LATTE.blue),
+    },
+];
+
+#[must_use]
+pub const fn card_colors(theme: Theme) -> &'static [ColorSwatch] {
+    match theme {
+        Theme::Dark => &MOCHA_SWATCHES,
+        Theme::Light => &LATTE_SWATCHES,
+    }
+}
+
+/// Parses `#rgb` and `#rrggbb` into an opaque GPUI color.
+#[must_use]
+pub fn parse_hex_color(input: &str) -> Option<Rgba> {
+    let raw = input.trim().strip_prefix('#')?;
+    let value = match raw.len() {
+        3 => {
+            let r = raw.get(0..1)?;
+            let g = raw.get(1..2)?;
+            let b = raw.get(2..3)?;
+            u32::from_str_radix(&format!("{r}{r}{g}{g}{b}{b}"), 16).ok()?
+        }
+        6 => u32::from_str_radix(raw, 16).ok()?,
+        _ => return None,
+    };
+    let [_, r, g, b] = value.to_be_bytes();
+    Some(Rgba {
+        r: f32::from(r) / 255.0,
+        g: f32::from(g) / 255.0,
+        b: f32::from(b) / 255.0,
+        a: 1.0,
+    })
+}
+
 /// Applies alpha to a role color without introducing a new hue.
 #[must_use]
 pub const fn alpha(color: Rgba, amount: f32) -> Rgba {
@@ -606,10 +742,11 @@ mod tests {
         SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE, SPACE_RELATED, SPACE_SECTION,
         STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS, STAGE_WIDTH,
         STAGE_WIDTH_MIN, Theme, accent_hover, accent_press, alpha, blend,
-        contrast, font_candidates, gtk_animations_disabled, interval_label,
-        kde_animations_disabled, keycap_ink, nav_width, palette,
-        parse_flag_bool, placeholder_color, rating_fill, rating_label,
-        reduced_motion, resolve_theme, stage_width, xdg_config_dir,
+        card_colors, contrast, font_candidates, gtk_animations_disabled,
+        interval_label, kde_animations_disabled, keycap_ink, nav_width,
+        palette, parse_flag_bool, parse_hex_color, placeholder_color,
+        rating_fill, rating_label, reduced_motion, resolve_theme, stage_width,
+        xdg_config_dir,
     };
     use crate::ThemeChoice;
 
@@ -840,5 +977,28 @@ mod tests {
         assert!(!kde_animations_disabled("AnimationDurationFactor=1\n"));
         assert!(!kde_animations_disabled("[KDE]\nSingleClick=false\n"));
         assert!(!kde_animations_disabled("not a pair"));
+    }
+
+    #[test]
+    fn hex_colors_accept_short_and_long_forms() {
+        assert_eq!(parse_hex_color("#f38ba8"), Some(MOCHA.red));
+        assert_eq!(parse_hex_color("#fba"), parse_hex_color("#ffbbaa"));
+        assert_eq!(parse_hex_color("fba"), None);
+        assert_eq!(parse_hex_color(" #4c4f69 "), Some(LATTE.text));
+        assert_eq!(parse_hex_color("#12345"), None);
+        assert_eq!(parse_hex_color("#gggggg"), None);
+    }
+
+    #[test]
+    fn every_card_swatch_has_a_parseable_hex_value() {
+        for theme in [Theme::Dark, Theme::Light] {
+            for swatch in card_colors(theme) {
+                if let Some(color) = swatch.color {
+                    assert_eq!(parse_hex_color(swatch.hex), Some(color));
+                } else {
+                    assert_eq!(swatch.hex, "inherit");
+                }
+            }
+        }
     }
 }

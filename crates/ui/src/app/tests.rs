@@ -2752,3 +2752,110 @@ fn popup_actions_do_not_study_the_deck_below(cx: &mut gpui::TestAppContext) {
         "dialog click must still confirm the removal"
     );
 }
+
+#[gpui::test]
+fn color_picker_applies_markup_to_the_editor_field(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| {
+            root.view = View::AddCard;
+            root.seed_fields("Paris", cx);
+            let field = root.add.fields[0].clone();
+            root.toggle_color_picker(
+                crate::add_card_view::ColorTarget::Text,
+                field.clone(),
+                point(px(300.), px(360.)),
+                window,
+                cx,
+            );
+            assert!(root.add.color_picker.is_some());
+            root.apply_color(
+                crate::add_card_view::ColorTarget::Text,
+                field,
+                "#f38ba8",
+                window,
+                cx,
+            );
+            assert!(
+                root.add.fields[0]
+                    .read(cx)
+                    .focus_handle()
+                    .is_focused(window),
+                "applying a color keeps the editor focused"
+            );
+        });
+    });
+    let (text, open) = cx.read_entity(&root, |root, cx| {
+        (
+            root.add.fields[0].read(cx).text(),
+            root.add.color_picker.is_some(),
+        )
+    });
+    assert_eq!(text, "Paris<span style=\"color: #f38ba8\"></span>");
+    assert!(!open, "applying a color closes the picker");
+}
+
+#[gpui::test]
+fn scrolling_the_form_closes_the_color_picker(cx: &mut gpui::TestAppContext) {
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| {
+            root.view = View::AddCard;
+            let field = root.add.fields[0].clone();
+            root.toggle_color_picker(
+                crate::add_card_view::ColorTarget::Text,
+                field,
+                point(px(300.), px(360.)),
+                window,
+                cx,
+            );
+        });
+    });
+    cx.draw(
+        point(px(0.), px(0.)),
+        gpui::size(px(1280.), px(800.)),
+        |_, _| root.clone(),
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: point(px(1100.), px(600.)),
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-20.))),
+        modifiers: gpui::Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+    let (open, focused) = cx.update(|window, cx| {
+        let state = root.read(cx);
+        (
+            state.add.color_picker.is_some(),
+            state.focus.is_focused(window),
+        )
+    });
+    assert!(!open, "scrolling the form closes the color picker");
+    assert!(focused, "closing the picker restores root focus");
+}
