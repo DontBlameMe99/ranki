@@ -34,13 +34,13 @@ impl Root {
     ) -> impl IntoElement {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
-        let decks = self.decks.clone();
-        let models = self.models.clone();
-        let fields = self.add.fields.clone();
+        let decks = &self.decks;
+        let models = &self.models;
+        let fields = &self.add.fields;
         let tags_field = self.add.tags.clone();
         let tag_chips = self.add.tag_chips.clone();
-        let errors = self.add.errors.clone();
-        let model = resolve_model(&models, self.add.model_index);
+        let errors = &self.add.errors;
+        let model = resolve_model(models, self.add.model_index);
         let occlusion_mode =
             model.is_some_and(ranki_model::NoteModel::is_image_occlusion);
         let field_values = if occlusion_mode {
@@ -52,18 +52,19 @@ impl Root {
                 .collect::<Vec<_>>()
         };
         let has_content = has_preview_content(&field_values);
-        let preview_text = model.map_or_else(
-            || String::from("Choose a note type"),
-            |model| {
-                card_view::preview_card(model, &field_values, Side::Question)
-            },
-        );
-        let preview_answer = model.map_or_else(String::new, |model| {
-            card_view::preview_card(model, &field_values, Side::Answer)
-        });
-        let rendered_preview = model.map(|model| {
+        let rendered_question = model.map(|model| {
             card_view::preview_rendered(model, &field_values, Side::Question)
         });
+        let rendered_answer = model.map(|model| {
+            card_view::preview_rendered(model, &field_values, Side::Answer)
+        });
+        let preview_text = rendered_question.as_ref().map_or_else(
+            || String::from("Choose a note type"),
+            card_view::preview_text,
+        );
+        let preview_answer = rendered_answer
+            .as_ref()
+            .map_or_else(String::new, card_view::preview_text);
         let preview_reading = model.and_then(|model| {
             field_value(model, &field_values, &["Reading", "Kana"])
         });
@@ -88,7 +89,7 @@ impl Root {
                 })
                 .unwrap_or_default()
         } else {
-            note_type_tabs(&models)
+            note_type_tabs(models)
         };
         let save = self.action_click(UiAction::SaveNote);
         let content_width =
@@ -279,7 +280,7 @@ impl Root {
             .gap(px(SPACE_BLOCK))
             .min_w(px(0.));
         if occlusion_mode {
-            let editor = self.render_occlusion_editor(colors, &errors, cx);
+            let editor = self.render_occlusion_editor(colors, errors, cx);
             left = left.child(editor);
         }
         for (index, field) in fields
@@ -484,7 +485,7 @@ impl Root {
                 .into_any_element()
         });
         if let Some(name) = self.add.occlusion.image.clone() {
-            let masks = rendered_preview
+            let masks = rendered_question
                 .as_ref()
                 .map_or(&[][..], |card| card.masks.as_slice());
             preview = preview.child(card_view::occlusion_media(
@@ -494,6 +495,7 @@ impl Root {
                 colors,
                 false,
                 120.,
+                self.add.occlusion.image_size,
             ));
         }
 
@@ -565,7 +567,7 @@ impl Root {
 
     /// Image-occlusion editor: upload control and drawing area.
     fn render_occlusion_editor(
-        &mut self,
+        &self,
         colors: crate::theme::Palette,
         errors: &BTreeMap<String, String>,
         cx: &mut Context<Self>,
@@ -830,7 +832,8 @@ impl Root {
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
         let mut matches = 0;
         for (index, deck) in self.decks.iter().enumerate() {
-            if !needle.is_empty() && !deck.name.to_lowercase().contains(&needle)
+            if !needle.is_empty()
+                && !crate::app::contains_lowercase(&deck.name, &needle)
             {
                 continue;
             }

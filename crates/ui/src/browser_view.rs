@@ -33,8 +33,12 @@ pub struct BrowserRow {
     pub back: String,
     pub front_media: Vec<MediaRef>,
     pub back_media: Vec<MediaRef>,
-    pub deck: String,
-    pub model: String,
+    pub deck: SharedString,
+    pub model: SharedString,
+    /// Table-cell text prepared once with the rendered sides.
+    pub preview: SharedString,
+    pub due: SharedString,
+    pub key: SharedString,
 }
 
 /// Search state. The generation drops results from an older query.
@@ -64,25 +68,30 @@ pub fn browser_row(
             || format!("Deck {}", card.deck_id),
             |deck| deck.name.clone(),
         );
-    let front = card_view::render_card(
+    let front_rendered = card_view::render_card(
         model,
         note,
         CardRequest::question(card.ordinal),
     );
-    let back = card_view::render_card(
+    let back_rendered = card_view::render_card(
         model,
         note,
         CardRequest::answer_only(card.ordinal),
     );
+    let front = card_label(&front_rendered);
+    let back = card_label(&back_rendered);
     Some(BrowserRow {
         card: card.clone(),
         note: note.clone(),
-        front: card_label(&front),
-        front_media: front.media,
-        back: card_label(&back),
-        back_media: back.media,
-        deck,
-        model: model.name.clone(),
+        preview: SharedString::from(preview_line(&front)),
+        due: SharedString::from(due_label(card)),
+        key: SharedString::from(format!("browse-row-{}", card.id)),
+        front,
+        front_media: front_rendered.media,
+        back,
+        back_media: back_rendered.media,
+        deck: SharedString::from(deck),
+        model: SharedString::from(model.name.clone()),
     })
 }
 
@@ -158,7 +167,6 @@ impl Root {
             app.defer(move |app| {
                 let _ = weak.update(app, |root, cx| {
                     root.schedule_browse_refresh(cx);
-                    cx.notify();
                 });
             });
         })
@@ -358,6 +366,7 @@ impl Root {
         );
         for row in &self.browse.rows {
             let id = row.card.id;
+            let key = row.key.clone();
             let active = selected == Some(id);
             let state = queue_label(row.card.queue);
             let color = crate::theme::queue_color(
@@ -375,7 +384,7 @@ impl Root {
                 blend(colors.surface0, colors.surface1, 0.7)
             };
             let mut line = div()
-                .id(SharedString::from(format!("browse-row-{id}")))
+                .id(key.clone())
                 .flex()
                 .items_center()
                 .gap(px(SPACE_GROUP))
@@ -418,7 +427,7 @@ impl Root {
                         .text_ellipsis()
                         .text_size(px(14.))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(preview_line(&row.front)),
+                        .child(row.preview.clone()),
                 )
                 .child(browse_cell(row.deck.clone(), 1, colors))
                 .child(browse_cell(row.model.clone(), 2, colors))
@@ -427,7 +436,7 @@ impl Root {
                         .text_color(color)
                         .font_weight(gpui::FontWeight::SEMIBOLD),
                 )
-                .child(browse_cell(due_label(&row.card), 4, colors))
+                .child(browse_cell(row.due.clone(), 4, colors))
                 .child({
                     let menu_open =
                         self.card_menu.is_some_and(|menu| menu.id == id);
@@ -611,8 +620,8 @@ impl Root {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child("Card preview"),
             )
-            .child(browse_meta("Deck", &row.deck, colors))
-            .child(browse_meta("Note type", &row.model, colors))
+            .child(browse_meta("Deck", row.deck.as_str(), colors))
+            .child(browse_meta("Note type", row.model.as_str(), colors))
             .child(
                 div()
                     .text_size(px(11.))
@@ -796,6 +805,9 @@ mod tests {
         assert_eq!(rows[0].front, "Apple");
         assert_eq!(rows[0].back, "Answer");
         assert_eq!(rows[0].deck, "Default");
+        assert_eq!(rows[0].preview, "Apple");
+        assert_eq!(rows[0].due, "Today");
+        assert_eq!(rows[0].key.as_str(), "browse-row-1");
     }
 
     #[test]

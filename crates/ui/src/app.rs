@@ -21,7 +21,7 @@ use ranki_model::{
 use crate::{
     Options, SettingsSaver, ThemeChoice,
     browser_view::BrowseState,
-    card_view::{self, RenderedCard},
+    card_view::{self, MediaKind, MediaRef, RenderedCard},
     occlusion::{
         self, MaskShape, NormalizedRect, OcclusionMask, image_occlusion_fields,
     },
@@ -84,6 +84,10 @@ pub struct DeckRow {
     pub virtual_group: bool,
     pub has_children: bool,
     pub expanded: bool,
+    /// Table metadata built once with the tree instead of on every frame.
+    pub meta: String,
+    pub child_count: usize,
+    pub deck_index: Option<usize>,
 }
 
 /// Deck rename state.
@@ -474,6 +478,9 @@ struct LoadedCard {
     note: Option<Note>,
     question: Option<RenderedCard>,
     answer: Option<RenderedCard>,
+    answer_media: Vec<MediaRef>,
+    occlusion_image: Option<MediaRef>,
+    occlusion_image_size: Option<(f32, f32)>,
 }
 
 /// Review-session state owned by the root entity.
@@ -487,6 +494,9 @@ pub struct ReviewState {
     pub note: Option<Note>,
     pub question: Option<RenderedCard>,
     pub answer: Option<RenderedCard>,
+    pub answer_media: Vec<MediaRef>,
+    pub occlusion_image: Option<MediaRef>,
+    pub occlusion_image_size: Option<(f32, f32)>,
     pub phase: Phase,
     pub focused_elapsed: Duration,
     pub last_tick: Option<Instant>,
@@ -526,6 +536,10 @@ pub struct Root {
     pub(crate) forecast: Vec<usize>,
     pub(crate) statistics: Statistics,
     pub(crate) deck_rows: Vec<DeckRow>,
+    pub(crate) deck_rows_rev: u64,
+    pub(crate) visible_rows: Vec<DeckRow>,
+    pub(crate) visible_rows_key: (String, u64),
+    pub(crate) leaf_totals: DeckStats,
     pub(crate) selected: Option<usize>,
     pub(crate) expanded: HashSet<String>,
     pub(crate) deck_search: Entity<TextField>,
@@ -657,6 +671,10 @@ impl Root {
             forecast: Vec::new(),
             statistics: Statistics::default(),
             deck_rows: Vec::new(),
+            deck_rows_rev: 0,
+            visible_rows: Vec::new(),
+            visible_rows_key: (String::new(), 0),
+            leaf_totals: DeckStats::default(),
             selected: None,
             expanded: HashSet::new(),
             deck_search,
@@ -1212,7 +1230,6 @@ impl Root {
     /// Recomputes due counts, the forecast, and deck rows.
     fn refresh_stats(&mut self) {
         self.stats = vec![ranki_model::DeckStats::default(); self.decks.len()];
-        self.rebuild_deck_rows();
         let now = Self::now();
         self.stats = match self.store.deck_stats(now) {
             Ok(stats) => {
@@ -1545,7 +1562,12 @@ impl Root {
         }
         let size = image::image_dimensions(self.options.media_dir.join(&name))
             .ok()
-            .map(|(width, height)| (width as f32, height as f32));
+            .map(|(width, height)| {
+                (
+                    f32::from(u16::try_from(width).unwrap_or(u16::MAX)),
+                    f32::from(u16::try_from(height).unwrap_or(u16::MAX)),
+                )
+            });
         self.add.occlusion.image_size = size;
         self.add.occlusion.image = Some(name);
         let _ = self.add.errors.remove("occlusion");
@@ -1870,10 +1892,36 @@ impl Root {
             &note,
             card_view::CardRequest::answer_only(card.ordinal),
         );
+        let answer_media =
+            card_view::answer_only_media(&question.media, &answer.media);
+        let occlusion_image = note.fields.get(1).and_then(|field| {
+            card_view::media_refs(field)
+                .into_iter()
+                .find(|media| media.kind == MediaKind::Image)
+        });
+        let occlusion_image_size = if question.masks.is_empty() {
+            None
+        } else {
+            occlusion_image
+                .as_ref()
+                .and_then(|media| {
+                    card_view::media_path(&self.options.media_dir, &media.name)
+                })
+                .and_then(|path| image::image_dimensions(path).ok())
+                .map(|(width, height)| {
+                    (
+                        f32::from(u16::try_from(width).unwrap_or(u16::MAX)),
+                        f32::from(u16::try_from(height).unwrap_or(u16::MAX)),
+                    )
+                })
+        };
         Some(LoadedCard {
             note: Some(note),
             question: Some(question),
             answer: Some(answer),
+            answer_media,
+            occlusion_image,
+            occlusion_image_size,
         })
     }
 
@@ -1893,6 +1941,9 @@ impl Root {
         self.review.note = loaded.note;
         self.review.question = loaded.question;
         self.review.answer = loaded.answer;
+        self.review.answer_media = loaded.answer_media;
+        self.review.occlusion_image = loaded.occlusion_image;
+        self.review.occlusion_image_size = loaded.occlusion_image_size;
         self.review.last_tick = Some(Instant::now());
         self.review.last_grade_at = Some(Instant::now());
         self.refresh_previews();
@@ -2475,6 +2526,25 @@ impl Root {
     pub(crate) fn rebuild_deck_rows(&mut self) {
         self.deck_rows =
             build_deck_rows(&self.decks, &self.stats, &self.expanded);
+        prepare_deck_rows(&self.decks, &mut self.deck_rows);
+        self.deck_rows_rev = self.deck_rows_rev.wrapping_add(1);
+        self.leaf_totals = leaf_deck_totals(&self.decks, &self.stats);
+    }
+
+    pub(crate) fn refresh_visible_deck_rows(&mut self, cx: &App) {
+        let query = self.deck_search.read(cx).text();
+        if self.visible_rows_key.0 == query
+            && self.visible_rows_key.1 == self.deck_rows_rev
+        {
+            return;
+        }
+        self.visible_rows = compute_visible_deck_rows(
+            &self.decks,
+            &self.stats,
+            &self.deck_rows,
+            &query,
+        );
+        self.visible_rows_key = (query, self.deck_rows_rev);
     }
 
     pub(crate) fn toggle_deck(&mut self, path: String, cx: &mut Context<Self>) {
@@ -2685,9 +2755,12 @@ impl Render for Root {
         cx: &mut Context<Self>,
     ) -> impl gpui::IntoElement {
         self.tick_focus(window);
-        self.poll_external_change(cx);
-        let colors = self.colors();
+
         let view = self.view;
+        if view == View::Decks {
+            self.refresh_visible_deck_rows(cx);
+        }
+        let colors = self.colors();
         let main = match view {
             View::Decks => self.render_decks(window, cx).into_any_element(),
             View::Browse => self.render_browse(window, cx).into_any_element(),
@@ -3021,6 +3094,9 @@ pub fn build_deck_rows(
             virtual_group: node.deck.is_none(),
             has_children,
             expanded: open,
+            meta: String::new(),
+            child_count: 0,
+            deck_index: None,
         });
         if open && let Some(list) = children.get(position) {
             for child in list.iter().rev() {
@@ -3029,6 +3105,33 @@ pub fn build_deck_rows(
         }
     }
     rows
+}
+
+/// Fills the row fields that depend on the finished tree, not on each frame.
+pub fn prepare_deck_rows(decks: &[Deck], rows: &mut [DeckRow]) {
+    let by_path = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.path.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let by_id = decks
+        .iter()
+        .enumerate()
+        .map(|(index, deck)| (deck.id, index))
+        .collect::<HashMap<_, _>>();
+    let mut children = vec![0usize; rows.len()];
+    for row in rows.iter() {
+        if let Some((parent, _)) = row.path.rsplit_once("::")
+            && let Some(&index) = by_path.get(parent)
+        {
+            children[index] = children[index].saturating_add(1);
+        }
+    }
+    for (row, count) in rows.iter_mut().zip(children) {
+        row.child_count = count;
+        row.meta = deck_meta_counts(count, row.stats.total_cards);
+        row.deck_index = row.id.and_then(|id| by_id.get(&id).copied());
+    }
 }
 
 #[must_use]
@@ -3134,7 +3237,7 @@ pub fn sum_leaf_counts(rows: &[DeckRow]) -> DeckStats {
 }
 
 /// Matches `needle` inside `haystack` the way a lowercased search would.
-fn contains_lowercase(haystack: &str, needle: &str) -> bool {
+pub fn contains_lowercase(haystack: &str, needle: &str) -> bool {
     if haystack.is_ascii() && needle.is_ascii() {
         let window = needle.len();
         return window > 0
@@ -3166,6 +3269,31 @@ pub fn filter_decks(rows: &[DeckRow], query: &str) -> Vec<DeckRow> {
         .filter(|row| keep.contains(row.path.as_str()))
         .cloned()
         .collect()
+}
+
+/// Rows shown in the deck table for the current search query.
+#[must_use]
+fn compute_visible_deck_rows(
+    decks: &[Deck],
+    stats: &[DeckStats],
+    rows: &[DeckRow],
+    query: &str,
+) -> Vec<DeckRow> {
+    if query.trim().is_empty() {
+        return rows.to_vec();
+    }
+    let mut expanded = decks
+        .iter()
+        .map(|deck| deck.name.clone())
+        .collect::<HashSet<_>>();
+    for deck in decks {
+        for (index, _) in deck.name.match_indices("::") {
+            let _ = expanded.insert(deck.name[..index].to_owned());
+        }
+    }
+    let mut rows = build_deck_rows(decks, stats, &expanded);
+    prepare_deck_rows(decks, &mut rows);
+    filter_decks(&rows, query)
 }
 
 /// Resolves a note-type tab to a model from the store.
@@ -3329,6 +3457,7 @@ pub fn collect_tags(chips: &mut Vec<String>, text: &str) -> String {
     remainder.to_owned()
 }
 
+#[cfg(test)]
 /// Deck row metadata: child count for parents and total cards for every row.
 #[must_use]
 pub fn deck_meta(rows: &[DeckRow], row: &DeckRow) -> String {
@@ -3340,7 +3469,10 @@ pub fn deck_meta(rows: &[DeckRow], row: &DeckRow) -> String {
                 && other.path.starts_with(&prefix)
         })
         .count();
-    let cards = row.stats.total_cards;
+    deck_meta_counts(children, row.stats.total_cards)
+}
+
+fn deck_meta_counts(children: usize, cards: usize) -> String {
     let cards_label = if cards == 1 {
         String::from("1 card")
     } else {

@@ -1,7 +1,9 @@
 //! Anki template parsing, cloze and occlusion rendering, and bounded media cache.
 
 use std::{
+    cell::RefCell,
     collections::{HashMap, VecDeque},
+    rc::Rc,
     sync::Arc,
 };
 
@@ -19,9 +21,11 @@ use crate::theme::{Palette, SPACE_GROUP, alpha};
 
 mod markup;
 
+#[cfg(test)]
+pub use markup::cloze_text;
 pub use markup::{
     ClozeSegment, MaskOverlay, MediaKind, MediaRef, answer_only_media,
-    cloze_segments, cloze_text, media_refs, occlusion_overlays, strip_tags,
+    cloze_segments, media_refs, occlusion_overlays, strip_tags,
 };
 use markup::{is_empty_html, normalize_newlines};
 
@@ -198,7 +202,29 @@ pub fn render_template(
     fields: FieldValues<'_>,
     front_side: &str,
 ) -> String {
-    render_nodes(&parse_template(template), fields, front_side)
+    render_nodes(&parsed_template(template), fields, front_side)
+}
+
+const TEMPLATE_CACHE_LIMIT: usize = 128;
+
+thread_local! {
+    static TEMPLATES: RefCell<HashMap<String, Rc<[TemplateNode]>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn parsed_template(source: &str) -> Rc<[TemplateNode]> {
+    TEMPLATES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(nodes) = cache.get(source) {
+            return Rc::clone(nodes);
+        }
+        let nodes = Rc::from(parse_template(source));
+        if cache.len() >= TEMPLATE_CACHE_LIMIT {
+            cache.clear();
+        }
+        let _ = cache.insert(source.to_owned(), Rc::clone(&nodes));
+        nodes
+    })
 }
 
 fn render_nodes(
@@ -326,15 +352,15 @@ pub fn render_card(
     };
     let rendered = render_template(&source, fields, &front);
     let text = strip_tags(&rendered);
-    let clozes = if model.is_cloze() {
-        cloze_segments(&text, ordinal, side)
+    let (text, clozes) = if model.is_cloze() {
+        let clozes = cloze_segments(&text, ordinal, side);
+        let text = clozes
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+        (text, clozes)
     } else {
-        Vec::new()
-    };
-    let text = if model.is_cloze() {
-        cloze_text(&text, ordinal, side)
-    } else {
-        text
+        (text, Vec::new())
     };
     let masks = if model.is_image_occlusion() {
         note.fields
@@ -580,7 +606,7 @@ impl ImageCache for LruImageCache {
 ///
 /// Names come from imported card content, so absolute paths and parent
 /// segments are rejected instead of escaping `media_dir`.
-fn media_path(
+pub fn media_path(
     media_dir: &std::path::Path,
     name: &str,
 ) -> Option<std::path::PathBuf> {
@@ -621,17 +647,24 @@ pub fn occlusion_media(
     colors: Palette,
     answer: bool,
     height: f32,
+    natural_size: Option<(f32, f32)>,
 ) -> Div {
     let path = media_path(media_dir, name);
-    let (width, fitted_height) = path
-        .as_ref()
-        .and_then(|path| image::image_dimensions(path).ok())
-        .map_or((520.0, height), |(width, height_px)| {
-            let width = f32::from(u16::try_from(width).unwrap_or(u16::MAX));
-            let natural_height =
-                f32::from(u16::try_from(height_px).unwrap_or(u16::MAX))
-                    .max(1.0);
-            let scale = (520.0 / width.max(1.0)).min(height / natural_height);
+    let natural = natural_size.or_else(|| {
+        path.as_ref()
+            .and_then(|path| image::image_dimensions(path).ok())
+            .map(|(width, height)| {
+                (
+                    f32::from(u16::try_from(width).unwrap_or(u16::MAX)),
+                    f32::from(u16::try_from(height).unwrap_or(u16::MAX)),
+                )
+            })
+    });
+    let (width, fitted_height) =
+        natural.map_or((520.0, height), |(width, natural_height)| {
+            let width = width.max(1.0);
+            let natural_height = natural_height.max(1.0);
+            let scale = (520.0 / width).min(height / natural_height);
             (width * scale, natural_height * scale)
         });
     div()
@@ -722,6 +755,19 @@ pub fn preview_rendered(
     render_card(model, &note, request)
 }
 
+/// Picks the last non-empty line of a rendered card for a compact preview.
+#[must_use]
+pub fn preview_text(rendered: &RenderedCard) -> String {
+    rendered
+        .text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .to_owned()
+}
+
+#[cfg(test)]
 /// Renders note fields through the selected template into a preview block.
 #[must_use]
 pub fn preview_card(
@@ -729,13 +775,7 @@ pub fn preview_card(
     fields: &[String],
     side: Side,
 ) -> String {
-    preview_rendered(model, fields, side)
-        .text
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("")
-        .to_owned()
+    preview_text(&preview_rendered(model, fields, side))
 }
 
 #[cfg(test)]

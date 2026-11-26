@@ -9,7 +9,7 @@ use gpui::{
 use ranki_model::{Rating, RevLog, RevLogKind};
 
 use crate::{
-    app::{self, Root, duration_label},
+    app::{Root, duration_label},
     components::panel,
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE,
@@ -138,7 +138,7 @@ impl Root {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let stats = &self.statistics;
-        let totals = app::leaf_deck_totals(&self.decks, &self.stats);
+        let totals = self.leaf_totals;
         div()
             .size_full()
             .flex()
