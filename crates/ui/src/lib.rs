@@ -65,7 +65,7 @@ pub fn run(
     options: Options,
     save_settings: SettingsSaver,
 ) {
-    let media_dir = options.media_dir.clone();
+    let media_dir = options.paths.media_dir.clone();
     Application::new()
         .with_assets(assets::Assets { media_dir })
         .run(move |app: &mut App| {

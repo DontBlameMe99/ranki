@@ -500,7 +500,7 @@ impl Root {
                     }))
                     .children(card_view::media_column(
                         &question_media,
-                        &self.options.media_dir,
+                        &self.options.paths.media_dir,
                         colors,
                         120.,
                     ))
@@ -508,7 +508,7 @@ impl Root {
                     .child(preview_answer)
                     .children(card_view::media_column(
                         &answer_media,
-                        &self.options.media_dir,
+                        &self.options.paths.media_dir,
                         colors,
                         120.,
                     ))
@@ -622,7 +622,7 @@ impl Root {
         let image = self.add.occlusion.image.clone();
         let masks = self.add.occlusion.masks.clone();
         let dragging = self.add.occlusion.drag_rect();
-        let media_dir = self.options.media_dir.clone();
+        let media_dir = self.options.paths.media_dir.clone();
 
         let image_button = {
             let has_image = image.is_some();

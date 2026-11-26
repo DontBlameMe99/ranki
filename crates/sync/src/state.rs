@@ -6,7 +6,6 @@ use std::fs::{self, Permissions};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::path::PathBuf;
 
 const STATE_VERSION: u8 = 1;
 const STATE_MODE: u32 = 0o600;
@@ -118,11 +117,15 @@ impl SyncState {
     }
 }
 
-/// Path of the sync state file beside a collection.
-#[must_use]
-pub fn state_path(collection: &Path) -> PathBuf {
-    let parent = collection.parent().unwrap_or_else(|| Path::new("."));
-    parent.join("ranki-sync.json")
+/// Stores a host key atomically while preserving the rest of the state.
+///
+/// # Errors
+///
+/// Returns an error when the state file cannot be read or written.
+pub fn set_host_key(path: &Path, key: &str) -> Result<()> {
+    let mut state = SyncState::load(path)?;
+    key.clone_into(&mut state.host_key);
+    state.save(path)
 }
 
 /// Clears the host key while keeping the last sync stamps.
@@ -130,12 +133,11 @@ pub fn state_path(collection: &Path) -> PathBuf {
 /// # Errors
 ///
 /// Returns an error when an existing state file cannot be read or written.
-pub fn clear_host_key(collection: &Path) -> Result<()> {
-    let path = state_path(collection);
+pub fn clear_host_key(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    let mut state = SyncState::load(&path)?;
+    let mut state = SyncState::load(path)?;
     state.host_key.clear();
-    state.save(&path)
+    state.save(path)
 }

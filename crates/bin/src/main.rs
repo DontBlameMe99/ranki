@@ -109,10 +109,6 @@ impl Display for ModelRef {
     reason = "mutually exclusive sync flags map directly onto CLI switches"
 )]
 struct Cli {
-    #[arg(long, global = true, value_name = "PATH")]
-    collection: Option<PathBuf>,
-    #[arg(long, global = true, value_name = "PATH")]
-    media_dir: Option<PathBuf>,
     #[arg(long, global = true, conflicts_with = "no_sync")]
     sync: bool,
     #[arg(long, global = true, conflicts_with = "sync")]
@@ -272,31 +268,37 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> CliResult<()> {
     let mut config = config::load();
     let mut transport = sync::lazy_http_transport(&config);
-    run_with_sync(cli, &mut config, &mut transport)
+    let data_dir = config::data_dir_path(
+        env::var_os("XDG_DATA_HOME").as_deref(),
+        env::var_os("HOME").as_deref(),
+    )
+    .ok_or_else(|| {
+        CliError::Message(
+            "cannot resolve Ranki's data directory; set XDG_DATA_HOME or HOME"
+                .into(),
+        )
+    })?;
+    run_with_sync(
+        cli,
+        &mut config,
+        &mut transport,
+        ranki_model::DataPaths::new(data_dir),
+    )
 }
 
 /// CLI entry point with an injectable sync transport. Tests never reach HTTP.
 #[expect(
     clippy::too_many_lines,
-    reason = "CLI dispatch maps each subcommand once"
+    clippy::too_many_arguments,
+    reason = "CLI dispatch maps each subcommand once and takes injected test seams"
 )]
 fn run_with_sync(
     cli: Cli,
     config: &mut config::Config,
     transport: &mut dyn SyncTransport,
+    paths: ranki_model::DataPaths,
 ) -> CliResult<()> {
-    let mut cli = cli;
-    if cli.collection.is_none() {
-        cli.collection = env::var_os("RANKI_COLLECTION").map(PathBuf::from);
-    }
-    let has_collection =
-        cli.collection.is_some() || config.general.collection.is_some();
-    let fallback = if has_collection {
-        None
-    } else {
-        Some(default_collection_path(env::var_os("HOME").as_deref())?)
-    };
-    let settings = config::resolve_settings(&cli, config, fallback);
+    let settings = config::resolve_settings(&cli, config, paths);
     let manual_sync = matches!(cli.command, Some(Command::Sync { .. }));
     let (auth, auto_sync) = sync::startup_credentials(&settings, manual_sync);
 
@@ -307,12 +309,12 @@ fn run_with_sync(
     }
 
     let scheduler = ranki_core::from_settings(&settings);
-    let collection_path = settings.collection.as_path();
-    let media_dir = settings.media_dir.as_path();
+    let collection_path = settings.paths.collection.as_path();
+    let media_dir = settings.paths.media_dir.as_path();
     let command = cli.command.unwrap_or(Command::Gui);
     let mut final_settings = settings.clone();
     let result = match command {
-        Command::Mcp => mcp::serve(Some(collection_path), scheduler),
+        Command::Mcp => mcp::serve(&settings.paths, scheduler),
         Command::Gui => match open_gui(&settings, config) {
             Ok(ui_settings) => {
                 if let Some(settings_from_ui) = ui_settings {
@@ -419,10 +421,10 @@ fn maybe_optimize(config: &mut config::Config, settings: &config::Settings) {
     let Ok(now) = now_secs() else {
         return;
     };
-    if !settings.collection.exists() {
+    if !settings.paths.collection.exists() {
         return;
     }
-    let Ok(collection) = Collection::open(&settings.collection) else {
+    let Ok(collection) = Collection::open(&settings.paths.collection) else {
         eprintln!("ranki: auto-optimize: cannot open the collection");
         return;
     };
@@ -585,9 +587,9 @@ fn open_gui(
     settings: &config::Settings,
     config: &config::Config,
 ) -> CliResult<Option<config::Settings>> {
-    let collection = open_or_create(&settings.collection)?;
+    let collection = open_or_create(&settings.paths.collection)?;
     drop(collection);
-    let store = ReopeningCollection::new(&settings.collection);
+    let store = ReopeningCollection::new(&settings.paths.collection);
     let mut options = settings.clone();
     options.ui_state = config::load_ui_state();
     let saved = Arc::new(Mutex::new(config.clone()));
@@ -672,20 +674,6 @@ fn export_colpkg_package(
     package: &Path,
 ) -> CliResult<()> {
     export_with_checkpoint(path, media_dir, package, export_colpkg)
-}
-
-pub(crate) fn default_collection_path(
-    home: Option<&OsStr>,
-) -> CliResult<PathBuf> {
-    let home_dir = home.ok_or_else(|| {
-        CliError::Message("HOME is not set; pass --collection PATH".into())
-    })?;
-    Ok(Path::new(home_dir).join(".local/share/ranki/collection.anki2"))
-}
-
-pub(crate) fn media_dir_for(collection: &Path) -> PathBuf {
-    let parent = collection.parent().unwrap_or_else(|| Path::new("."));
-    parent.join("collection.media")
 }
 
 fn run_deck_command(
@@ -1041,8 +1029,6 @@ mod tests {
 
     use super::Cli;
     use super::Command;
-    use super::default_collection_path;
-    use super::media_dir_for;
     use super::now_secs;
     use super::parse_rating;
     use super::run_with_sync;
@@ -1055,8 +1041,8 @@ mod tests {
     #[test]
     fn auto_sync_runs_at_startup_and_rereads_state_after_the_command() {
         let directory = tempfile::tempdir().unwrap();
-        let collection = directory.path().join("collection.anki2");
-        assert!(crate::open_or_create(&collection).is_ok());
+        let paths = ranki_model::DataPaths::new(directory.path());
+        assert!(crate::open_or_create(&paths.collection).is_ok());
         let mut config = ranki_model::Config::default();
         config.sync.enabled = true;
         config.scheduler.auto_optimize = false;
@@ -1071,8 +1057,7 @@ mod tests {
             "last_success": null,
             "failures": 0,
         });
-        fs::write(super::sync::state_path(&collection), state.to_string())
-            .unwrap();
+        fs::write(&paths.sync_state, state.to_string()).unwrap();
         let response = MockResponse::ok_json(&serde_json::json!({
             "mod": 1_700_000_000_000_i64,
             "scm": 1_700_000_000_000_i64,
@@ -1084,13 +1069,8 @@ mod tests {
         let mut transport = MockTransport::new()
             .with_response(SyncMethod::Meta, response.clone())
             .with_response(SyncMethod::Meta, response);
-        let cli = parse(&[
-            "ranki",
-            "--collection",
-            collection.to_str().unwrap(),
-            "decks",
-        ]);
-        run_with_sync(cli, &mut config, &mut transport).unwrap();
+        let cli = parse(&["ranki", "decks"]);
+        run_with_sync(cli, &mut config, &mut transport, paths).unwrap();
         assert_eq!(transport.request_count(), 2);
         assert!(
             transport
@@ -1186,22 +1166,17 @@ mod tests {
     #[test]
     fn sync_disabled_commands_never_use_the_transport() {
         let directory = tempfile::tempdir().unwrap();
-        let collection = directory.path().join("collection.anki2");
-        assert!(crate::open_or_create(&collection).is_ok());
+        let paths = ranki_model::DataPaths::new(directory.path());
+        assert!(crate::open_or_create(&paths.collection).is_ok());
         let mut config = ranki_model::Config::default();
         fs::write(
-            super::sync::state_path(&collection),
+            &paths.sync_state,
             r#"{"version":1,"host_key":"stored-hkey"}"#,
         )
         .unwrap();
         let mut transport = MockTransport::new();
-        let cli = parse(&[
-            "ranki",
-            "--collection",
-            collection.to_str().unwrap(),
-            "decks",
-        ]);
-        run_with_sync(cli, &mut config, &mut transport).unwrap();
+        let cli = parse(&["ranki", "decks"]);
+        run_with_sync(cli, &mut config, &mut transport, paths).unwrap();
         assert_eq!(transport.request_count(), 0);
     }
 
@@ -1214,43 +1189,20 @@ mod tests {
     }
 
     #[test]
-    fn collection_flag_is_global() {
-        let cli = parse(&["ranki", "--collection", "/tmp/demo.anki2", "decks"]);
-        assert_eq!(
-            cli.collection.as_deref(),
-            Some(Path::new("/tmp/demo.anki2"))
+    fn legacy_path_flags_are_rejected() {
+        assert!(
+            Cli::try_parse_from([
+                "ranki",
+                "--collection",
+                "/tmp/demo.anki2",
+                "decks"
+            ])
+            .is_err()
         );
-        assert!(matches!(cli.command, Some(Command::Decks)));
-    }
-
-    #[test]
-    fn media_dir_flag_is_global() {
-        let cli = parse(&["ranki", "mcp", "--media-dir", "/tmp/media"]);
-        assert_eq!(cli.media_dir.as_deref(), Some(Path::new("/tmp/media")));
-        assert!(matches!(cli.command, Some(Command::Mcp)));
-    }
-
-    #[test]
-    fn export_colpkg_uses_global_collection_and_media_paths() {
-        let cli = parse(&[
-            "ranki",
-            "--collection",
-            "/tmp/demo.anki2",
-            "--media-dir",
-            "/tmp/media",
-            "export-colpkg",
-            "/tmp/backup.colpkg",
-        ]);
-        assert_eq!(
-            cli.collection.as_deref(),
-            Some(Path::new("/tmp/demo.anki2"))
+        assert!(
+            Cli::try_parse_from(["ranki", "mcp", "--media-dir", "/tmp/media"])
+                .is_err()
         );
-        assert_eq!(cli.media_dir.as_deref(), Some(Path::new("/tmp/media")));
-        assert!(matches!(
-            cli.command,
-            Some(Command::ExportColpkg { package })
-                if package == Path::new("/tmp/backup.colpkg")
-        ));
     }
 
     #[test]
@@ -1454,18 +1406,17 @@ mod tests {
     }
 
     #[test]
-    fn default_paths_are_separate_from_anki() {
-        let collection =
-            default_collection_path(Some(OsStr::new("/home/user"))).unwrap();
-        assert_eq!(
-            collection,
-            Path::new("/home/user/.local/share/ranki/collection.anki2")
-        );
-        assert_eq!(
-            media_dir_for(&collection),
-            Path::new("/home/user/.local/share/ranki/collection.media")
-        );
-        assert!(default_collection_path(None).is_err());
+    fn data_layout_is_separate_from_anki() {
+        let data_dir = super::config::data_dir_path(
+            Some(OsStr::new("/data")),
+            Some(OsStr::new("/home/user")),
+        )
+        .unwrap();
+        assert_eq!(data_dir, Path::new("/data/ranki"));
+        let paths = ranki_model::DataPaths::new(data_dir);
+        assert_eq!(paths.collection, Path::new("/data/ranki/collection.anki2"));
+        assert_eq!(paths.media_dir, Path::new("/data/ranki/collection.media"));
+        assert_eq!(paths.sync_state, Path::new("/data/ranki/ranki-sync.json"));
     }
 
     #[test]
@@ -1507,14 +1458,8 @@ mod tests {
             .unwrap();
         let mut config = ranki_model::Config::default();
         config.sync.hkey_file = Some(key_file.to_string_lossy().into_owned());
-        let collection = directory.path().join("collection.anki2");
-        let cli = parse(&[
-            "ranki",
-            "--collection",
-            collection.to_str().unwrap(),
-            "sync",
-            "--status",
-        ]);
+        let paths = ranki_model::DataPaths::new(directory.path());
+        let cli = parse(&["ranki", "sync", "--status"]);
         let now = i64::try_from(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1529,8 +1474,9 @@ mod tests {
             }))
             .unwrap(),
         );
-        run_with_sync(cli, &mut config, &mut transport).unwrap();
+        run_with_sync(cli, &mut config, &mut transport, paths.clone()).unwrap();
         assert_eq!(transport.request_count(), 1);
         assert_eq!(transport.requests()[0].method, SyncMethod::Meta);
+        assert!(paths.sync_state.is_file());
     }
 }

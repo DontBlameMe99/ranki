@@ -1,7 +1,7 @@
 # Ranki
 
-Ranki is an Anki-compatible flashcard app written in Rust. It reads and writes
-Anki collections, imports and exports `.apkg` packages, and provides a
+Ranki is an Anki-compatible flashcard app written in Rust. It manages its own
+Anki-compatible collection, imports and exports packages, and provides a
 Wayland-first review window, a command line interface, an AnkiConnect-compatible
 API, and a Model Context Protocol server.
 
@@ -62,16 +62,13 @@ Import the module and enable it:
 home-manager switch --flake .#user@host
 ```
 
-The module writes `~/.config/ranki/config.toml` when `collection`, `mediaDir`, or
-`settings` is set, and leaves an existing file alone unless `forceConfig = true`.
-It installs a desktop entry by default and uses the wrapped Ranki package unless
-`package` is overridden. The package installs `assets/rai.svg` as the hicolor icon
-`ranki`, which the desktop entry uses. The generated settings use this schema:
+The module writes `~/.config/ranki/config.toml` when `settings` is set and leaves an
+existing file alone unless `forceConfig = true`. It installs a desktop entry by default
+and uses the wrapped Ranki package unless `package` is overridden. The package installs
+`assets/rai.svg` as the hicolor icon `ranki`, which the desktop entry uses. The generated
+settings use this schema:
 
 ```toml
-[general]
-collection = "..."
-media_dir = "..."
 [ui]
 theme = "system"   # dark | light | system
 font_size = 16.0
@@ -89,13 +86,23 @@ not undo the layout.
 
 ## Collections
 
-All commands accept the global `--collection PATH` and `--media-dir PATH`
-options. Without `--collection`, Ranki opens
-`~/.local/share/ranki/collection.anki2`. Anki keeps its own collection open
-exclusively, so point Ranki at an Anki profile with `--collection PATH`,
-`RANKI_COLLECTION`, or `general.collection` in the config. Media lives in a
-`collection.media` directory next to the collection. A missing collection is
-created by commands that need it.
+Ranki owns one application data directory:
+
+```text
+$XDG_DATA_HOME/ranki/
+├── collection.anki2
+├── collection.media/
+└── ranki-sync.json
+```
+
+When `XDG_DATA_HOME` is unset, Ranki uses `~/.local/share/ranki`. This directory is the
+storage seam for future mobile ports: a platform supplies its own app data directory and
+the files inside stay the same.
+
+The `--collection` and `--media-dir` flags, `RANKI_COLLECTION`, and path keys in
+`[general]` no longer select storage. An existing `[general]` section is ignored with a
+warning. Ranki does not open an Anki profile; use `.apkg` or `.colpkg` packages to move
+data between apps. A missing collection is created by commands that need it.
 
 ## Commands
 
@@ -108,8 +115,9 @@ ranki add-note --model ID --deck ID \
   --field 'Front' --field 'Back' [--tag TAG]   # add a note and its cards
 ranki answer CARD_ID RATING                    # rate a card, 1 again to 4 easy
 ranki stats [--deck ID]                        # card counts
-ranki import FILE.apkg                         # import a package
-ranki export FILE.apkg                         # export a package
+ranki import FILE.apkg                         # import .apkg or .colpkg package
+ranki export FILE.apkg                         # export an .apkg package
+ranki export-colpkg FILE.colpkg                # export a full collection backup
 ranki check                                    # verify the collection can be read
 ranki connect [--port 8765]                    # AnkiConnect JSON-RPC server
 ranki mcp                                      # MCP server over stdio
@@ -124,8 +132,8 @@ Run `ranki COMMAND --help` for the full argument list.
 
 AnkiWeb sync is optional. In the review window, open Settings and sign in with
 your AnkiWeb username and password. Use **Sign out** in the same panel to stop
-syncing. Ranki stores only the resulting host key in `ranki-sync.json` beside
-the collection, with mode `0600`. The password is discarded after login. Ranki
+syncing. Ranki stores only the resulting host key in `ranki-sync.json` in its app data
+directory, with mode `0600`. The password is discarded after login. Ranki
 syncs after each completed study session, at launch, and at exit. The sidebar
 shows the age of the last successful sync.
 
@@ -150,17 +158,14 @@ default port is 8765; change it with `--port`. Clients send JSON-RPC POST
 requests such as `{"action":"version","version":6}` to `http://127.0.0.1:8765`.
 
 `ranki mcp` speaks Model Context Protocol on stdin and stdout and writes logs to
-stderr. Register the binary with an MCP client as a stdio server, pointing it at
-an existing collection:
+stderr. Register the binary with an MCP client as a stdio server:
 
 ```bash
-ranki --collection /path/to/collection.anki2 mcp
-# or: RANKI_COLLECTION=/path/to/collection.anki2 ranki mcp
+ranki mcp
 ```
 
-Unlike other commands, `mcp` requires `--collection` or `RANKI_COLLECTION`; it
-does not create or use the default collection. Its tools cover decks, due cards,
-search, notes, answers, and import/export. Write tools require `confirm: true`.
+It uses Ranki's app collection and takes no path flag. Its tools cover decks, due
+cards, search, notes, answers, and import/export. Write tools require `confirm: true`.
 
 ## Keyboard shortcuts
 

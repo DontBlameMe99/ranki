@@ -5,7 +5,6 @@
 )]
 
 use std::borrow::Cow;
-use std::env;
 use std::fs;
 use std::path::Component;
 use std::path::Path;
@@ -14,9 +13,9 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 
 use ranki_core::FsrsScheduler;
-use ranki_model::Id;
 use ranki_model::Rating;
 use ranki_model::Store;
+use ranki_model::{DataPaths, Id};
 use ranki_storage::Collection;
 use rmcp::ErrorData;
 use rmcp::Json;
@@ -550,7 +549,7 @@ const fn revlog_view(log: &ranki_model::RevLog) -> RevLogView {
 
 struct RankiMcp {
     collection: Mutex<Collection>,
-    collection_path: PathBuf,
+    paths: DataPaths,
     root: PathBuf,
     scheduler: FsrsScheduler,
 }
@@ -558,13 +557,17 @@ struct RankiMcp {
 impl RankiMcp {
     fn new(
         collection: Collection,
-        root: PathBuf,
+        paths: DataPaths,
         scheduler: FsrsScheduler,
     ) -> Self {
-        let collection_path = collection.path().to_path_buf();
+        let root = paths
+            .collection
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
         Self {
             collection: Mutex::new(collection),
-            collection_path,
+            paths,
             root,
             scheduler,
         }
@@ -598,7 +601,7 @@ impl RankiMcp {
     }
 
     fn media_dir(&self) -> PathBuf {
-        crate::media_dir_for(&self.collection_path)
+        self.paths.media_dir.clone()
     }
 }
 
@@ -865,7 +868,7 @@ impl RankiMcp {
         self.store()?.checkpoint()?;
         let report = ranki_format::import_apkg(
             &path,
-            &self.collection_path,
+            &self.paths.collection,
             &self.media_dir(),
         )?;
         Ok(Json(ImportResult {
@@ -900,7 +903,7 @@ impl RankiMcp {
             store.checkpoint()?;
         }
         ranki_format::export_apkg(
-            &self.collection_path,
+            &self.paths.collection,
             &self.media_dir(),
             &path,
         )?;
@@ -914,21 +917,8 @@ impl RankiMcp {
     }
 }
 
-pub fn collection_path(argument: Option<&Path>) -> CliResult<PathBuf> {
-    let requested = argument
-        .map(Path::to_path_buf)
-        .or_else(|| env::var_os("RANKI_COLLECTION").map(PathBuf::from))
-        .ok_or_else(|| {
-            CliError::Message(
-                "mcp requires --collection PATH, RANKI_COLLECTION, or [general].collection"
-                    .into(),
-            )
-        })?;
-    let path = if requested.is_absolute() {
-        requested
-    } else {
-        env::current_dir()?.join(requested)
-    };
+pub fn collection_path(paths: &DataPaths) -> CliResult<PathBuf> {
+    let path = paths.collection.clone();
     fs::canonicalize(&path).map_err(|error| {
         CliError::Message(format!(
             "collection not found: {}: {error}",
@@ -937,22 +927,15 @@ pub fn collection_path(argument: Option<&Path>) -> CliResult<PathBuf> {
     })
 }
 
-pub fn serve(
-    argument: Option<&Path>,
-    scheduler: FsrsScheduler,
-) -> CliResult<()> {
-    let path = collection_path(argument)?;
-    let parent_dir = path.parent().ok_or_else(|| {
-        CliError::Message("collection has no parent directory".into())
-    })?;
-    let root_dir = fs::canonicalize(parent_dir)?;
+pub fn serve(paths: &DataPaths, scheduler: FsrsScheduler) -> CliResult<()> {
+    let path = collection_path(paths)?;
     let runtime = Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| CliError::Message(error.to_string()))?;
     runtime.block_on(async move {
         let collection = Collection::open(&path)?;
-        let server = RankiMcp::new(collection, root_dir, scheduler);
+        let server = RankiMcp::new(collection, paths.clone(), scheduler);
         let service = server.serve(stdio()).await.map_err(|error| {
             CliError::Message(format!("mcp server: {error}"))
         })?;
@@ -1115,15 +1098,11 @@ mod tests {
     }
     fn mcp_server() -> (TempDir, RankiMcp) {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("collection.anki2");
-        let collection = Collection::create(&path).unwrap();
+        let paths = ranki_model::DataPaths::new(directory.path());
+        let collection = Collection::create(&paths.collection).unwrap();
         let scheduler =
             ranki_core::from_settings(&ranki_model::Settings::default());
-        let server = RankiMcp::new(
-            collection,
-            directory.path().to_path_buf(),
-            scheduler,
-        );
+        let server = RankiMcp::new(collection, paths, scheduler);
         (directory, server)
     }
 
@@ -1319,13 +1298,14 @@ mod tests {
 
         let path = directory.path().join("other.anki2");
         let collection = Collection::create(&path).unwrap();
+        let paths = ranki_model::DataPaths {
+            collection: path,
+            media_dir: directory.path().join("collection.media"),
+            sync_state: directory.path().join("ranki-sync.json"),
+        };
         let scheduler =
             ranki_core::from_settings(&ranki_model::Settings::default());
-        let other = RankiMcp::new(
-            collection,
-            directory.path().to_path_buf(),
-            scheduler,
-        );
+        let other = RankiMcp::new(collection, paths, scheduler);
         let imported = ok(other.import_apkg(Parameters(PackageInput {
             path: String::from("backup.apkg"),
             confirm: true,
@@ -1384,18 +1364,25 @@ mod tests {
         let response = serde_json::to_value(result).unwrap();
         assert_eq!(response["content"][0]["text"], json!("plain message"));
     }
-
     #[test]
     fn collection_path_resolves_existing_files_and_reports_missing_ones() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("collection.anki2");
         fs::write(&path, b"").unwrap();
+        let paths = ranki_model::DataPaths {
+            collection: path.clone(),
+            media_dir: directory.path().join("collection.media"),
+            sync_state: directory.path().join("ranki-sync.json"),
+        };
         assert_eq!(
-            super::collection_path(Some(&path)).unwrap(),
+            super::collection_path(&paths).unwrap(),
             fs::canonicalize(&path).unwrap()
         );
 
-        let missing = directory.path().join("missing.anki2");
-        assert!(super::collection_path(Some(&missing)).is_err());
+        let missing = ranki_model::DataPaths {
+            collection: directory.path().join("missing.anki2"),
+            ..paths
+        };
+        assert!(super::collection_path(&missing).is_err());
     }
 }

@@ -1,7 +1,7 @@
 //! Loads the shared config schema from disk.
 
 use ranki_model::config::parse;
-pub use ranki_model::{Config, Settings, UiState};
+pub use ranki_model::{Config, DataPaths, Settings, UiState};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -105,6 +105,19 @@ pub fn config_path(
     )
 }
 
+/// Resolves Ranki's data directory from the desktop environment.
+pub fn data_dir_path(
+    xdg: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Option<PathBuf> {
+    xdg.filter(|value| !value.is_empty()).map_or_else(
+        || {
+            home.filter(|value| !value.is_empty())
+                .map(|dir| PathBuf::from(dir).join(".local/share/ranki"))
+        },
+        |dir| Some(PathBuf::from(dir).join("ranki")),
+    )
+}
 fn read_config(path: &Path) -> Config {
     match fs::read_to_string(path) {
         Ok(text) => parse(&text),
@@ -116,19 +129,14 @@ fn read_config(path: &Path) -> Config {
     }
 }
 
-/// CLI flags win over the config file, which wins over built-in defaults.
+/// Resolves CLI sync flags over the config file.
 #[must_use]
 pub fn resolve_settings(
     cli: &Cli,
     config: &Config,
-    fallback_collection: Option<PathBuf>,
+    paths: DataPaths,
 ) -> Settings {
-    let mut settings = Settings::resolve(
-        cli.collection.clone(),
-        cli.media_dir.clone(),
-        fallback_collection,
-        config,
-    );
+    let mut settings = Settings::resolve(config, paths);
     if cli.sync {
         settings.sync.enabled = true;
     }
@@ -152,12 +160,15 @@ pub fn resolve_settings(
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::{ffi::OsStr, fs};
 
     use clap::Parser;
 
-    use super::{Config, UiState, config_path, resolve_settings};
+    use super::{
+        Config, DataPaths, UiState, config_path, data_dir_path,
+        resolve_settings,
+    };
     use crate::Cli;
 
     fn cli(args: &[&str]) -> Cli {
@@ -206,26 +217,34 @@ mod tests {
         );
         assert_eq!(config_path(None, None), None);
     }
-
     #[test]
-    fn configured_collection_needs_no_home_fallback() {
-        let mut config = Config::default();
-        config.general.collection =
-            Some(String::from("/config/collection.anki2"));
-        let settings = resolve_settings(&cli(&["ranki", "mcp"]), &config, None);
-        assert_eq!(settings.collection, Path::new("/config/collection.anki2"));
-        assert_eq!(settings.media_dir, Path::new("/config/collection.media"));
+    fn data_path_prefers_xdg_data_home() {
+        let path = data_dir_path(
+            Some(OsStr::new("/data")),
+            Some(OsStr::new("/home/user")),
+        );
+        assert_eq!(path.as_deref(), Some(Path::new("/data/ranki")));
     }
 
     #[test]
-    fn fallback_is_used_without_config_or_flags() {
-        let settings = resolve_settings(
-            &cli(&["ranki", "gui"]),
-            &Config::default(),
-            Some(PathBuf::from("/tmp/default.anki2")),
+    fn data_path_falls_back_to_home() {
+        let path = data_dir_path(None, Some(OsStr::new("/home/user")));
+        assert_eq!(
+            path.as_deref(),
+            Some(Path::new("/home/user/.local/share/ranki"))
         );
-        assert_eq!(settings.collection, Path::new("/tmp/default.anki2"));
-        assert_eq!(settings.media_dir, Path::new("/tmp/collection.media"));
+        assert_eq!(data_dir_path(None, None), None);
+    }
+
+    #[test]
+    fn resolved_settings_keep_app_owned_paths() {
+        let paths = DataPaths::new("/data/ranki");
+        let settings = resolve_settings(
+            &cli(&["ranki", "mcp"]),
+            &Config::default(),
+            paths.clone(),
+        );
+        assert_eq!(settings.paths, paths);
     }
     #[test]
     fn sync_cli_flags_override_config() {
@@ -244,7 +263,7 @@ mod tests {
                 "decks",
             ]),
             &config,
-            None,
+            DataPaths::default(),
         );
         assert!(!settings.sync.enabled);
         assert!(settings.sync.auto);
@@ -257,7 +276,7 @@ mod tests {
         let settings = resolve_settings(
             &cli(&["ranki", "--sync", "--no-sync-auto", "decks"]),
             &config,
-            None,
+            DataPaths::default(),
         );
         assert!(settings.sync.enabled);
         assert!(!settings.sync.auto);
