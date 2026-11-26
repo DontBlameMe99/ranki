@@ -5,7 +5,7 @@ use std::{collections::HashMap, time::Duration};
 use chrono::{Datelike, NaiveDate};
 use gpui::{
     Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
-    Rgba, StatefulInteractiveElement, Styled, div, px,
+    Rgba, StatefulInteractiveElement, Styled, Window, div, px,
 };
 use ranki_model::{Rating, RevLog, RevLogKind};
 
@@ -13,8 +13,8 @@ use crate::{
     app::{Root, duration_label},
     components::panel,
     theme::{
-        PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE,
-        SPACE_SECTION, Style, alpha, blend, queue_text,
+        PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_SECTION,
+        Style, alpha, blend, page_width, queue_text,
     },
 };
 
@@ -27,6 +27,45 @@ const HEATMAP_COLUMNS: usize = HEATMAP_WEEKS + 1;
 const HEATMAP_CELL: f32 = 26.0;
 const HEATMAP_GAP: f32 = 4.0;
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const HEATMAP_LABEL_WIDTH: f32 = 32.0;
+const PANEL_PADDING: f32 = 48.0;
+const FORECAST_BAR_WIDTH: f32 = 48.0;
+
+/// Cell size and gap that keep every heatmap week inside the panel.
+fn heatmap_geometry(width: f32) -> (f32, f32) {
+    let gap = if width < 700.0 { 2.0 } else { HEATMAP_GAP };
+    let inner = width - PANEL_PADDING - HEATMAP_LABEL_WIDTH - SPACE_GROUP;
+    let columns = HEATMAP_COLUMNS as f32;
+    let cell = (inner - gap * (columns - 1.0)) / columns;
+    (cell.clamp(6.0, HEATMAP_CELL), gap)
+}
+
+/// Bar width and gap that keep all fourteen forecast bars inside the panel.
+fn forecast_geometry(width: f32) -> (f32, f32) {
+    let gap = if width < 760.0 {
+        SPACE_GROUP
+    } else {
+        SPACE_BLOCK
+    };
+    let bars = (DAYS * 2) as f32;
+    let inner = width - PANEL_PADDING;
+    let bar = (inner - gap * (bars - 1.0)) / bars;
+    (bar.clamp(10.0, FORECAST_BAR_WIDTH), gap)
+}
+
+fn forecast_text_size(bar_width: f32) -> f32 {
+    if bar_width < 20.0 { 9.0 } else { 12.0 }
+}
+
+/// Counts need four characters at most; hide them before they can crowd the
+/// weekday label on a narrow chart.
+fn forecast_value_label(count: Option<usize>, bar_width: f32) -> String {
+    if bar_width < 32.0 {
+        String::new()
+    } else {
+        count.map_or_else(|| String::from("-"), |value| value.to_string())
+    }
+}
 
 /// One day of the review heatmap, oldest first.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -244,8 +283,11 @@ pub fn build_statistics(
 impl Root {
     pub(crate) fn render_statistics(
         &self,
+        window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
+        let width =
+            page_width(f32::from(window.viewport_size().width), self.nav_width);
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let stats = &self.statistics;
@@ -265,8 +307,8 @@ impl Root {
                     .font_weight(gpui::FontWeight::BOLD)
                     .child("Statistics"),
             )
-            .child(self.render_activity(stats, style, cx))
-            .child(self.render_history(stats, style))
+            .child(self.render_activity(stats, style, width, cx))
+            .child(self.render_history(stats, style, width))
             .child(Self::render_card_counts(totals, style))
     }
 
@@ -274,8 +316,10 @@ impl Root {
         &self,
         stats: &Statistics,
         style: Style,
+        width: f32,
         cx: &Context<Self>,
     ) -> impl IntoElement {
+        let (cell_size, gap) = heatmap_geometry(width);
         let colors = style.colors;
         let collection_start = self.collection_start;
         let today = stats.days.last().map_or(0, |day| day.day);
@@ -325,42 +369,55 @@ impl Root {
         let mut labels = div()
             .flex()
             .flex_col()
-            .gap(px(HEATMAP_GAP))
-            .w(px(32.))
-            .child(div().h(px(14.)));
+            .gap(px(gap))
+            .w(px(HEATMAP_LABEL_WIDTH))
+            .flex_none()
+            .child(div().h(px(cell_size.min(14.))));
         for label in WEEKDAYS {
             labels = labels.child(
                 div()
-                    .h(px(HEATMAP_CELL))
+                    .h(px(cell_size))
                     .flex()
                     .items_center()
-                    .text_size(px(11.))
+                    .text_size(px(cell_size.min(11.0)))
+                    .line_height(px(cell_size))
                     .text_color(colors.subtext)
                     .child(label),
             );
         }
 
-        let mut columns = div().flex().gap(px(HEATMAP_GAP));
+        let mut columns = div()
+            .flex()
+            .gap(px(gap))
+            .min_w(px(0.))
+            .flex_1()
+            .id("statistics-heatmap-grid")
+            .overflow_x_scroll();
         for week in 0..HEATMAP_COLUMNS {
-            let mut column = div().flex().flex_col().gap(px(HEATMAP_GAP));
+            let mut column = div().flex().flex_col().gap(px(gap)).flex_none();
             let week_start =
                 start.saturating_add(i64::try_from(week * 7).unwrap_or(0));
+            let week_label = if cell_size >= 20.0 {
+                format!(
+                    "W{:02}",
+                    calendar_week(
+                        week_start.saturating_add(1),
+                        collection_start
+                    )
+                )
+            } else {
+                String::new()
+            };
             column = column.child(
                 div()
-                    .w(px(HEATMAP_CELL))
-                    .h(px(14.))
+                    .w(px(cell_size))
+                    .h(px(cell_size.min(14.)))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(11.))
+                    .text_size(px(cell_size.min(11.0)))
                     .text_color(colors.subtext)
-                    .child(format!(
-                        "W{:02}",
-                        calendar_week(
-                            week_start.saturating_add(1),
-                            collection_start
-                        )
-                    )),
+                    .child(week_label),
             );
             for row in 0..7 {
                 let index = week * 7 + row;
@@ -398,8 +455,8 @@ impl Root {
                 };
                 let mut cell = div()
                     .id(ElementId::named_usize("statistics-heatmap", index))
-                    .w(px(HEATMAP_CELL))
-                    .h(px(HEATMAP_CELL))
+                    .w(px(cell_size))
+                    .h(px(cell_size))
                     .rounded(px(6.))
                     .border_1()
                     .border_color(border)
@@ -437,6 +494,7 @@ impl Root {
                 .flex()
                 .flex_col()
                 .gap(px(SPACE_INLINE))
+                .min_w(px(120.))
                 .child(
                     div()
                         .text_size(px(12.))
@@ -450,8 +508,10 @@ impl Root {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
+                    .gap(px(SPACE_BLOCK))
                     .child(
                         div()
                             .text_size(px(16.))
@@ -461,8 +521,10 @@ impl Root {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
-                            .gap(px(SPACE_SECTION))
+                            .gap(px(SPACE_BLOCK))
+                            .min_w(px(0.))
                             .child(
                                 div()
                                     .text_size(px(12.))
@@ -477,6 +539,7 @@ impl Root {
             .child(
                 div()
                     .flex()
+                    .min_w(px(0.))
                     .justify_center()
                     .gap(px(SPACE_GROUP))
                     .child(labels)
@@ -485,7 +548,8 @@ impl Root {
             .child(
                 div()
                     .flex()
-                    .gap(px(SPACE_GUTTER))
+                    .flex_wrap()
+                    .gap(px(SPACE_BLOCK))
                     .border_t_1()
                     .border_color(colors.surface1)
                     .pt(px(SPACE_BLOCK))
@@ -521,7 +585,9 @@ impl Root {
         &self,
         stats: &Statistics,
         style: Style,
+        width: f32,
     ) -> impl IntoElement {
+        let (bar_width, gap) = forecast_geometry(width);
         let colors = style.colors;
         let collection_start = self.collection_start;
         let days = forecast_days(stats, &self.forecast);
@@ -530,7 +596,8 @@ impl Root {
             .map(|day| day.due.unwrap_or(day.reviews))
             .max()
             .unwrap_or_default();
-        let mut bars = div().flex().flex_1().items_end().gap(px(SPACE_BLOCK));
+        let mut bars =
+            div().flex().flex_1().min_w(px(0.)).items_end().gap(px(gap));
         for (index, day) in days.iter().enumerate() {
             let future = index >= DAYS;
             let count = if future { day.due } else { Some(day.reviews) };
@@ -547,33 +614,53 @@ impl Root {
             } else {
                 colors.mauve
             };
-            let label = count
-                .map_or_else(|| String::from("-"), |value| value.to_string());
+            let value_label = forecast_value_label(count, bar_width);
+            let day_name = weekday(day.day, collection_start);
+            let short_day = bar_width < 20.0;
+            let day_label = if short_day {
+                day_name.chars().take(1).collect()
+            } else {
+                day_name.to_owned()
+            };
+            let text_size = px(forecast_text_size(bar_width));
             bars = bars.child(
                 div()
                     .flex()
                     .flex_1()
+                    .min_w(px(0.))
                     .flex_col()
                     .items_center()
                     .justify_end()
                     .gap(px(SPACE_GROUP))
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .max_w(px(bar_width))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(text_size)
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(if count.is_none() {
                                 colors.overlay
                             } else {
                                 colors.text
                             })
-                            .child(label),
-                    )
-                    .child(
-                        div().w(px(48.)).h(px(height)).rounded(px(8.)).bg(hue),
+                            .child(value_label),
                     )
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .w(px(bar_width))
+                            .h(px(height))
+                            .rounded(px(8.))
+                            .bg(hue),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(bar_width))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(text_size)
                             .text_color(if index == DAYS - 1 {
                                 colors.mauve
                             } else if index == DAYS {
@@ -581,7 +668,7 @@ impl Root {
                             } else {
                                 colors.subtext
                             })
-                            .child(weekday(day.day, collection_start)),
+                            .child(day_label),
                     ),
             );
         }
@@ -589,8 +676,10 @@ impl Root {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
+                    .gap(px(SPACE_GROUP))
                     .child(
                         div()
                             .text_size(px(16.))
@@ -613,7 +702,8 @@ impl Root {
             .child(
                 div()
                     .flex()
-                    .gap(px(SPACE_SECTION))
+                    .flex_wrap()
+                    .gap(px(SPACE_BLOCK))
                     .child(
                         div()
                             .flex()
@@ -649,6 +739,7 @@ impl Root {
                 .flex_1()
                 .flex_col()
                 .gap(px(SPACE_INLINE))
+                .min_w(px(110.))
                 .child(
                     div()
                         .flex()
@@ -676,7 +767,8 @@ impl Root {
             .child(
                 div()
                     .flex()
-                    .gap(px(SPACE_SECTION))
+                    .flex_wrap()
+                    .gap(px(SPACE_BLOCK))
                     .child(count(
                         "New",
                         totals.new_cards,
@@ -702,11 +794,38 @@ mod tests {
     use ranki_model::{Rating, RevLog, RevLogKind};
 
     use super::{
-        ForecastDay, HEATMAP_COLUMNS, HEATMAP_DAYS, build_statistics,
-        calendar_week, day_number, forecast_days, heatmap_start, weekday,
+        DAYS, ForecastDay, HEATMAP_COLUMNS, HEATMAP_DAYS, HEATMAP_LABEL_WIDTH,
+        PANEL_PADDING, SPACE_GROUP, build_statistics, calendar_week,
+        day_number, forecast_days, forecast_geometry, forecast_text_size,
+        forecast_value_label, heatmap_geometry, heatmap_start, weekday,
         weekday_index,
     };
 
+    #[test]
+    fn charts_fit_narrow_pages() {
+        for width in [320.0, 408.0, 504.0, 668.0, 1048.0] {
+            let (cell, gap) = heatmap_geometry(width);
+            let columns = HEATMAP_COLUMNS as f32;
+            let heatmap = cell * columns
+                + gap * (columns - 1.0)
+                + HEATMAP_LABEL_WIDTH
+                + SPACE_GROUP
+                + PANEL_PADDING;
+            assert!(heatmap <= width, "heatmap overflows {width}px");
+
+            let (bar, gap) = forecast_geometry(width);
+            let bars = (DAYS * 2) as f32;
+            let forecast = bar * bars + gap * (bars - 1.0) + PANEL_PADDING;
+            assert!(forecast <= width, "forecast overflows {width}px");
+
+            let label = forecast_value_label(Some(5555), bar);
+            let size = forecast_text_size(bar);
+            assert!(
+                label.chars().count() as f32 * size * 0.6 <= bar,
+                "forecast label overflows {width}px bar"
+            );
+        }
+    }
     const START: i64 = 1_700_000_000;
 
     fn log(day: i64, rating: Rating, millis: u32) -> RevLog {

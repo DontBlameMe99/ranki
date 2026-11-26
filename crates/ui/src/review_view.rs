@@ -15,10 +15,11 @@ use crate::{
     theme::{
         BUTTON_HEIGHT, BUTTON_PADDING_X, BUTTON_RADIUS, BUTTON_TEXT_SIZE,
         CONTROL_HEIGHT, FOOTER_HEIGHT, MOTION_PROGRESS_MS, MOTION_QUICK_MS,
-        PROGRESS_WIDTH, RATING_GAP, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER,
-        SPACE_INLINE, SPACE_RELATED, SPACE_SECTION, STAGE_HEIGHT,
-        STAGE_PADDING, STAGE_RADIUS, TOPBAR_HEIGHT, accent_hover, accent_press,
-        alpha, interval_label, rating_fill, rating_label, stage_width,
+        NAV_AUTO_COMPACT_WIDTH, PROGRESS_WIDTH, RATING_GAP, SPACE_BLOCK,
+        SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE, SPACE_RELATED, SPACE_SECTION,
+        STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS, TOPBAR_HEIGHT, accent_hover,
+        accent_press, alpha, interval_label, rating_fill, rating_label,
+        stage_width,
     },
 };
 
@@ -38,8 +39,13 @@ impl Root {
         );
         let more_due = self.review.more_due;
         let session_complete = self.session_complete();
+        let viewport_width = f32::from(window.viewport_size().width);
         let viewport_height = f32::from(window.viewport_size().height);
-        let card_width = stage_width(f32::from(window.viewport_size().width));
+        let card_width = stage_width(viewport_width);
+        let text_width = (card_width - 2.0 * STAGE_PADDING).max(0.0);
+        let topbar_compact = viewport_width < NAV_AUTO_COMPACT_WIDTH;
+        let progress_width =
+            PROGRESS_WIDTH.min(viewport_width - 240.0).max(80.0);
         let stage_height = (viewport_height
             - TOPBAR_HEIGHT
             - FOOTER_HEIGHT
@@ -130,6 +136,36 @@ impl Root {
                     .child(name.to_owned()),
             )
         };
+        let queue_counts = (!topbar_compact).then(|| {
+            div()
+                .flex()
+                .items_end()
+                .gap(px(SPACE_SECTION))
+                .child(queue_count(
+                    "New",
+                    session.new_cards,
+                    colors.blue,
+                    crate::theme::queue_text(0, theme),
+                    active_queue == Some(CardType::New),
+                ))
+                .child(queue_count(
+                    "Learning",
+                    session.learning_cards,
+                    colors.red,
+                    crate::theme::queue_text(1, theme),
+                    matches!(
+                        active_queue,
+                        Some(CardType::Learning | CardType::Relearning)
+                    ),
+                ))
+                .child(queue_count(
+                    "Review",
+                    session.review_cards,
+                    colors.green,
+                    crate::theme::queue_text(2, theme),
+                    active_queue == Some(CardType::Review),
+                ))
+        });
         let mut screen = div().size_full().flex().flex_col();
 
         screen = screen.child(
@@ -172,6 +208,10 @@ impl Root {
                         .gap(px(SPACE_INLINE))
                         .child(
                             div()
+                                .max_w(px(progress_width))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
                                 .text_size(px(14.))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .child(deck_name),
@@ -180,41 +220,12 @@ impl Root {
                             from,
                             fraction,
                             colors,
-                            PROGRESS_WIDTH,
+                            progress_width,
                             progress_ms,
                             ("progress", answered),
                         )),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .items_end()
-                        .gap(px(SPACE_SECTION))
-                        .child(queue_count(
-                            "New",
-                            session.new_cards,
-                            colors.blue,
-                            crate::theme::queue_text(0, theme),
-                            active_queue == Some(CardType::New),
-                        ))
-                        .child(queue_count(
-                            "Learning",
-                            session.learning_cards,
-                            colors.red,
-                            crate::theme::queue_text(1, theme),
-                            matches!(
-                                active_queue,
-                                Some(CardType::Learning | CardType::Relearning)
-                            ),
-                        ))
-                        .child(queue_count(
-                            "Review",
-                            session.review_cards,
-                            colors.green,
-                            crate::theme::queue_text(2, theme),
-                            active_queue == Some(CardType::Review),
-                        )),
-                ),
+                .children(queue_counts),
         );
 
         let load_failure = load_error.or_else(|| {
@@ -306,6 +317,8 @@ impl Root {
                         .child(
                             div()
                                 .flex()
+                                .flex_wrap()
+                                .justify_center()
                                 .gap(px(SPACE_BLOCK))
                                 .child(summary_tile(
                                     "REVIEWED",
@@ -400,8 +413,13 @@ impl Root {
                         tags.iter().map(|tag| chip(tag.clone(), colors)),
                     ),
                 ));
-            let (question_size, answer_size) =
-                stage_text_sizes(question, answer, stage_height, phase);
+            let (question_size, answer_size) = stage_text_sizes(
+                question,
+                answer,
+                stage_height,
+                card_width,
+                phase,
+            );
             let stage_media = question.is_some_and(|card| {
                 !card.media.is_empty() || !card.masks.is_empty()
             });
@@ -429,6 +447,7 @@ impl Root {
                 }))
                 .child(if let Some(card) = question {
                     card_view::rendered_text(card, colors.text, question_size)
+                        .max_w(px(text_width))
                         .into_any_element()
                 } else {
                     div()
@@ -457,6 +476,7 @@ impl Root {
                             colors.mauve,
                             answer_size,
                         )
+                        .max_w(px(text_width))
                         .into_any_element()
                     } else {
                         div().into_any_element()
@@ -620,9 +640,25 @@ const fn stage_content_height(
         - if stage_media { image_height } else { 0.0 })
     .max(0.0)
 }
+fn card_text_width_limit(
+    card: &card_view::RenderedCard,
+    stage_width: f32,
+) -> f32 {
+    let widest_line = card
+        .text
+        .lines()
+        .map(str::chars)
+        .map(Iterator::count)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    (stage_width - 2.0 * STAGE_PADDING).max(0.0) / (widest_line as f32 * 0.62)
+}
+
 fn card_text_size(
     card: &card_view::RenderedCard,
     stage_height: f32,
+    stage_width: f32,
     media: bool,
 ) -> f32 {
     let characters = card.text.chars().count();
@@ -632,7 +668,7 @@ fn card_text_size(
     let available = stage_height * if media { 0.42 } else { 0.68 };
     (available / (estimated_lines as f32 * 1.25))
         .min(base)
-        .clamp(24.0, 84.0)
+        .min(card_text_width_limit(card, stage_width))
 }
 
 /// Sizes the question and answer text for one stage frame. The answer size is
@@ -641,12 +677,14 @@ fn stage_text_sizes(
     question: Option<&card_view::RenderedCard>,
     answer: Option<&card_view::RenderedCard>,
     stage_height: f32,
+    stage_width: f32,
     phase: Phase,
 ) -> (f32, Option<f32>) {
     let question_size = question.map_or(84.0, |card| {
         card_text_size(
             card,
             stage_height,
+            stage_width,
             !card.media.is_empty() || !card.masks.is_empty(),
         )
     });
@@ -660,9 +698,11 @@ fn stage_text_sizes(
             card_text_size(
                 card,
                 stage_height,
+                stage_width,
                 !card.media.is_empty() || !card.masks.is_empty(),
             )
             .clamp(22.0, 32.0)
+            .min(card_text_width_limit(card, stage_width))
         })
     });
     (question_size, answer_size)
@@ -935,6 +975,7 @@ mod tests {
         theme::{Theme, rating_fill},
     };
 
+    const STAGE_WIDTH: f32 = 576.0;
     #[test]
     fn question_phase_hides_answer_controls() {
         assert_ne!(Phase::Question, Phase::Answer);
@@ -956,9 +997,41 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            super::card_text_size(&long, 322.0, false)
-                < super::card_text_size(&short, 322.0, false)
+            super::card_text_size(&long, 322.0, STAGE_WIDTH, false)
+                < super::card_text_size(&short, 322.0, STAGE_WIDTH, false)
         );
+    }
+
+    #[test]
+    fn card_text_fits_a_narrow_stage() {
+        let card = crate::card_view::RenderedCard {
+            text: "Question?".into(),
+            ..Default::default()
+        };
+        let wide = super::card_text_size(&card, 322.0, 576.0, false);
+        let narrow = super::card_text_size(&card, 322.0, 288.0, false);
+        assert!(narrow < wide, "{narrow} should be smaller than {wide}");
+    }
+
+    #[test]
+    fn long_unbroken_answers_stay_inside_a_narrow_stage() {
+        let question = crate::card_view::RenderedCard {
+            text: "Question?".into(),
+            ..Default::default()
+        };
+        let answer = crate::card_view::RenderedCard {
+            text: "Supercalifragilisticexpialidocious".into(),
+            ..Default::default()
+        };
+        let (_, size) = super::stage_text_sizes(
+            Some(&question),
+            Some(&answer),
+            322.0,
+            288.0,
+            crate::app::Phase::Answer,
+        );
+        let limit = super::card_text_width_limit(&answer, 288.0);
+        assert!(size.is_some_and(|size| size <= limit));
     }
 
     #[test]
@@ -979,18 +1052,21 @@ mod tests {
             Some(&question),
             None,
             322.0,
+            STAGE_WIDTH,
             Phase::Question,
         );
         let (with_short, short_size) = super::stage_text_sizes(
             Some(&question),
             Some(&short_answer),
             322.0,
+            STAGE_WIDTH,
             Phase::Question,
         );
         let (with_long, long_size) = super::stage_text_sizes(
             Some(&question),
             Some(&long_answer),
             322.0,
+            STAGE_WIDTH,
             Phase::Question,
         );
         assert_eq!(question_only, with_short);
@@ -1003,6 +1079,7 @@ mod tests {
             Some(&question),
             Some(&long_answer),
             322.0,
+            STAGE_WIDTH,
             Phase::Answer,
         );
         assert_eq!(revealed, question_only.min(40.0));
@@ -1011,21 +1088,30 @@ mod tests {
             Some(&question),
             Some(&short_answer),
             322.0,
+            STAGE_WIDTH,
             Phase::Answer,
         );
         assert_eq!(revealed, short_reveal);
         assert_eq!(
             answer_size,
             Some(
-                super::card_text_size(&long_answer, 322.0, false)
+                super::card_text_size(&long_answer, 322.0, STAGE_WIDTH, false)
                     .clamp(22.0, 32.0)
+                    .min(super::card_text_width_limit(
+                        &long_answer,
+                        STAGE_WIDTH,
+                    ))
             )
         );
         assert_eq!(
             short_answer_size,
             Some(
-                super::card_text_size(&short_answer, 322.0, false)
+                super::card_text_size(&short_answer, 322.0, STAGE_WIDTH, false)
                     .clamp(22.0, 32.0)
+                    .min(super::card_text_width_limit(
+                        &short_answer,
+                        STAGE_WIDTH,
+                    ))
             )
         );
     }

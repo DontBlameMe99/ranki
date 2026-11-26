@@ -14,7 +14,7 @@ use crate::{
     },
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED,
-        SPACE_SECTION, Style, TABLE_COLUMNS, alpha, queue_text,
+        SPACE_SECTION, Style, TABLE_COLUMNS, alpha, page_width, queue_text,
     },
 };
 
@@ -22,6 +22,23 @@ use crate::{
 const ROW_ROOT_HEIGHT: f32 = 60.0;
 const ROW_CHILD_HEIGHT: f32 = 45.0;
 const ROW_OVERSCAN: f32 = 240.0;
+/// Count columns that still fit beside the deck name and row actions.
+#[derive(Clone, Copy)]
+struct DeckColumns {
+    new: bool,
+    learning: bool,
+    review: bool,
+}
+
+impl DeckColumns {
+    fn for_width(width: f32) -> Self {
+        Self {
+            new: width >= 420.0,
+            learning: width >= 700.0,
+            review: width >= 580.0,
+        }
+    }
+}
 
 impl Root {
     pub(crate) fn visible_deck_rows(&self, _cx: &App) -> &[app::DeckRow] {
@@ -33,6 +50,9 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let width =
+            page_width(f32::from(window.viewport_size().width), self.nav_width);
+        let columns = DeckColumns::for_width(width);
         let colors = self.colors();
         let totals = self.leaf_totals;
         let smooth = self.motion_ms(1) > 0;
@@ -65,8 +85,10 @@ impl Root {
         content = content.child(
             div()
                 .flex()
+                .flex_wrap()
                 .items_end()
                 .justify_between()
+                .gap(px(SPACE_BLOCK))
                 .child(
                     div()
                         .text_size(px(32.))
@@ -76,8 +98,10 @@ impl Root {
                 .child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .gap(px(SPACE_RELATED))
+                        .min_w(px(0.))
                         .child(
                             Interaction::raised(colors)
                                 .apply(
@@ -86,7 +110,9 @@ impl Root {
                                         .flex()
                                         .items_center()
                                         .gap(px(SPACE_GROUP))
-                                        .w(px(300.))
+                                        .flex_1()
+                                        .min_w(px(140.))
+                                        .max_w(px(300.))
                                         .h(px(44.))
                                         .px(px(SPACE_RELATED))
                                         .rounded(px(12.))
@@ -141,7 +167,7 @@ impl Root {
                 ),
         );
 
-        content = content.child(self.render_summary(totals, cx));
+        content = content.child(self.render_summary(totals, width, cx));
 
         let kind = app::empty_kind(self.decks.len(), rows.len());
         if !rows.is_empty() {
@@ -210,26 +236,42 @@ impl Root {
                     .py(px(SPACE_RELATED))
                     .text_size(px(12.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(header_cell("DECK", colors.subtext, 0))
-                    .child(header_cell("NEW", queue_text(0, self.theme()), 1))
-                    .child(header_cell(
-                        "LEARNING",
-                        queue_text(1, self.theme()),
-                        2,
-                    ))
-                    .child(header_cell(
-                        "REVIEW",
-                        queue_text(2, self.theme()),
-                        3,
-                    ))
-                    .child(header_cell("", colors.subtext, 4)),
+                    .children(
+                        [
+                            Some(header_cell("DECK", colors.subtext, 0)),
+                            columns.new.then(|| {
+                                header_cell(
+                                    "NEW",
+                                    queue_text(0, self.theme()),
+                                    1,
+                                )
+                            }),
+                            columns.learning.then(|| {
+                                header_cell(
+                                    "LEARNING",
+                                    queue_text(1, self.theme()),
+                                    2,
+                                )
+                            }),
+                            columns.review.then(|| {
+                                header_cell(
+                                    "REVIEW",
+                                    queue_text(2, self.theme()),
+                                    3,
+                                )
+                            }),
+                            Some(header_cell("", colors.subtext, 4)),
+                        ]
+                        .into_iter()
+                        .flatten(),
+                    ),
             );
             if first_row > 0 {
                 table =
                     table.child(div().h(px(row_tops[first_row])).flex_none());
             }
             for row in &rows[first_row..last_row] {
-                table = table.child(self.render_deck_row(row, cx));
+                table = table.child(self.render_deck_row(row, columns, cx));
             }
             if last_row < rows.len() {
                 table = table.child(
@@ -247,6 +289,7 @@ impl Root {
     fn render_summary(
         &self,
         totals: ranki_model::DeckStats,
+        width: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = self.colors();
@@ -280,11 +323,13 @@ impl Root {
         };
         div()
             .flex()
+            .flex_wrap()
             .gap(px(SPACE_SECTION))
             .child(
                 div()
                     .flex()
                     .flex_1()
+                    .min_w(px(280.))
                     .flex_col()
                     .p(px(SPACE_SECTION))
                     .rounded(px(24.))
@@ -292,6 +337,7 @@ impl Root {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_end()
                             .justify_between()
                             .gap(px(SPACE_BLOCK))
@@ -371,7 +417,7 @@ impl Root {
             )
             .child(
                 panel(colors)
-                    .w(px(320.))
+                    .w(px(width.min(320.0)))
                     .flex_none()
                     // The forecast supplies its own top margin.
                     .gap(px(0.))
@@ -495,6 +541,7 @@ impl Root {
     fn render_deck_row(
         &self,
         row: &app::DeckRow,
+        columns: DeckColumns,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = self.colors();
@@ -509,7 +556,9 @@ impl Root {
             .items_center()
             .gap(px(SPACE_RELATED))
             .pl(px(SPACE_SECTION * row.depth as f32))
-            .flex_1();
+            .flex_1()
+            .min_w(px(0.))
+            .overflow_hidden();
         if row.depth > 0 {
             name_cell = name_cell.child(
                 div().h(px(28.)).w(px(2.)).bg(colors.surface1).flex_none(),
@@ -550,7 +599,12 @@ impl Root {
         } else {
             name_cell = name_cell.child(div().w(px(24.)).flex_none());
         }
-        let mut label = div().flex().items_center().gap(px(SPACE_GROUP));
+        let mut label = div()
+            .flex()
+            .items_center()
+            .gap(px(SPACE_GROUP))
+            .min_w(px(0.))
+            .overflow_hidden();
         label = label.child(
             div()
                 .text_size(px(if row.depth == 0 { 15. } else { 14.5 }))
@@ -773,10 +827,28 @@ impl Root {
                 colors.mantle
             })
             .child(name_cell)
-            .child(count(row.stats.new_cards, queue_text(0, self.theme())))
-            .child(count(row.stats.learning_cards, queue_text(1, self.theme())))
-            .child(count(row.stats.review_cards, queue_text(2, self.theme())))
-            .child(action)
+            .children(
+                [
+                    columns.new.then(|| {
+                        count(row.stats.new_cards, queue_text(0, self.theme()))
+                    }),
+                    columns.learning.then(|| {
+                        count(
+                            row.stats.learning_cards,
+                            queue_text(1, self.theme()),
+                        )
+                    }),
+                    columns.review.then(|| {
+                        count(
+                            row.stats.review_cards,
+                            queue_text(2, self.theme()),
+                        )
+                    }),
+                    Some(action),
+                ]
+                .into_iter()
+                .flatten(),
+            )
     }
 
     fn render_empty(&self, kind: app::EmptyKind) -> impl IntoElement {
@@ -866,8 +938,17 @@ fn deck_hue(path: &str, colors: crate::theme::Palette) -> Rgba {
 
 #[cfg(test)]
 mod tests {
-    use super::{deck_hue, header_cell};
+    use super::{DeckColumns, deck_hue, header_cell};
 
+    #[test]
+    fn deck_columns_drop_as_the_page_narrows() {
+        let narrow = DeckColumns::for_width(340.0);
+        assert!(!narrow.new && !narrow.learning && !narrow.review);
+        let medium = DeckColumns::for_width(600.0);
+        assert!(medium.new && !medium.learning && medium.review);
+        let wide = DeckColumns::for_width(1048.0);
+        assert!(wide.new && wide.learning && wide.review);
+    }
     #[test]
     fn deck_header_cells_share_the_row_column_widths() {
         let head = header_cell("NEW", crate::theme::MOCHA.blue, 1);

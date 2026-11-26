@@ -641,14 +641,14 @@ pub const NAV_WIDTH_MIN: f32 = 72.0;
 pub const NAV_WIDTH_MAX: f32 = 280.0;
 /// Rails narrower than this drop labels, keycaps, and the wordmark.
 pub const NAV_COMPACT_WIDTH: f32 = 180.0;
+/// Windows narrower than this always show the icon-only rail.
+pub const NAV_AUTO_COMPACT_WIDTH: f32 = 840.0;
 /// Grab strip on the rail's right edge.
 pub const NAV_DIVIDER_WIDTH: f32 = 4.0;
 pub const TOPBAR_HEIGHT: f32 = 72.0;
 pub const FOOTER_HEIGHT: f32 = 64.0;
 pub const STAGE_WIDTH: f32 = 1064.0;
 pub const STAGE_HEIGHT: f32 = 528.0;
-/// Smallest card width left after fitting the stage inside a narrow window.
-pub const STAGE_WIDTH_MIN: f32 = 480.0;
 pub const STAGE_RADIUS: f32 = 32.0;
 pub const STAGE_PADDING: f32 = SPACE_GUTTER;
 pub const CONTROL_HEIGHT: f32 = 76.0;
@@ -684,10 +684,30 @@ pub fn nav_width(width: f32) -> f32 {
     width.clamp(NAV_WIDTH_MIN, NAV_WIDTH_MAX)
 }
 
+/// Width the rail gets in this window. Small windows collapse it to icons so
+/// the page keeps enough room for its content; the saved width stays intact.
+#[must_use]
+pub fn visible_nav_width(viewport_width: f32, nav_width: f32) -> f32 {
+    if viewport_width < NAV_AUTO_COMPACT_WIDTH {
+        NAV_WIDTH_MIN
+    } else {
+        nav_width
+    }
+}
+
+/// Width left for a page after the rail and its page padding.
+#[must_use]
+pub fn page_width(viewport_width: f32, nav_width: f32) -> f32 {
+    (viewport_width
+        - visible_nav_width(viewport_width, nav_width)
+        - 2.0 * PAGE_X)
+        .max(0.0)
+}
+
 /// Fits the card into the window while keeping the desktop width as a cap.
 #[must_use]
 pub fn stage_width(viewport_width: f32) -> f32 {
-    (viewport_width - 2.0 * PAGE_X).clamp(STAGE_WIDTH_MIN, STAGE_WIDTH)
+    (viewport_width - 2.0 * PAGE_X).clamp(0.0, STAGE_WIDTH)
 }
 
 /// Converts an interval in days or negative seconds into an Anki-style label.
@@ -738,16 +758,16 @@ mod tests {
     use super::{
         ADD_GAP, BUTTON_HEIGHT, BUTTON_PADDING_X, BUTTON_RADIUS,
         BUTTON_TEXT_SIZE, LATTE, MOCHA, MOTION_PROGRESS_MS, MOTION_QUICK_MS,
-        NAV_COMPACT_WIDTH, NAV_WIDTH, NAV_WIDTH_MAX, NAV_WIDTH_MIN, PAGE_X,
-        PAGE_Y, PROGRESS_HEIGHT, PROGRESS_WIDTH, RATING_GAP, SPACE_BLOCK,
-        SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE, SPACE_RELATED, SPACE_SECTION,
-        STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS, STAGE_WIDTH,
-        STAGE_WIDTH_MIN, Theme, accent_hover, accent_press, alpha, blend,
-        card_colors, contrast, font_candidates, gtk_animations_disabled,
+        NAV_AUTO_COMPACT_WIDTH, NAV_COMPACT_WIDTH, NAV_WIDTH, NAV_WIDTH_MAX,
+        NAV_WIDTH_MIN, PAGE_X, PAGE_Y, PROGRESS_HEIGHT, PROGRESS_WIDTH,
+        RATING_GAP, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE,
+        SPACE_RELATED, SPACE_SECTION, STAGE_HEIGHT, STAGE_PADDING,
+        STAGE_RADIUS, STAGE_WIDTH, Theme, accent_hover, accent_press, alpha,
+        blend, card_colors, contrast, font_candidates, gtk_animations_disabled,
         interval_label, kde_animations_disabled, keycap_ink, nav_width,
-        palette, parse_flag_bool, parse_hex_color, placeholder_color,
-        rating_fill, rating_label, reduced_motion, resolve_theme, stage_width,
-        xdg_config_dir,
+        page_width, palette, parse_flag_bool, parse_hex_color,
+        placeholder_color, rating_fill, rating_label, reduced_motion,
+        resolve_theme, stage_width, visible_nav_width, xdg_config_dir,
     };
     use crate::ThemeChoice;
 
@@ -822,7 +842,19 @@ mod tests {
     fn stage_width_fits_the_window_without_growing_past_desktop() {
         assert_eq!(stage_width(1280.0), STAGE_WIDTH);
         assert_eq!(stage_width(900.0), 900.0 - 2.0 * PAGE_X);
-        assert_eq!(stage_width(500.0), STAGE_WIDTH_MIN);
+        assert_eq!(stage_width(500.0), 500.0 - 2.0 * PAGE_X);
+        assert_eq!(stage_width(64.0), 0.0);
+    }
+
+    #[test]
+    fn small_windows_use_the_icon_rail() {
+        assert_eq!(visible_nav_width(640.0, NAV_WIDTH), NAV_WIDTH_MIN);
+        assert_eq!(
+            visible_nav_width(NAV_AUTO_COMPACT_WIDTH, NAV_WIDTH),
+            NAV_WIDTH
+        );
+        assert_eq!(page_width(640.0, NAV_WIDTH), 640.0 - NAV_WIDTH_MIN - 64.0);
+        assert_eq!(page_width(64.0, NAV_WIDTH), 0.0);
     }
 
     #[test]

@@ -14,19 +14,24 @@ use crate::{
     },
     theme::{
         NAV_DIVIDER_WIDTH, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE,
-        SPACE_RELATED, SPACE_SECTION, Style, alpha,
+        SPACE_RELATED, SPACE_SECTION, Style, alpha, visible_nav_width,
     },
 };
 
 impl Root {
     pub(crate) fn render_nav(
         &mut self,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let active = self.view;
-        let compact = self.nav_compact();
+        let viewport_width = f32::from(window.viewport_size().width);
+        let nav_width = visible_nav_width(viewport_width, self.nav_width);
+        let auto_compact =
+            viewport_width < crate::theme::NAV_AUTO_COMPACT_WIDTH;
+        let compact = self.nav_compact() || auto_compact;
         let add_selected = active == View::AddCard;
         let add_ink = if add_selected {
             style.ink()
@@ -140,7 +145,7 @@ impl Root {
             );
         }
         div()
-            .w(px(self.nav_width))
+            .w(px(nav_width))
             .h_full()
             .flex_none()
             .flex()
@@ -187,7 +192,7 @@ impl Root {
                 UiAction::OpenSettings,
                 true,
             ))
-            .child(self.render_nav_divider(cx))
+            .children((!auto_compact).then(|| self.render_nav_divider(cx)))
     }
 
     /// Grab strip on the rail's edge, drawn over the last few pixels.
@@ -219,6 +224,10 @@ impl Root {
         window: &Window,
         cx: &Context<Self>,
     ) -> Vec<AnyElement> {
+        let nav_width = visible_nav_width(
+            f32::from(window.viewport_size().width),
+            self.nav_width,
+        );
         let colors = self.colors();
         let theme = self.theme();
         let style = Style::new(colors, theme);
@@ -229,7 +238,7 @@ impl Root {
                 div()
                     .absolute()
                     .top(px(16.))
-                    .left(px(self.nav_width + 32.))
+                    .left(px(nav_width + 32.))
                     .right(px(32.))
                     .flex()
                     .items_center()
@@ -333,7 +342,7 @@ impl Root {
                 div()
                     .absolute()
                     .bottom(px(72.))
-                    .left(px(self.nav_width + 32.))
+                    .left(px(nav_width + 32.))
                     .child(crate::components::fade_in(
                         body,
                         ("toast", usize::try_from(toast.seq).unwrap_or(0)),
@@ -564,6 +573,7 @@ impl Root {
             layers.push(
                 anchored()
                     .anchor(Corner::TopLeft)
+                    .snap_to_window_with_margin(px(16.))
                     .position(self.add.deck_picker_anchor)
                     .offset(point(px(0.), px(SPACE_BLOCK + SPACE_INLINE)))
                     .child(self.render_deck_picker(colors, window, cx))
@@ -579,6 +589,7 @@ impl Root {
             layers.push(
                 anchored()
                     .anchor(Corner::TopLeft)
+                    .snap_to_window_with_margin(px(16.))
                     .position(anchor)
                     .offset(point(px(0.), px(SPACE_BLOCK + SPACE_INLINE)))
                     .child(self.render_color_picker(cx))

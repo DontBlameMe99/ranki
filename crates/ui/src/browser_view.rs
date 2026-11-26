@@ -15,7 +15,7 @@ use crate::{
     text_field::{EditHook, TextField},
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_RELATED,
-        SPACE_SECTION, Style, alpha, blend, interval_label,
+        SPACE_SECTION, Style, alpha, blend, interval_label, page_width,
     },
 };
 use gpui::{
@@ -413,6 +413,11 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let width =
+            page_width(f32::from(window.viewport_size().width), self.nav_width);
+        let columns = BrowseColumns::for_width(width);
+        let show_detail_side = width >= 900.0;
+        let show_detail = width >= 520.0;
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let query = self.browse.search.read(cx).text();
@@ -429,8 +434,10 @@ impl Root {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_end()
                     .justify_between()
+                    .gap(px(SPACE_BLOCK))
                     .child(
                         div()
                             .text_size(px(32.))
@@ -445,7 +452,9 @@ impl Root {
                                     .flex()
                                     .items_center()
                                     .gap(px(SPACE_GROUP))
-                                    .w(px(460.))
+                                    .flex_1()
+                                    .min_w(px(160.))
+                                    .max_w(px(460.))
                                     .h(px(44.))
                                     .px(px(SPACE_RELATED))
                                     .rounded(px(12.))
@@ -497,13 +506,23 @@ impl Root {
                 .text_size(px(12.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(colors.subtext)
-                .child(browse_cell("QUESTION", 0, colors))
-                .child(browse_cell("DECK", 1, colors))
-                .child(browse_cell("TAGS", 2, colors))
-                .child(browse_cell("TYPE", 3, colors))
-                .child(browse_cell("STATE", 4, colors))
-                .child(browse_cell("DUE", 5, colors))
-                .child(div().w(px(BROWSE_ACTION_WIDTH)).flex_none()),
+                .children(
+                    [
+                        Some(browse_cell("QUESTION", 0, colors)),
+                        Some(browse_cell("DECK", 1, colors)),
+                        columns.tags.then(|| browse_cell("TAGS", 2, colors)),
+                        columns
+                            .type_and_state
+                            .then(|| browse_cell("TYPE", 3, colors)),
+                        columns
+                            .type_and_state
+                            .then(|| browse_cell("STATE", 4, colors)),
+                        Some(browse_cell("DUE", 5, colors)),
+                        Some(div().w(px(BROWSE_ACTION_WIDTH)).flex_none()),
+                    ]
+                    .into_iter()
+                    .flatten(),
+                ),
         );
         for entry in &self.browse.entries {
             if let BrowseEntry::Group(group) = entry {
@@ -584,15 +603,25 @@ impl Root {
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .child(row.preview.clone()),
                 )
-                .child(browse_cell(row.deck.clone(), 1, colors))
-                .child(browse_cell(row.tags.clone(), 2, colors))
-                .child(browse_cell(row.model.clone(), 3, colors))
-                .child(
-                    browse_cell(state, 4, colors)
-                        .text_color(color)
-                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                .children(
+                    [
+                        Some(browse_cell(row.deck.clone(), 1, colors)),
+                        columns
+                            .tags
+                            .then(|| browse_cell(row.tags.clone(), 2, colors)),
+                        columns
+                            .type_and_state
+                            .then(|| browse_cell(row.model.clone(), 3, colors)),
+                        columns.type_and_state.then(|| {
+                            browse_cell(state, 4, colors)
+                                .text_color(color)
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                        }),
+                        Some(browse_cell(row.due.clone(), 5, colors)),
+                    ]
+                    .into_iter()
+                    .flatten(),
                 )
-                .child(browse_cell(row.due.clone(), 5, colors))
                 .child({
                     let menu_open =
                         self.card_menu.is_some_and(|menu| menu.id == id);
@@ -666,15 +695,16 @@ impl Root {
                 style,
             ));
         }
-        content = content.child(
-            div()
-                .flex()
-                .flex_1()
-                .min_h(px(0.))
-                .gap(px(SPACE_SECTION))
-                .child(table)
-                .child(self.render_browse_detail(selected, style)),
-        );
+        let detail = show_detail.then(|| {
+            self.render_browse_detail(selected, style, show_detail_side)
+        });
+        let body = div().flex().flex_1().min_h(px(0.)).gap(px(SPACE_SECTION));
+        let body = if show_detail_side {
+            body.child(table).children(detail)
+        } else {
+            body.flex_col().child(table).children(detail)
+        };
+        content = content.child(body);
         gpui::image_cache(self.images.clone())
             .size_full()
             .child(content)
@@ -833,10 +863,10 @@ impl Root {
         &self,
         selected: Option<Id>,
         style: Style,
+        side: bool,
     ) -> impl IntoElement {
         let colors = style.colors;
         let mut detail = div()
-            .w(px(BROWSE_PREVIEW_WIDTH))
             .id("browse-detail")
             .debug_selector(|| "browse-detail".to_owned())
             .flex()
@@ -848,6 +878,11 @@ impl Root {
             .border_1()
             .border_color(colors.surface0)
             .overflow_scroll();
+        if side {
+            detail = detail.w(px(BROWSE_PREVIEW_WIDTH));
+        } else {
+            detail = detail.w_full().h(px(220.0)).flex_none();
+        }
         let Some(row) = self
             .browse
             .rows
@@ -953,6 +988,22 @@ const BROWSE_PREVIEW_WIDTH: f32 = 320.;
 const BROWSE_COLUMNS: [f32; 6] = [1.0, 105., 90., 75., 65., 50.];
 const BROWSE_ACTION_WIDTH: f32 = 30.;
 
+/// Columns that still fit beside the card preview text.
+#[derive(Clone, Copy)]
+struct BrowseColumns {
+    tags: bool,
+    type_and_state: bool,
+}
+
+impl BrowseColumns {
+    fn for_width(width: f32) -> Self {
+        Self {
+            tags: width >= 860.0,
+            type_and_state: width >= 720.0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -963,10 +1014,20 @@ mod tests {
     };
 
     use super::{
-        BrowseEntry, browse_expand_paths, browser_row, build_browse_entries,
-        due_label, preview_line, queue_label, sort_browser_rows,
+        BrowseColumns, BrowseEntry, browse_expand_paths, browser_row,
+        build_browse_entries, due_label, preview_line, queue_label,
+        sort_browser_rows,
     };
 
+    #[test]
+    fn browse_columns_drop_as_the_page_narrows() {
+        let narrow = BrowseColumns::for_width(500.0);
+        assert!(!narrow.tags && !narrow.type_and_state);
+        let medium = BrowseColumns::for_width(750.0);
+        assert!(!medium.tags && medium.type_and_state);
+        let wide = BrowseColumns::for_width(1048.0);
+        assert!(wide.tags && wide.type_and_state);
+    }
     fn card_with_id(id: Id, queue: CardQueue, interval: i32) -> Card {
         Card {
             id,

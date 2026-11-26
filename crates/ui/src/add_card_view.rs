@@ -24,7 +24,7 @@ use crate::{
     theme::{
         ADD_CONTENT_WIDTH, ADD_FORM_WIDTH, ADD_GAP, PAGE_X, PREVIEW_WIDTH,
         SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE, SPACE_RELATED,
-        SPACE_SECTION, Style, alpha, card_colors, parse_hex_color,
+        SPACE_SECTION, Style, alpha, card_colors, page_width, parse_hex_color,
     },
 };
 
@@ -98,9 +98,8 @@ impl Root {
             note_type_tabs(models)
         };
         let save = self.action_click(UiAction::SaveNote);
-        let content_width = f32::from(window.viewport_size().width)
-            - self.nav_width
-            - PAGE_X * 2.0;
+        let content_width =
+            page_width(f32::from(window.viewport_size().width), self.nav_width);
         let side_by_side = content_width >= 900.;
 
         let screen = div()
@@ -139,6 +138,7 @@ impl Root {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(SPACE_BLOCK))
                     .child(
@@ -147,7 +147,7 @@ impl Root {
                             .flex_col()
                             .gap(px(SPACE_INLINE))
                             .flex_1()
-                            .min_w(px(220.))
+                            .min_w(px(180.))
                             .max_w(px(340.))
                             .p(px(SPACE_RELATED))
                             .px(px(SPACE_RELATED))
@@ -221,8 +221,9 @@ impl Root {
                     .child(
                         div()
                             .flex()
-                            .flex_none()
+                            .flex_wrap()
                             .items_center()
+                            .min_w(px(0.))
                             .gap(px(SPACE_INLINE))
                             .p(px(SPACE_INLINE))
                             .rounded(px(12.))
@@ -648,6 +649,7 @@ impl Root {
                 .mt(px(SPACE_SECTION))
                 .mb(px(SPACE_SECTION))
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .gap(px(SPACE_BLOCK))
                 .pt(px(SPACE_BLOCK))
