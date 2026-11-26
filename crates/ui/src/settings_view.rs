@@ -18,6 +18,7 @@ impl Root {
     pub(crate) fn render_settings(&self) -> impl IntoElement {
         let colors = self.colors();
         let chosen = self.options.theme;
+        let theme_text_size = px(13.);
 
         let mut segments = div()
             .flex()
@@ -71,7 +72,7 @@ impl Root {
                         .rounded(px(9.))
                         .bg(fill)
                         .text_color(ink)
-                        .text_size(px(13.))
+                        .text_size(theme_text_size)
                         .font_weight(FontWeight::SEMIBOLD)
                         .cursor_pointer(),
                 )
@@ -120,7 +121,7 @@ impl Root {
                             .gap(px(SPACE_SECTION))
                             .child(
                                 div()
-                                    .text_size(px(14.))
+                                    .text_size(theme_text_size)
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child("Theme"),
                             )
