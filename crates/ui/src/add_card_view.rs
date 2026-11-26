@@ -1272,7 +1272,7 @@ const MARKUP_BUTTONS: [(&str, &str, &str, bool, Option<&'static str>); 5] = [
     ("Math", "\\(", "\\)", false, Some("icon-math")),
 ];
 
-/// Field formatting bar plus the keyboard hint, under the first field.
+/// Field formatting bar under the first field.
 fn formatting_toolbar(
     field: gpui::Entity<crate::text_field::TextField>,
     is_cloze: bool,
@@ -1417,12 +1417,7 @@ fn formatting_toolbar(
             ));
         }
     }
-    toolbar.child(div().flex_1().min_w(px(120.))).child(
-        div()
-            .text_size(px(12.))
-            .text_color(colors.overlay)
-            .child("Tab for next field"),
-    )
+    toolbar
 }
 
 fn field_value(
