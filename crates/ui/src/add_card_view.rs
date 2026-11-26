@@ -85,57 +85,6 @@ impl Root {
         let model = resolve_model(models, self.add.model_index);
         let occlusion_mode =
             model.is_some_and(ranki_model::NoteModel::is_image_occlusion);
-        let field_values = if occlusion_mode {
-            self.occlusion_fields(cx)
-        } else {
-            fields
-                .iter()
-                .map(|field| field.read(cx).text())
-                .collect::<Vec<_>>()
-        };
-        let has_content = has_preview_content(&field_values);
-        let rendered_question = model.map(|model| {
-            card_view::preview_rendered(model, &field_values, Side::Question)
-        });
-        let rendered_answer = model.map(|model| {
-            card_view::preview_rendered(model, &field_values, Side::Answer)
-        });
-        let (question_media, answer_media) = if occlusion_mode {
-            (Vec::new(), Vec::new())
-        } else {
-            preview_media(rendered_question.as_ref(), rendered_answer.as_ref())
-        };
-        let preview_question = rendered_question.as_ref().map_or_else(
-            || {
-                div()
-                    .text_size(px(52.))
-                    .text_color(colors.text)
-                    .child("Choose a note type")
-            },
-            |card| card_view::preview_line(card, colors.text, 52.),
-        );
-        let preview_answer =
-            rendered_answer.as_ref().map_or_else(div, |card| {
-                card_view::preview_line(card, colors.mauve, 28.)
-                    .font_weight(gpui::FontWeight::BOLD)
-            });
-        let preview_reading = model.and_then(|model| {
-            field_value(model, &field_values, &["Reading", "Kana"])
-        });
-        let preview_example = model.and_then(|model| {
-            model
-                .fields
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| *index >= 2)
-                .find_map(|(index, _)| {
-                    field_values
-                        .get(index)
-                        .map(|value| value.trim())
-                        .filter(|value| !value.is_empty())
-                        .map(ToOwned::to_owned)
-                })
-        });
         let tabs = if self.card_edit.is_some() {
             model
                 .map(|model| {
@@ -467,90 +416,130 @@ impl Root {
                     ),
             );
 
-        let mut preview = div()
-            .flex()
-            .flex_col()
-            .gap(px(SPACE_BLOCK))
-            .p(px(SPACE_SECTION))
-            .min_h(px(300.))
-            .rounded(px(24.))
-            .bg(colors.surface0);
-        if side_by_side {
-            preview = preview.w(px(PREVIEW_WIDTH)).flex_none();
+        let preview = if occlusion_mode {
+            None
         } else {
-            preview = preview.w_full();
-        }
-        let mut preview = preview.child(if has_content {
-            div()
-                .flex_1()
+            let field_values = fields
+                .iter()
+                .map(|field| field.read(cx).text())
+                .collect::<Vec<_>>();
+            let has_content = has_preview_content(&field_values);
+            let rendered_question = model.map(|model| {
+                card_view::preview_rendered(
+                    model,
+                    &field_values,
+                    Side::Question,
+                )
+            });
+            let rendered_answer = model.map(|model| {
+                card_view::preview_rendered(model, &field_values, Side::Answer)
+            });
+            let (question_media, answer_media) = preview_media(
+                rendered_question.as_ref(),
+                rendered_answer.as_ref(),
+            );
+            let preview_question = rendered_question.as_ref().map_or_else(
+                || {
+                    div()
+                        .text_size(px(52.))
+                        .text_color(colors.text)
+                        .child("Choose a note type")
+                },
+                |card| card_view::preview_line(card, colors.text, 52.),
+            );
+            let preview_answer =
+                rendered_answer.as_ref().map_or_else(div, |card| {
+                    card_view::preview_line(card, colors.mauve, 28.)
+                        .font_weight(gpui::FontWeight::BOLD)
+                });
+            let preview_reading = model.and_then(|model| {
+                field_value(model, &field_values, &["Reading", "Kana"])
+            });
+            let preview_example = model.and_then(|model| {
+                model
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index >= 2)
+                    .find_map(|(index, _)| {
+                        field_values
+                            .get(index)
+                            .map(|value| value.trim())
+                            .filter(|value| !value.is_empty())
+                            .map(ToOwned::to_owned)
+                    })
+            });
+            let mut preview = div()
                 .flex()
                 .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(SPACE_GROUP))
-                .child(preview_question)
-                .children(preview_reading.map(|reading| {
-                    div()
-                        .text_size(px(14.))
-                        .text_color(colors.subtext)
-                        .font_family(crate::theme::font_for_text(&reading))
-                        .child(reading)
-                }))
-                .children(card_view::media_column(
-                    &question_media,
-                    &self.options.media_dir,
-                    colors,
-                    120.,
-                ))
-                .child(div().w_full().h(px(1.)).bg(colors.surface1))
-                .child(preview_answer)
-                .children(card_view::media_column(
-                    &answer_media,
-                    &self.options.media_dir,
-                    colors,
-                    120.,
-                ))
-                .children(preview_example.map(|example| {
-                    div()
-                        .w_full()
-                        .px(px(SPACE_RELATED))
-                        .py(px(SPACE_RELATED))
-                        .rounded(px(14.))
-                        .bg(colors.base)
-                        .text_size(px(14.))
-                        .font_family(crate::theme::font_for_text(&example))
-                        .child(example)
-                }))
-                .into_any_element()
-        } else {
-            div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .min_h(px(160.))
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .text_color(colors.overlay)
-                        .child("Preview appears as you type"),
-                )
-                .into_any_element()
-        });
-        if let Some(name) = self.add.occlusion.image.clone() {
-            let masks = rendered_question
-                .as_ref()
-                .map_or(&[][..], |card| card.masks.as_slice());
-            preview = preview.child(card_view::occlusion_media(
-                &self.options.media_dir,
-                &name,
-                masks,
-                colors,
-                false,
-                120.,
-                self.add.occlusion.image_size,
-            ));
-        }
+                .gap(px(SPACE_BLOCK))
+                .p(px(SPACE_SECTION))
+                .min_h(px(300.))
+                .rounded(px(24.))
+                .bg(colors.surface0);
+            if side_by_side {
+                preview = preview.w(px(PREVIEW_WIDTH)).flex_none();
+            } else {
+                preview = preview.w_full();
+            }
+            Some(preview.child(if has_content {
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(SPACE_GROUP))
+                    .child(preview_question)
+                    .children(preview_reading.map(|reading| {
+                        div()
+                            .text_size(px(14.))
+                            .text_color(colors.subtext)
+                            .font_family(crate::theme::font_for_text(&reading))
+                            .child(reading)
+                    }))
+                    .children(card_view::media_column(
+                        &question_media,
+                        &self.options.media_dir,
+                        colors,
+                        120.,
+                    ))
+                    .child(div().w_full().h(px(1.)).bg(colors.surface1))
+                    .child(preview_answer)
+                    .children(card_view::media_column(
+                        &answer_media,
+                        &self.options.media_dir,
+                        colors,
+                        120.,
+                    ))
+                    .children(preview_example.map(|example| {
+                        div()
+                            .w_full()
+                            .px(px(SPACE_RELATED))
+                            .py(px(SPACE_RELATED))
+                            .rounded(px(14.))
+                            .bg(colors.base)
+                            .text_size(px(14.))
+                            .font_family(crate::theme::font_for_text(&example))
+                            .child(example)
+                    }))
+                    .into_any_element()
+            } else {
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .min_h(px(160.))
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .text_color(colors.overlay)
+                            .child("Preview appears as you type"),
+                    )
+                    .into_any_element()
+            }))
+        };
 
         let mut form =
             div().mt(px(SPACE_SECTION)).flex().w_full().gap(px(ADD_GAP));
@@ -563,17 +552,21 @@ impl Root {
                 .gap(px(SPACE_BLOCK))
                 .child(left)
                 .child(tags_group);
-            form = form
-                .items_start()
-                .child(editor)
-                .child(div().w(px(PREVIEW_WIDTH)).flex_none().child(preview));
+            form = form.items_start().child(editor);
+            if let Some(preview) = preview {
+                form = form.child(
+                    div().w(px(PREVIEW_WIDTH)).flex_none().child(preview),
+                );
+            }
         } else {
             form = form
                 .flex_col()
                 .gap(px(SPACE_BLOCK))
                 .child(left)
-                .child(tags_group)
-                .child(preview);
+                .child(tags_group);
+            if let Some(preview) = preview {
+                form = form.child(preview);
+            }
         }
         column = column.child(form);
 
