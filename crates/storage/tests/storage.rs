@@ -11,6 +11,7 @@ use std::time::UNIX_EPOCH;
 use ranki_core::FsrsScheduler;
 use ranki_model::CardQueue;
 use ranki_model::CardType;
+use ranki_model::DeckStats;
 use ranki_model::NewNote;
 use ranki_model::Rating;
 use ranki_model::RevLog;
@@ -1512,4 +1513,148 @@ fn apply_reviews_writes_a_batch_atomically() {
     assert_eq!(saved.interval, 4, "a failed batch writes nothing");
     assert!(store.revlog(90_000).expect("revlog").is_none());
     assert!(store.revlog(90_001).expect("revlog").is_none());
+}
+
+#[test]
+fn stats_counts_boundaries_within_a_deck_subtree() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let conn = Connection::open(&path).expect("open");
+    conn.execute("UPDATE col SET crt = ?1 WHERE id = 1", [now])
+        .expect("set crt");
+    drop(conn);
+    let mut store = Collection::open(&path).expect("open");
+    let parent = store.create_deck("Study").expect("parent");
+    let child = store.create_deck("Study::Kids").expect("child");
+
+    let conn = Connection::open(&path).expect("open");
+    for (id, did, queue, due) in [
+        (10_i64, parent.id, 0_i64, 7_i64),
+        (11, parent.id, 1, now),
+        (12, parent.id, 1, now.saturating_add(1)),
+        (13, parent.id, 2, 0),
+        (14, parent.id, 2, 1),
+        (15, parent.id, 3, 0),
+        (20, child.id, 0, 7),
+        (21, child.id, 1, now),
+        (22, child.id, 1, now.saturating_add(1)),
+        (23, child.id, 2, 0),
+        (24, child.id, 3, 1),
+    ] {
+        conn.execute(
+            "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, \
+             lapses, left, odue, odid, flags, data) VALUES (?1, 1, ?2, 0, 0, 0, 0, ?3, ?4, 0, 0, \
+             0, 0, 0, 0, 0, 0, '')",
+            [id, did, queue, due],
+        )
+        .expect("insert card");
+    }
+    drop(conn);
+
+    let store = Collection::open(&path).expect("open");
+    let all = store.stats(Some(parent.id), now).expect("parent stats");
+    assert_eq!(all.new_cards, 2);
+    assert_eq!(all.learning_cards, 3);
+    assert_eq!(all.review_cards, 2);
+    assert_eq!(all.total_cards, 11);
+
+    let subtree = store.stats(Some(child.id), now).expect("child stats");
+    assert_eq!(subtree.new_cards, 1);
+    assert_eq!(subtree.learning_cards, 1);
+    assert_eq!(subtree.review_cards, 1);
+    assert_eq!(subtree.total_cards, 5);
+
+    let collection = store.stats(None, now).expect("collection stats");
+    assert_eq!(collection, all);
+    assert_eq!(
+        store.stats(Some(999), now).expect("missing deck"),
+        DeckStats::default()
+    );
+}
+
+#[test]
+fn due_cards_probe_keeps_priority_and_all_new_order() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let today = 0_i64;
+    let conn = Connection::open(&path).expect("open");
+    conn.execute("UPDATE col SET crt = ?1 WHERE id = 1", [now])
+        .expect("set crt");
+    for (id, queue, due) in [(10_i64, 0_i64, 7_i64), (11, 0, 3), (30, 2, today)]
+    {
+        conn.execute(
+            "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, \
+             lapses, left, odue, odid, flags, data) VALUES (?1, 1, 1, 0, 0, 0, 0, ?2, ?3, 0, 0, \
+             0, 0, 0, 0, 0, 0, '')",
+            [id, queue, due],
+        )
+        .expect("insert card");
+    }
+    conn.execute("DELETE FROM cards WHERE id = 30", [])
+        .expect("remove review card");
+    drop(conn);
+
+    let store = Collection::open(&path).expect("open");
+    let due: Vec<_> = store
+        .due_cards(None, 2, now)
+        .expect("due")
+        .into_iter()
+        .map(|card| card.id)
+        .collect();
+    assert_eq!(due, [11, 10]);
+
+    let conn = Connection::open(&path).expect("open");
+    conn.execute(
+        "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, \
+         lapses, left, odue, odid, flags, data) VALUES (30, 1, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, \
+         0, 0, 0, 0, 0, '')",
+        [],
+    )
+    .expect("insert review card");
+    drop(conn);
+    let due: Vec<_> = store
+        .due_cards(None, 2, now)
+        .expect("due")
+        .into_iter()
+        .map(|card| card.id)
+        .collect();
+    assert_eq!(due, [30, 11]);
+}
+
+#[test]
+fn apply_review_reports_stale_and_missing_cards() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(&["review", "answer"], &[]))
+        .expect("add");
+    let now = now_secs();
+    let card = store
+        .due_cards(None, 1, now)
+        .expect("due")
+        .pop()
+        .expect("card");
+    let decision = FsrsScheduler::default().schedule(
+        &card,
+        Rating::Good,
+        now,
+        store.collection_created().expect("created"),
+    );
+
+    let mut stale = decision.clone();
+    stale.expected_modified = card.modified.saturating_add(1);
+    let error = store.apply_review(&stale).expect_err("stale review");
+    assert!(
+        matches!(&error, StoreError::InvalidData(message) if message == "card changed since it was loaded"),
+        "{error:?}"
+    );
+
+    let mut missing = decision;
+    missing.card.id = -1;
+    let error = store.apply_review(&missing).expect_err("missing review");
+    assert!(
+        matches!(&error, StoreError::InvalidData(message) if message == "card changed since it was loaded"),
+        "{error:?}"
+    );
+    assert_eq!(store.review_history().expect("history"), [] as [RevLog; 0]);
 }

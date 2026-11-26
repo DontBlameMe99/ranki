@@ -72,6 +72,7 @@ pub struct Collection {
     conn: Connection,
     path: PathBuf,
     created: OnceCell<i64>,
+    due_index: OnceCell<()>,
 }
 
 impl Collection {
@@ -148,6 +149,7 @@ impl Collection {
             conn,
             path: path.to_path_buf(),
             created: OnceCell::new(),
+            due_index: OnceCell::new(),
         })
     }
 
@@ -318,7 +320,6 @@ params![stamp.modified, stamp.scm, json],
     fn deck_filter(
         &self,
         deck_id: Option<Id>,
-        first_placeholder: i64,
     ) -> Result<DeckFilter, StoreError> {
         let Some(id) = deck_id else {
             return Ok(DeckFilter {
@@ -336,21 +337,23 @@ params![stamp.modified, stamp.scm, json],
             });
         }
         Ok(DeckFilter {
-            clause: format!(
-                "c.did IN ({})",
-                placeholders(first_placeholder, ids.len())
-            ),
+            clause: format!("c.did IN ({})", vec!["?"; ids.len()].join(", ")),
             params: ids.into_iter().map(SqlValue::Integer).collect(),
             missing: false,
         })
     }
 
     fn ensure_due_index(&self) -> Result<(), StoreError> {
+        if self.due_index.get().is_some() {
+            return Ok(());
+        }
         self.conn
             .execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_ranki_cards_queue_due ON cards (queue, due, id)",
             )
-            .map_err(backend)
+            .map_err(backend)?;
+        let _ = self.due_index.set(());
+        Ok(())
     }
 }
 
@@ -568,7 +571,7 @@ impl Store for Collection {
         if limit_value == 0 {
             return Ok(Vec::new());
         }
-        let filter = self.deck_filter(deck_id, 3)?;
+        let filter = self.deck_filter(deck_id)?;
         if filter.missing {
             return Ok(Vec::new());
         }
@@ -578,15 +581,48 @@ impl Store for Collection {
         } else {
             format!("AND {}", filter.clause)
         };
+        let probe_deck = if filter.params.is_empty() {
+            String::new()
+        } else {
+            format!("AND c.did IN ({})", placeholders(4, filter.params.len()))
+        };
+        let probe_sql = format!(
+            "SELECT EXISTS(SELECT 1 FROM cards c WHERE c.queue = 1 AND c.due <= ?1 {probe_deck}), \
+                    EXISTS(SELECT 1 FROM cards c WHERE c.queue = 3 AND c.due <= ?2 {probe_deck}), \
+                    EXISTS(SELECT 1 FROM cards c WHERE c.queue = 2 AND c.due <= ?3 {probe_deck})"
+        );
+        let mut probe_parameters = vec![
+            SqlValue::Integer(now_secs),
+            SqlValue::Integer(today),
+            SqlValue::Integer(today),
+        ];
+        probe_parameters.extend(filter.params.iter().cloned());
+        let (learning_now, learning_day, review) = self
+            .conn
+            .prepare_cached(&probe_sql)
+            .map_err(backend)?
+            .query_row(params_from_iter(probe_parameters), |row| {
+                Ok((
+                    row.get::<_, bool>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })
+            .map_err(backend)?;
         let mut cards = Vec::with_capacity(limit);
-        for (queue, due) in
-            [(1, now_secs), (3, today), (2, today), (0, i64::MAX)]
-        {
+        for (queue, due, present) in [
+            (1, now_secs, learning_now),
+            (3, today, learning_day),
+            (2, today, review),
+            (0, i64::MAX, true),
+        ] {
+            if !present {
+                continue;
+            }
             let sql = format!(
                 "SELECT c.id, c.nid, c.did, c.ord, c.mod, c.usn, c.type, c.queue, c.due, c.ivl, \
                  c.factor, c.reps, c.lapses, c.left, c.odue, c.odid, c.flags, c.data FROM cards c \
-                 WHERE c.queue = ?1 AND c.due <= ?2 {deck_clause} ORDER BY c.due, c.id LIMIT ?{}",
-                filter.params.len().saturating_add(3)
+                 WHERE c.queue = ? AND c.due <= ? {deck_clause} ORDER BY c.due, c.id LIMIT ?"
             );
             let mut parameters =
                 vec![SqlValue::Integer(queue), SqlValue::Integer(due)];
@@ -895,31 +931,43 @@ impl Store for Collection {
         deck_id: Option<Id>,
         now_secs: i64,
     ) -> Result<DeckStats, StoreError> {
-        let filter = self.deck_filter(deck_id, 3)?;
+        let filter = self.deck_filter(deck_id)?;
         if filter.missing {
             return Ok(DeckStats::default());
         }
-        let where_clause = if filter.clause.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", filter.clause)
-        };
         let today = anki::day_number(now_secs, self.collection_created()?)?;
+        let (deck_and, deck_where) = if filter.params.is_empty() {
+            (String::new(), String::new())
+        } else {
+            let list = placeholders(3, filter.params.len());
+            (
+                format!("AND c.did IN ({list})"),
+                format!("WHERE c.did IN ({list})"),
+            )
+        };
         let sql = format!(
-            "SELECT SUM(CASE WHEN c.queue = 0 THEN 1 ELSE 0 END), \
-             SUM(CASE WHEN (c.queue = 1 AND c.due <= ?1) OR (c.queue = 3 AND c.due <= ?2) THEN 1 ELSE 0 END), \
-             SUM(CASE WHEN c.queue = 2 AND c.due <= ?2 THEN 1 ELSE 0 END), COUNT(*) FROM cards c {where_clause}"
+            "SELECT \
+             (SELECT COUNT(*) FROM cards c WHERE c.queue = 0 {deck_and}), \
+             (SELECT COUNT(*) FROM cards c WHERE ((c.queue = 1 AND c.due <= ?1) OR \
+              (c.queue = 3 AND c.due <= ?2)) {deck_and}), \
+             (SELECT COUNT(*) FROM cards c WHERE c.queue = 2 AND c.due <= ?2 {deck_and}), \
+             (SELECT COUNT(*) FROM cards c {deck_where})"
         );
         let mut parameters =
             vec![SqlValue::Integer(now_secs), SqlValue::Integer(today)];
         parameters.extend(filter.params);
-        let mut statement = self.conn.prepare(&sql).map_err(backend)?;
-        let counts: Counts = statement
+        let mut statement = self.conn.prepare_cached(&sql).map_err(backend)?;
+        let counts: (i64, i64, i64, i64) = statement
             .query_row(params_from_iter(parameters), |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })
             .map_err(backend)?;
-        Ok(stats_from_counts(counts))
+        Ok(stats_from_counts((
+            Some(counts.0),
+            Some(counts.1),
+            Some(counts.2),
+            counts.3,
+        )))
     }
 
     fn due_forecast(
