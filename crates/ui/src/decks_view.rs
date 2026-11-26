@@ -2,7 +2,7 @@
 
 use gpui::{
     App, ClickEvent, Context, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement, Rgba, ScrollWheelEvent, SharedString,
+    MouseDownEvent, ParentElement, Rgba, ScrollWheelEvent,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
@@ -24,8 +24,8 @@ const ROW_CHILD_HEIGHT: f32 = 45.0;
 const ROW_OVERSCAN: f32 = 240.0;
 
 impl Root {
-    pub(crate) fn visible_deck_rows(&self, _cx: &App) -> Vec<app::DeckRow> {
-        self.visible_rows.clone()
+    pub(crate) fn visible_deck_rows(&self, _cx: &App) -> &[app::DeckRow] {
+        &self.visible_rows
     }
 
     pub(crate) fn render_decks(
@@ -34,10 +34,10 @@ impl Root {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = self.colors();
-        let rows = self.visible_deck_rows(cx);
         let totals = self.leaf_totals;
         let smooth = self.motion_ms(1) > 0;
         self.decks_scroll.advance(window, smooth);
+        let rows = self.visible_deck_rows(cx);
 
         let create_click = self.action_click(UiAction::CreateDeck);
         let mut content = div()
@@ -142,7 +142,7 @@ impl Root {
         if !rows.is_empty() {
             let mut row_tops = Vec::with_capacity(rows.len().saturating_add(1));
             let mut rows_height = 0.0;
-            for row in &rows {
+            for row in rows {
                 row_tops.push(rows_height);
                 rows_height += if row.depth == 0 {
                     ROW_ROOT_HEIGHT
@@ -240,7 +240,7 @@ impl Root {
     }
 
     fn render_summary(
-        &mut self,
+        &self,
         totals: ranki_model::DeckStats,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -488,7 +488,7 @@ impl Root {
     }
 
     fn render_deck_row(
-        &mut self,
+        &self,
         row: &app::DeckRow,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -516,13 +516,8 @@ impl Root {
                 Interaction::surface(colors)
                     .apply(
                         div()
-                            .id(SharedString::from(format!(
-                                "decks-chevron-{}",
-                                row.path
-                            )))
-                            .debug_selector(|| {
-                                format!("decks-chevron-{}", row.path)
-                            })
+                            .id(row.chevron_key.clone())
+                            .debug_selector(|| row.chevron_key.to_string())
                             .flex()
                             .items_center()
                             .justify_center()
@@ -639,10 +634,7 @@ impl Root {
                     Interaction::accent(style)
                         .apply(
                             div()
-                                .id(SharedString::from(format!(
-                                    "decks-study-{}",
-                                    row.path
-                                )))
+                                .id(row.study_key.clone())
                                 .h(px(30.))
                                 .px(px(SPACE_RELATED))
                                 .flex()
@@ -683,8 +675,8 @@ impl Root {
                 )
                 .apply(
                     div()
-                        .id(SharedString::from(format!("decks-menu-{id}")))
-                        .debug_selector(|| format!("decks-menu-{id}"))
+                        .id(row.menu_key.clone())
+                        .debug_selector(|| row.menu_key.to_string())
                         .flex()
                         .items_center()
                         .justify_center()
@@ -733,8 +725,8 @@ impl Root {
             crate::theme::blend(colors.surface0, colors.surface1, 0.7)
         };
         div()
-            .id(SharedString::from(format!("deck-row-{}", row.path)))
-            .debug_selector(|| format!("deck-row-{}", row.path))
+            .id(row.key.clone())
+            .debug_selector(|| row.key.to_string())
             .flex()
             .items_center()
             .h(px(if row.depth == 0 {

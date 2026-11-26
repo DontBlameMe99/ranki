@@ -10,8 +10,8 @@ use std::{
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions,
-    Pixels, Point, Render, Window, WindowAppearance, div, point, prelude::*,
-    px,
+    Pixels, Point, Render, SharedString, Window, WindowAppearance, div, point,
+    prelude::*, px,
 };
 use ranki_core::{FsrsScheduler, from_settings};
 use ranki_model::{
@@ -89,6 +89,11 @@ pub struct DeckRow {
     pub meta: String,
     pub child_count: usize,
     pub deck_index: Option<usize>,
+    /// Element keys built once with the tree instead of on every frame.
+    pub key: SharedString,
+    pub chevron_key: SharedString,
+    pub study_key: SharedString,
+    pub menu_key: SharedString,
 }
 
 /// Deck rename state.
@@ -3158,6 +3163,10 @@ pub fn build_deck_rows(
             meta: String::new(),
             child_count: 0,
             deck_index: None,
+            key: SharedString::default(),
+            chevron_key: SharedString::default(),
+            study_key: SharedString::default(),
+            menu_key: SharedString::default(),
         });
         if open && let Some(list) = children.get(position) {
             for child in list.iter().rev() {
@@ -3192,6 +3201,12 @@ pub fn prepare_deck_rows(decks: &[Deck], rows: &mut [DeckRow]) {
         row.child_count = count;
         row.meta = deck_meta_counts(count, row.stats.total_cards);
         row.deck_index = row.id.and_then(|id| by_id.get(&id).copied());
+        row.key = SharedString::from(format!("deck-row-{}", row.path));
+        row.chevron_key =
+            SharedString::from(format!("decks-chevron-{}", row.path));
+        row.study_key = SharedString::from(format!("decks-study-{}", row.path));
+        row.menu_key =
+            SharedString::from(format!("decks-menu-{}", row.id.unwrap_or(0)));
     }
 }
 

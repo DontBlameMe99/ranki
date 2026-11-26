@@ -399,26 +399,8 @@ impl Root {
                         tags.iter().map(|tag| chip(tag.clone(), colors)),
                     ),
                 ));
-            let question_size = question.map_or(84.0, |card| {
-                card_text_size(
-                    card,
-                    stage_height,
-                    !card.media.is_empty() || !card.masks.is_empty(),
-                )
-            });
-            let question_size = if phase == Phase::Answer {
-                question_size.min(40.0)
-            } else {
-                question_size
-            };
-            let answer_size = answer.map_or(32.0, |card| {
-                card_text_size(
-                    card,
-                    stage_height,
-                    !card.media.is_empty() || !card.masks.is_empty(),
-                )
-                .clamp(22.0, 32.0)
-            });
+            let (question_size, answer_size) =
+                stage_text_sizes(question, answer, stage_height, phase);
             let center = div()
                 .id("review-stage-scroll")
                 .flex_1()
@@ -456,6 +438,7 @@ impl Root {
                         .child(text.clone())
                 }));
             if phase == Phase::Answer {
+                let answer_size = answer_size.unwrap_or(32.0);
                 let mut answer_group = div()
                     .w_full()
                     .flex()
@@ -632,6 +615,39 @@ fn card_text_size(
     (available / (estimated_lines as f32 * 1.25))
         .min(base)
         .clamp(24.0, 84.0)
+}
+
+/// Sizes the question and answer text for one stage frame. The answer size is
+/// only computed once the answer is visible.
+fn stage_text_sizes(
+    question: Option<&card_view::RenderedCard>,
+    answer: Option<&card_view::RenderedCard>,
+    stage_height: f32,
+    phase: Phase,
+) -> (f32, Option<f32>) {
+    let question_size = question.map_or(84.0, |card| {
+        card_text_size(
+            card,
+            stage_height,
+            !card.media.is_empty() || !card.masks.is_empty(),
+        )
+    });
+    let question_size = if phase == Phase::Answer {
+        question_size.min(40.0)
+    } else {
+        question_size
+    };
+    let answer_size = (phase == Phase::Answer).then(|| {
+        answer.map_or(32.0, |card| {
+            card_text_size(
+                card,
+                stage_height,
+                !card.media.is_empty() || !card.masks.is_empty(),
+            )
+            .clamp(22.0, 32.0)
+        })
+    });
+    (question_size, answer_size)
 }
 
 /// Headline for a finished session, sized by what actually happened.
@@ -923,6 +939,75 @@ mod tests {
         assert!(
             super::card_text_size(&long, 322.0, false)
                 < super::card_text_size(&short, 322.0, false)
+        );
+    }
+
+    #[test]
+    fn question_layout_does_not_depend_on_the_hidden_answer() {
+        let question = crate::card_view::RenderedCard {
+            text: "Question?".into(),
+            ..Default::default()
+        };
+        let short_answer = crate::card_view::RenderedCard {
+            text: "Answer".into(),
+            ..Default::default()
+        };
+        let long_answer = crate::card_view::RenderedCard {
+            text: "A long answer ".repeat(400),
+            ..Default::default()
+        };
+        let (question_only, hidden) = super::stage_text_sizes(
+            Some(&question),
+            None,
+            322.0,
+            Phase::Question,
+        );
+        let (with_short, short_size) = super::stage_text_sizes(
+            Some(&question),
+            Some(&short_answer),
+            322.0,
+            Phase::Question,
+        );
+        let (with_long, long_size) = super::stage_text_sizes(
+            Some(&question),
+            Some(&long_answer),
+            322.0,
+            Phase::Question,
+        );
+        assert_eq!(question_only, with_short);
+        assert_eq!(question_only, with_long);
+        assert_eq!(hidden, None);
+        assert_eq!(short_size, None);
+        assert_eq!(long_size, None);
+
+        let (revealed, answer_size) = super::stage_text_sizes(
+            Some(&question),
+            Some(&long_answer),
+            322.0,
+            Phase::Answer,
+        );
+        assert_eq!(revealed, question_only.min(40.0));
+        assert!(answer_size.is_some());
+        let (short_reveal, short_answer_size) = super::stage_text_sizes(
+            Some(&question),
+            Some(&short_answer),
+            322.0,
+            Phase::Answer,
+        );
+        assert_eq!(revealed, short_reveal);
+        assert_eq!(
+            answer_size,
+            Some(
+                super::card_text_size(&long_answer, 322.0, false)
+                    .clamp(22.0, 32.0)
+            )
+        );
+        assert_eq!(
+            short_answer_size,
+            Some(
+                super::card_text_size(&short_answer, 322.0, false)
+                    .clamp(22.0, 32.0)
+            )
         );
     }
 
