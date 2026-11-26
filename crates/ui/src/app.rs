@@ -550,6 +550,8 @@ pub struct Root {
     /// Cards scheduled in each of the next seven Anki days, today first.
     pub(crate) forecast: Vec<usize>,
     pub(crate) statistics: Statistics,
+    /// Anki day shown in the heatmap's hover details.
+    pub(crate) heatmap_hover: Option<i64>,
     pub(crate) deck_rows: Vec<DeckRow>,
     pub(crate) deck_rows_rev: u64,
     pub(crate) visible_rows: Vec<DeckRow>,
@@ -722,6 +724,7 @@ impl Root {
             stats: Vec::new(),
             forecast: Vec::new(),
             statistics: Statistics::default(),
+            heatmap_hover: None,
             deck_rows: Vec::new(),
             deck_rows_rev: 0,
             visible_rows: Vec::new(),
@@ -830,6 +833,12 @@ impl Root {
                 root.review.phase = Phase::Answer;
             }
             _ => {}
+        }
+        if let Ok(offset) = env::var("RANKI_UI_DEV_STATS_HOVER")
+            && let Ok(offset) = offset.parse::<i64>()
+            && let Some(today) = root.statistics.days.last().map(|day| day.day)
+        {
+            root.heatmap_hover = Some(today.saturating_sub(offset));
         }
         if let Ok(path) = env::var("RANKI_UI_DEV_STUDY_DECK")
             && let Some(id) = root
@@ -3587,8 +3596,7 @@ fn deck_meta_counts(children: usize, cards: usize) -> String {
     format!("{subdecks} · {cards_label}")
 }
 
-/// Calendar label for the removed date line, kept for its unit test.
-#[cfg(test)]
+/// Calendar label for a statistics heatmap day.
 #[must_use]
 pub fn date_label(seconds: u64) -> String {
     let days = i64::try_from(seconds / 86_400).unwrap_or(0);
@@ -3623,7 +3631,6 @@ pub fn date_label(seconds: u64) -> String {
 }
 
 /// Howard Hinnant's civil-from-days, valid for the Unix epoch range.
-#[cfg(test)]
 fn civil_from_days(days: i64) -> (i64, i32, i32) {
     let shifted = days.saturating_add(719_468);
     let era = if shifted >= 0 {
