@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::env;
 use std::fs;
 use std::fs::File;
 use std::io::Read;
@@ -57,7 +58,11 @@ CREATE TABLE revlog (
 CREATE TABLE graves (usn INTEGER NOT NULL, oid INTEGER NOT NULL, type INTEGER NOT NULL);
 ";
 
-const REAL_FIXTURE: &str = "/home/user/downloads/WorldFlags.apkg";
+fn real_fixture() -> Option<PathBuf> {
+    env::var_os("RANKI_TEST_APKG")
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+}
 const DAY_SECS: i64 = 86_400;
 
 #[derive(Clone)]
@@ -1045,14 +1050,14 @@ fn invalid_media_mapping_has_clear_error() {
 
 #[test]
 fn real_world_apkg_roundtrip_when_available() {
-    if !Path::new(REAL_FIXTURE).exists() {
-        eprintln!("skipping real-world apkg test: {REAL_FIXTURE} is absent");
+    let Some(fixture) = real_fixture() else {
+        eprintln!("skipping real-world apkg test: RANKI_TEST_APKG is absent");
         return;
-    }
+    };
 
     let dir = tempfile::tempdir().unwrap();
     let package = dir.path().join("WorldFlags.apkg");
-    fs::copy(REAL_FIXTURE, &package).unwrap();
+    fs::copy(&fixture, &package).unwrap();
     let collection = dir.path().join("flags.anki2");
     let media = dir.path().join("flags-media");
     let report = import_apkg(&package, &collection, &media).unwrap();
@@ -1209,17 +1214,19 @@ fn import_into(
     connection
 }
 
+fn package_meta(fields: &[&str], extra_decks: &[Value]) -> SourceMeta {
+    let mut decks = vec![deck_json(PACKAGE_DECK_ID, "Default")];
+    decks.extend_from_slice(extra_decks);
+    SourceMeta {
+        models: entry_map(&[model_json(PACKAGE_MODEL_ID, "Basic", fields)]),
+        decks: entry_map(&decks),
+    }
+}
+
 #[test]
 fn fresh_import_merges_named_deck_and_model() {
     let dir = tempfile::tempdir().unwrap();
-    let meta = SourceMeta {
-        models: entry_map(&[model_json(
-            PACKAGE_MODEL_ID,
-            "Basic",
-            &["Front", "Back"],
-        )]),
-        decks: entry_map(&[deck_json(PACKAGE_DECK_ID, "Default")]),
-    };
+    let meta = package_meta(&["Front", "Back"], &[]);
     let package = merge_package(
         dir.path(),
         &meta,
@@ -1391,17 +1398,8 @@ fn subdeck_merge_keeps_hierarchy() {
 #[test]
 fn reimport_keeps_deck_and_model_counts() {
     let dir = tempfile::tempdir().unwrap();
-    let meta = SourceMeta {
-        models: entry_map(&[model_json(
-            PACKAGE_MODEL_ID,
-            "Basic",
-            &["Front", "Back"],
-        )]),
-        decks: entry_map(&[
-            deck_json(PACKAGE_DECK_ID, "Default"),
-            deck_json(701, "Parent::Child"),
-        ]),
-    };
+    let meta =
+        package_meta(&["Front", "Back"], &[deck_json(701, "Parent::Child")]);
     let package = merge_package(
         dir.path(),
         &meta,
@@ -1429,14 +1427,7 @@ fn reimport_keeps_deck_and_model_counts() {
 #[test]
 fn incompatible_same_named_model_is_kept_separate() {
     let dir = tempfile::tempdir().unwrap();
-    let meta = SourceMeta {
-        models: entry_map(&[model_json(
-            PACKAGE_MODEL_ID,
-            "Basic",
-            &["Front", "Back", "Extra"],
-        )]),
-        decks: entry_map(&[deck_json(PACKAGE_DECK_ID, "Default")]),
-    };
+    let meta = package_meta(&["Front", "Back", "Extra"], &[]);
     let package = merge_package(
         dir.path(),
         &meta,
@@ -1465,17 +1456,7 @@ fn incompatible_same_named_model_is_kept_separate() {
 #[test]
 fn imported_original_deck_points_at_merged_deck() {
     let dir = tempfile::tempdir().unwrap();
-    let meta = SourceMeta {
-        models: entry_map(&[model_json(
-            PACKAGE_MODEL_ID,
-            "Basic",
-            &["Front", "Back"],
-        )]),
-        decks: entry_map(&[
-            deck_json(PACKAGE_DECK_ID, "Default"),
-            deck_json(701, "Later"),
-        ]),
-    };
+    let meta = package_meta(&["Front", "Back"], &[deck_json(701, "Later")]);
     let source = dir.path().join("merge-source.anki2");
     write_collection_with(
         &source,
@@ -1512,14 +1493,14 @@ fn imported_original_deck_points_at_merged_deck() {
 
 #[test]
 fn real_world_apkg_import_keeps_single_default_deck() {
-    if !Path::new(REAL_FIXTURE).exists() {
-        eprintln!("skipping real-world apkg test: {REAL_FIXTURE} is absent");
+    let Some(fixture) = real_fixture() else {
+        eprintln!("skipping real-world apkg test: RANKI_TEST_APKG is absent");
         return;
-    }
+    };
 
     let dir = tempfile::tempdir().unwrap();
     let package = dir.path().join("WorldFlags.apkg");
-    fs::copy(REAL_FIXTURE, &package).unwrap();
+    fs::copy(&fixture, &package).unwrap();
     let collection = dir.path().join("flags.anki2");
     let connection = import_into(dir.path(), &package, &collection);
 
@@ -1952,14 +1933,14 @@ fn schema18_destination_keeps_tables_in_sync_with_merged_metadata() {
 
 #[test]
 fn real_world_import_puts_all_cards_in_the_package_deck() {
-    if !Path::new(REAL_FIXTURE).exists() {
-        eprintln!("skipping real-world apkg test: {REAL_FIXTURE} is absent");
+    let Some(fixture) = real_fixture() else {
+        eprintln!("skipping real-world apkg test: RANKI_TEST_APKG is absent");
         return;
-    }
+    };
 
     let dir = tempfile::tempdir().unwrap();
     let package = dir.path().join("WorldFlags.apkg");
-    fs::copy(REAL_FIXTURE, &package).unwrap();
+    fs::copy(&fixture, &package).unwrap();
     let collection = dir.path().join("flags.anki2");
     let connection = import_into(dir.path(), &package, &collection);
 
@@ -1980,14 +1961,14 @@ fn real_world_import_puts_all_cards_in_the_package_deck() {
 
 #[test]
 fn real_world_import_into_existing_collection_keeps_one_default_deck() {
-    if !Path::new(REAL_FIXTURE).exists() {
-        eprintln!("skipping real-world apkg test: {REAL_FIXTURE} is absent");
+    let Some(fixture) = real_fixture() else {
+        eprintln!("skipping real-world apkg test: RANKI_TEST_APKG is absent");
         return;
-    }
+    };
 
     let dir = tempfile::tempdir().unwrap();
     let package = dir.path().join("WorldFlags.apkg");
-    fs::copy(REAL_FIXTURE, &package).unwrap();
+    fs::copy(&fixture, &package).unwrap();
     let collection = dir.path().join("existing.anki2");
     AnkiCollection::create(&collection)
         .unwrap()

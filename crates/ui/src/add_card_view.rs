@@ -12,7 +12,9 @@ use gpui::{
 use crate::{
     app::{Root, UiAction, note_type_name, resolve_model},
     card_view::{self, Side},
-    components::{ClickHandler, Interaction, icon, keycap, removable_chip},
+    components::{
+        ClickHandler, Interaction, icon, keycap, removable_chip, same_press,
+    },
     occlusion::{self, OcclusionMask},
     theme::{
         ADD_CONTENT_WIDTH, ADD_FORM_WIDTH, ADD_GAP, NAV_WIDTH, PAGE_X,
@@ -167,23 +169,12 @@ impl Root {
                                     )
                                     .on_click(cx.listener(
                                         |this, event: &ClickEvent, window, cx| {
-                                            let same_press = match event {
-                                                ClickEvent::Mouse(click) => this
-                                                    .add
+                                            let same_press = same_press(
+                                                event,
+                                                this.add
                                                     .deck_picker_dismissed_press
-                                                    .as_ref()
-                                                    .is_some_and(|down| {
-                                                        down.button
-                                                            == click.down.button
-                                                            && down.position
-                                                                == click.down.position
-                                                            && down.click_count
-                                                                == click.down.click_count
-                                                            && down.first_mouse
-                                                                == click.down.first_mouse
-                                                    }),
-                                                ClickEvent::Keyboard(_) => false,
-                                            };
+                                                    .as_ref(),
+                                            );
                                             this.add
                                                 .deck_picker_dismissed_press =
                                                 None;
@@ -279,8 +270,6 @@ impl Root {
             column = column.child(validation(error, colors));
         }
 
-        let occlusion_mode =
-            model.is_some_and(ranki_model::NoteModel::is_image_occlusion);
         let is_cloze = model
             .is_some_and(|model| model.kind == ranki_model::NoteKind::Cloze);
         let mut left = div()

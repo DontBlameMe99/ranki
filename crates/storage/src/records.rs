@@ -160,10 +160,6 @@ fn template_ordinal(template: &Json, position: usize) -> u16 {
         .unwrap_or_else(|| u16::try_from(position).unwrap_or_default())
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "schema-11 and schema-18 model fields are decoded together"
-)]
 pub fn models_from_json(json: &str) -> Result<Vec<NoteModel>, StoreError> {
     if json.trim().is_empty() {
         return Ok(Vec::new());
@@ -175,85 +171,89 @@ pub fn models_from_json(json: &str) -> Result<Vec<NoteModel>, StoreError> {
         .ok_or_else(|| crate::invalid("models is not an object"))?;
     let mut models = Vec::with_capacity(object.len());
     for (key, value) in object {
-        let id = key
-            .parse::<Id>()
-            .map_err(|_| crate::invalid("invalid model id"))?;
-        let templates = value.get("tmpls").and_then(Json::as_array);
-        let kind = NoteKind::from_code(
-            value
-                .get("type")
-                .and_then(Json::as_i64)
-                .and_then(|code| i32::try_from(code).ok())
-                .unwrap_or_default(),
-        );
-        let fields = string_array(value.get("flds"), "name");
-        let field_tags = optional_numbers(value.get("flds"), "tag")
-            .into_iter()
-            .map(|tag| u32::try_from(tag).ok())
-            .collect();
-        let template_ordinals = templates.map_or_else(Vec::new, |items| {
-            items.iter().enumerate().map(ordinal_at).collect()
-        });
-        let raw_config = value
-            .get("_rankiRawConfig")
-            .and_then(Json::as_str)
-            .and_then(decode_hex);
-        let mut model = NoteModel {
-            id,
-            name: value
-                .get("name")
-                .and_then(Json::as_str)
-                .unwrap_or_default()
-                .into(),
-            fields,
-            templates: templates.map_or_else(Vec::new, |items| {
-                items
-                    .iter()
-                    .enumerate()
-                    .map(|(position, template)| CardTemplate {
-                        name: template
-                            .get("name")
-                            .and_then(Json::as_str)
-                            .unwrap_or_default()
-                            .into(),
-                        question_format: template
-                            .get("qfmt")
-                            .and_then(Json::as_str)
-                            .unwrap_or_default()
-                            .into(),
-                        answer_format: template
-                            .get("afmt")
-                            .and_then(Json::as_str)
-                            .unwrap_or_default()
-                            .into(),
-                        ord: template_ordinal(template, position),
-                    })
-                    .collect()
-            }),
-            css: value
-                .get("css")
-                .and_then(Json::as_str)
-                .unwrap_or_default()
-                .into(),
-            sort_field_index: value
-                .get("sortf")
-                .and_then(Json::as_u64)
-                .and_then(|index| u16::try_from(index).ok())
-                .unwrap_or_default(),
-            kind,
-            original_stock_kind: value
-                .get("originalStockKind")
-                .and_then(Json::as_i64)
-                .and_then(|kind| i32::try_from(kind).ok()),
-            field_tags,
-            template_ordinals,
-            raw_config,
-        };
-        infer_cloze_tags(&mut model);
-        models.push(model);
+        models.push(model_from_json(key, value)?);
     }
     models.sort_unstable_by_key(|model| model.id);
     Ok(models)
+}
+
+fn model_from_json(key: &str, value: &Json) -> Result<NoteModel, StoreError> {
+    let id = key
+        .parse::<Id>()
+        .map_err(|_| crate::invalid("invalid model id"))?;
+    let templates = value.get("tmpls").and_then(Json::as_array);
+    let kind = NoteKind::from_code(
+        value
+            .get("type")
+            .and_then(Json::as_i64)
+            .and_then(|code| i32::try_from(code).ok())
+            .unwrap_or_default(),
+    );
+    let fields = string_array(value.get("flds"), "name");
+    let field_tags = optional_numbers(value.get("flds"), "tag")
+        .into_iter()
+        .map(|tag| u32::try_from(tag).ok())
+        .collect();
+    let template_ordinals = templates.map_or_else(Vec::new, |items| {
+        items.iter().enumerate().map(ordinal_at).collect()
+    });
+    let raw_config = value
+        .get("_rankiRawConfig")
+        .and_then(Json::as_str)
+        .and_then(decode_hex);
+    let mut model = NoteModel {
+        id,
+        name: value
+            .get("name")
+            .and_then(Json::as_str)
+            .unwrap_or_default()
+            .into(),
+        fields,
+        templates: templates.map_or_else(Vec::new, |items| {
+            items
+                .iter()
+                .enumerate()
+                .map(|(position, template)| CardTemplate {
+                    name: template
+                        .get("name")
+                        .and_then(Json::as_str)
+                        .unwrap_or_default()
+                        .into(),
+                    question_format: template
+                        .get("qfmt")
+                        .and_then(Json::as_str)
+                        .unwrap_or_default()
+                        .into(),
+                    answer_format: template
+                        .get("afmt")
+                        .and_then(Json::as_str)
+                        .unwrap_or_default()
+                        .into(),
+                    ord: template_ordinal(template, position),
+                })
+                .collect()
+        }),
+        css: value
+            .get("css")
+            .and_then(Json::as_str)
+            .unwrap_or_default()
+            .into(),
+        sort_field_index: value
+            .get("sortf")
+            .and_then(Json::as_u64)
+            .and_then(|index| u16::try_from(index).ok())
+            .unwrap_or_default(),
+        kind,
+        original_stock_kind: value
+            .get("originalStockKind")
+            .and_then(Json::as_i64)
+            .and_then(|kind| i32::try_from(kind).ok()),
+        field_tags,
+        template_ordinals,
+        raw_config,
+    };
+    infer_cloze_tags(&mut model);
+    Ok(model)
 }
 
 pub fn decks_from_tables(conn: &Connection) -> Result<Vec<Deck>, StoreError> {

@@ -10,7 +10,7 @@ use crate::{
     app::{Confirmation, Root, UiAction, View},
     components::{
         ButtonTone, ClickHandler, Interaction, action_button, brand_mark, icon,
-        keycap, secondary_button,
+        keycap, panel, secondary_button,
     },
     theme::{
         NAV_WIDTH, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED,
@@ -667,16 +667,8 @@ impl Root {
                         },
                     ))
                     .child(
-                        div()
+                        panel(colors)
                             .w(px(420.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(SPACE_BLOCK))
-                            .p(px(SPACE_SECTION))
-                            .rounded(px(24.))
-                            .bg(colors.mantle)
-                            .border_1()
-                            .border_color(colors.surface0)
                             .child(
                                 div()
                                     .text_size(px(20.))

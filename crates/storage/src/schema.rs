@@ -79,7 +79,8 @@ pub const CREATE_STATEMENTS: &[&str] = &[
     "CREATE INDEX ix_revlog_usn ON revlog (usn)",
 ];
 
-const FSRS_PARAMS6: [f64; 21] = [
+/// Anki's default FSRS-6 weights as 64-bit floats, matching collection JSON.
+pub const ANKI_DEFAULT_FSRS6_PARAMS_F64: [f64; 21] = [
     0.212, 1.2931, 2.3065, 8.2956, 6.4133, 0.8334, 3.0194, 0.001, 1.8722,
     0.1666, 0.796, 1.4835, 0.0614, 0.2629, 1.6483, 0.6014, 1.8729, 0.5425,
     0.0912, 0.0658, 0.1542,
@@ -186,7 +187,7 @@ pub fn default_col(now_secs: i64, now_ms: i64) -> Value {
         "easyDaysPercentages": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
         "fsrsWeights": [],
         "fsrsParams5": [],
-        "fsrsParams6": FSRS_PARAMS6,
+        "fsrsParams6": ANKI_DEFAULT_FSRS6_PARAMS_F64,
         "desiredRetention": 0.9,
         "sm2Retention": 0.9,
         "weightSearch": "",

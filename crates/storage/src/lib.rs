@@ -61,6 +61,7 @@ use rusqlite::Transaction;
 use rusqlite::params;
 use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
+pub use schema::ANKI_DEFAULT_FSRS6_PARAMS_F64;
 use serde_json::Map;
 use serde_json::Value as Json;
 use serde_json::json;
@@ -307,7 +308,11 @@ params![stamp.modified, stamp.scm, json],
     }
 
     fn deck_subtree(&self, deck_id: Id) -> Result<Vec<Id>, StoreError> {
-        Ok(deck_subtree_ids(&self.deck_list()?, deck_id))
+        let decks = self.deck_list()?;
+        let Some(deck) = decks.iter().find(|deck| deck.id == deck_id) else {
+            return Ok(Vec::new());
+        };
+        Ok(deck_subtree_ids(&decks, &deck.name))
     }
 
     fn deck_filter(
@@ -447,10 +452,10 @@ impl Store for Collection {
         }
         let transaction = self.conn.transaction().map_err(backend)?;
         let decks = deck_list_from(&transaction)?;
-        if !decks.iter().any(|deck| deck.id == id) {
+        let Some(root) = decks.iter().find(|deck| deck.id == id) else {
             return Err(StoreError::NotFound(format!("deck {id}")));
-        }
-        let subtree = deck_subtree_ids(&decks, id);
+        };
+        let subtree = deck_subtree_ids(&decks, &root.name);
         let (card_ids, note_ids) = cards_in_decks(&transaction, &subtree)?;
         delete_cards(&transaction, &card_ids)?;
         let deleted_notes = delete_orphan_notes(&transaction, &note_ids)?;
@@ -1305,14 +1310,15 @@ fn stats_from_counts(counts: Counts) -> DeckStats {
     }
 }
 
-fn deck_subtree_ids(decks: &[Deck], deck_id: Id) -> Vec<Id> {
-    let Some(root) = decks.iter().find(|deck| deck.id == deck_id) else {
+/// Ids of a deck and its subdecks, in deck-list order.
+pub(crate) fn deck_subtree_ids(decks: &[Deck], root_name: &str) -> Vec<Id> {
+    let Some(root) = decks.iter().find(|deck| deck.name == root_name) else {
         return Vec::new();
     };
     let prefix = format!("{}::", root.name);
     decks
         .iter()
-        .filter(|deck| deck.id == deck_id || deck.name.starts_with(&prefix))
+        .filter(|deck| deck.id == root.id || deck.name.starts_with(&prefix))
         .map(|deck| deck.id)
         .collect()
 }

@@ -70,12 +70,16 @@ pub(super) fn read_env() -> SyncEnv {
     }
 }
 
+fn read_state(path: &Path) -> Option<SyncState> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<SyncState>(&text).ok())
+}
+
 /// Whether a previous login left a host key in the local sync state.
 #[must_use]
 pub(super) fn has_stored_key(settings: &Settings) -> bool {
-    fs::read_to_string(state_path(&settings.collection))
-        .ok()
-        .and_then(|text| serde_json::from_str::<SyncState>(&text).ok())
+    read_state(&state_path(&settings.collection))
         .is_some_and(|state| !state.host_key.is_empty())
 }
 
@@ -270,14 +274,7 @@ fn read_hkey_file(path: &Path) -> Option<String> {
 }
 
 fn store_host_key(path: &Path, key: &str) -> io::Result<()> {
-    let mut state = if path.exists() {
-        fs::read_to_string(path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<SyncState>(&text).ok())
-            .unwrap_or_default()
-    } else {
-        SyncState::default()
-    };
+    let mut state = read_state(path).unwrap_or_default();
     key.clone_into(&mut state.host_key);
     let text = serde_json::to_string(&state).map_err(io::Error::other)?;
     let mut file = OpenOptions::new()

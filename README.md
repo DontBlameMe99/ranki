@@ -165,7 +165,7 @@ The review window uses these keys:
 | Space, Enter | Reveal the answer |
 | 1, 2, 3, 4 | Again, Hard, Good, Easy |
 | R | Toggle the answer |
-| Up, Down | Select another deck |
+| N | Select another deck |
 | F5 | Reload the collection |
 
 ## Compatibility

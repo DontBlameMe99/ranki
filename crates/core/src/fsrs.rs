@@ -303,12 +303,11 @@ impl FsrsScheduler {
         }
     }
 
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "the loop follows Anki's sequential button constraints"
-    )]
-    fn prepare(&self, ctx: &ReviewContext<'_>) -> Prepared {
-        let current = read_memory(&ctx.card.data);
+    fn button_intervals(
+        &self,
+        ctx: &ReviewContext<'_>,
+        current: Option<Memory>,
+    ) -> (i32, Memory) {
         let elapsed = elapsed_days(ctx.card, ctx.now_secs);
         let maximum = u32::try_from(self.preset.maximum_interval.max(1))
             .unwrap_or(u32::MAX);
@@ -321,44 +320,45 @@ impl FsrsScheduler {
             .saturating_add(1);
         let mut intervals = [0_i32; 4];
         let mut memory = initial_memory(&self.params, ctx.rating);
-        for index in 0..needed {
+        let mut previous_interval = 0_i32;
+        for (index, slot) in intervals.iter_mut().take(needed).enumerate() {
             let rating = ratings.get(index).copied().unwrap_or(ctx.rating);
-            let next = current.map_or_else(
+            memory = current.map_or_else(
                 || initial_memory(&self.params, rating),
                 |memory| update_memory(&self.params, memory, elapsed, rating),
             );
-            if index.saturating_add(1) == needed {
-                memory = next;
-            }
             let raw = raw_interval_days_for_stability(
-                next.stability,
+                memory.stability,
                 self.preset.desired_retention,
                 self.params.decay(),
             );
-            let earlier = u32::try_from(
-                intervals.get(index.saturating_sub(1)).copied().unwrap_or(0),
-            )
-            .unwrap_or(maximum)
-            .saturating_add(1)
-            .min(maximum);
+            let earlier = u32::try_from(previous_interval)
+                .unwrap_or(maximum)
+                .saturating_add(1)
+                .min(maximum);
             let minimum =
                 Self::interval_minimum(index, raw, previous, maximum, earlier);
-            if let Some(slot) = intervals.get_mut(index) {
-                *slot = fuzz_interval(FuzzInput {
-                    interval: raw,
-                    minimum,
-                    maximum,
-                    card_id: ctx.card.id,
-                    reps: ctx.card.reps,
-                    enabled: self.preset.enable_fuzzing,
-                });
-            }
+            *slot = fuzz_interval(FuzzInput {
+                interval: raw,
+                minimum,
+                maximum,
+                card_id: ctx.card.id,
+                reps: ctx.card.reps,
+                enabled: self.preset.enable_fuzzing,
+            });
+            previous_interval = *slot;
         }
         let graduation = intervals
             .get(needed.saturating_sub(1))
             .copied()
             .unwrap_or(1)
             .max(1);
+        (graduation, memory)
+    }
+
+    fn prepare(&self, ctx: &ReviewContext<'_>) -> Prepared {
+        let current = read_memory(&ctx.card.data);
+        let (graduation, memory) = self.button_intervals(ctx, current);
         Prepared {
             data: write_memory(
                 &ctx.card.data,

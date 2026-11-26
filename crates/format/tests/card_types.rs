@@ -1,6 +1,7 @@
 #![expect(clippy::expect_used, reason = "test fixtures panic when setup fails")]
 //! Import and export tests for full schema-18 note types.
 
+use std::env;
 use std::fs;
 use std::fs::File;
 use std::io::Read;
@@ -15,18 +16,27 @@ use rusqlite::Connection;
 use serde_json::Value;
 use tempfile::TempDir;
 
-const LOCAL_COLLECTION: &str =
-    "/home/user/.local/share/Anki2/main/collection.anki2";
+fn local_collection() -> Option<PathBuf> {
+    env::var_os("RANKI_TEST_COLLECTION")
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+}
+
+fn real_fixture() -> Option<PathBuf> {
+    env::var_os("RANKI_TEST_APKG")
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+}
 
 fn import_local(dir: &TempDir, name: &str) -> Option<PathBuf> {
-    if !Path::new(LOCAL_COLLECTION).exists() {
+    let Some(original) = local_collection() else {
         eprintln!(
-            "skipping: real schema-18 fixture is missing: {LOCAL_COLLECTION}"
+            "skipping: real schema-18 fixture is missing: RANKI_TEST_COLLECTION is unset or absent"
         );
         return None;
-    }
+    };
     let source = dir.path().join(format!("{name}-source.anki2"));
-    fs::copy(LOCAL_COLLECTION, &source).expect("copy collection");
+    fs::copy(original, &source).expect("copy collection");
     let media = dir.path().join(format!("{name}-source-media"));
     fs::create_dir_all(&media).expect("media dir");
     let package = dir.path().join(format!("{name}.apkg"));
@@ -148,18 +158,16 @@ fn export_roundtrip_preserves_raw_model_config() {
 )]
 #[test]
 fn worldflags_model_without_templates_imports_without_crashing() {
-    let source = Path::new("/home/user/downloads/WorldFlags.apkg");
-    if !source.exists() {
+    let Some(source) = real_fixture() else {
         eprintln!(
-            "skipping: real WorldFlags fixture is missing: {}",
-            source.display()
+            "skipping: real WorldFlags fixture is missing: RANKI_TEST_APKG is unset or absent"
         );
         return;
-    }
+    };
     let dir = tempfile::tempdir().expect("tempdir");
     let collection = dir.path().join("worldflags.anki2");
     ranki_format::import_apkg(
-        source,
+        &source,
         &collection,
         &dir.path().join("worldflags-media"),
     )

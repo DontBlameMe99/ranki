@@ -10,6 +10,7 @@ use ranki_model::{Rating, RevLog, RevLogKind};
 
 use crate::{
     app::{self, Root, duration_label},
+    components::panel,
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE,
         SPACE_RELATED, SPACE_SECTION, Style, alpha, queue_text, rating_fill,
@@ -341,15 +342,7 @@ impl Root {
                     ),
             );
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(SPACE_BLOCK))
-            .p(px(SPACE_SECTION))
-            .rounded(px(24.))
-            .bg(colors.mantle)
-            .border_1()
-            .border_color(colors.surface0)
+        panel(colors)
             .child(
                 div()
                     .flex()
@@ -405,15 +398,7 @@ impl Root {
                         .child(format!("{value}")),
                 )
         };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(SPACE_BLOCK))
-            .p(px(SPACE_SECTION))
-            .rounded(px(24.))
-            .bg(colors.mantle)
-            .border_1()
-            .border_color(colors.surface0)
+        panel(colors)
             .child(
                 div()
                     .text_size(px(16.))
