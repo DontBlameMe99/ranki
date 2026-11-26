@@ -560,8 +560,8 @@ impl RankiMcp {
         paths: DataPaths,
         scheduler: FsrsScheduler,
     ) -> Self {
-        let root = paths
-            .collection
+        let root = collection
+            .path()
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
@@ -929,13 +929,17 @@ pub fn collection_path(paths: &DataPaths) -> CliResult<PathBuf> {
 
 pub fn serve(paths: &DataPaths, scheduler: FsrsScheduler) -> CliResult<()> {
     let path = collection_path(paths)?;
+    let resolved_paths = DataPaths {
+        collection: path.clone(),
+        ..paths.clone()
+    };
     let runtime = Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| CliError::Message(error.to_string()))?;
     runtime.block_on(async move {
         let collection = Collection::open(&path)?;
-        let server = RankiMcp::new(collection, paths.clone(), scheduler);
+        let server = RankiMcp::new(collection, resolved_paths, scheduler);
         let service = server.serve(stdio()).await.map_err(|error| {
             CliError::Message(format!("mcp server: {error}"))
         })?;
@@ -1384,5 +1388,32 @@ mod tests {
             ..paths
         };
         assert!(super::collection_path(&missing).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_paths_work_through_a_symlinked_app_directory() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real");
+        fs::create_dir_all(&real).unwrap();
+        let collection_path = real.join("collection.anki2");
+        let collection = Collection::create(&collection_path).unwrap();
+        let link = directory.path().join("link");
+        symlink(&real, &link).unwrap();
+        let paths = ranki_model::DataPaths {
+            collection: link.join("collection.anki2"),
+            media_dir: link.join("collection.media"),
+            sync_state: link.join("ranki-sync.json"),
+        };
+        let scheduler =
+            ranki_core::from_settings(&ranki_model::Settings::default());
+        let server = RankiMcp::new(collection, paths, scheduler);
+
+        assert!(
+            server.file("backup.apkg").is_ok(),
+            "package path was rejected through the symlinked app directory"
+        );
     }
 }
