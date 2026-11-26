@@ -3508,7 +3508,7 @@ const STUDY_CONTEXT: &str =
     "ranki && !ranki_input && !ranki_dialog && !ranki_settings";
 /// Settings shortcuts only apply while the settings screen is mounted.
 const SETTINGS_CONTEXT: &str =
-    "ranki > ranki_settings && !ranki_input && !ranki_dialog";
+    "ranki_settings && !ranki_input && !ranki_dialog";
 const STATISTICS_CONTEXT: &str =
     "ranki && !ranki_review && !ranki_input && !ranki_dialog";
 
