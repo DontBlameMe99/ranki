@@ -2574,3 +2574,117 @@ fn clicking_the_rename_field_keeps_the_decks_view(
     assert_eq!(view, View::Decks);
     assert!(editing);
 }
+#[gpui::test]
+fn popup_actions_do_not_study_the_deck_below(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("collection.anki2");
+    let mut store =
+        ranki_storage::Collection::create(&path).expect("collection");
+    for name in ["aa", "bb", "cc", "dd", "ee"] {
+        let _ = store.create_deck(name).expect("deck");
+    }
+    let options = Options {
+        collection: path,
+        ..Options::default()
+    };
+    let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(store),
+                options,
+                save_settings,
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+    cx.draw(
+        point(px(0.), px(0.)),
+        gpui::size(px(1280.), px(800.)),
+        |_, _| root.clone(),
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let row = cx.debug_bounds("deck-row-bb").expect("deck row bounds");
+    let deck_id = cx.read_entity(&root, |root, _| root.decks[1].id);
+    cx.update_entity(&root, |root, cx| {
+        root.deck_menu = Some(super::DeckMenu {
+            id: deck_id,
+            anchor: point(row.center().x, row.origin.y - px(40.)),
+        });
+        cx.notify();
+    });
+    cx.draw(
+        point(px(0.), px(0.)),
+        gpui::size(px(1280.), px(800.)),
+        |_, _| root.clone(),
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let overlap = |a: gpui::Bounds<gpui::Pixels>,
+                   b: gpui::Bounds<gpui::Pixels>|
+     -> Option<gpui::Point<gpui::Pixels>> {
+        let left = a.origin.x.max(b.origin.x);
+        let right = a.bottom_right().x.min(b.bottom_right().x);
+        let top = a.origin.y.max(b.origin.y);
+        let bottom = a.bottom_right().y.min(b.bottom_right().y);
+        if left < right && top < bottom {
+            Some(point(
+                px(f32::midpoint(f32::from(left), f32::from(right))),
+                px(f32::midpoint(f32::from(top), f32::from(bottom))),
+            ))
+        } else {
+            None
+        }
+    };
+    let rows = [
+        "deck-row-aa",
+        "deck-row-bb",
+        "deck-row-cc",
+        "deck-row-dd",
+        "deck-row-ee",
+    ];
+    let remove = cx.debug_bounds("decks-remove").expect("remove bounds");
+    let click = rows
+        .iter()
+        .filter_map(|selector| cx.debug_bounds(selector))
+        .find_map(|bounds| overlap(remove, bounds))
+        .expect("remove must overlap a deck row");
+    click_test_point(cx, click);
+    let (view, confirmation) =
+        cx.read_entity(&root, |root, _| (root.view, root.confirmation.clone()));
+    assert_eq!(view, View::Decks, "menu click must not study a deck");
+    assert!(
+        matches!(confirmation, Some(super::Confirmation::RemoveDeck { .. })),
+        "menu click must open the remove confirmation"
+    );
+
+    cx.draw(
+        point(px(0.), px(0.)),
+        gpui::size(px(1280.), px(800.)),
+        |_, _| root.clone(),
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let confirm = cx.debug_bounds("confirm-primary").expect("confirm bounds");
+    let click = rows
+        .iter()
+        .filter_map(|selector| cx.debug_bounds(selector))
+        .find_map(|bounds| overlap(confirm, bounds))
+        .expect("confirmation must overlap a deck row");
+    click_test_point(cx, click);
+    let (view, confirmation) =
+        cx.read_entity(&root, |root, _| (root.view, root.confirmation.clone()));
+    assert_eq!(view, View::Decks, "dialog click must not study a deck");
+    assert!(
+        confirmation.is_none(),
+        "dialog click must still confirm the removal"
+    );
+}
