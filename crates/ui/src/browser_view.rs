@@ -299,6 +299,7 @@ impl Root {
             app.defer(move |app| {
                 let _ = weak.update(app, |root, cx| {
                     root.schedule_browse_refresh(cx);
+                    root.persist_state(cx);
                 });
             });
         })

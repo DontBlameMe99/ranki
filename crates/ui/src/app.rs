@@ -16,7 +16,7 @@ use gpui::{
 use ranki_core::{FsrsScheduler, from_settings};
 use ranki_model::{
     Card, CardQueue, CardType, Deck, DeckStats, Id, NewNote, Note, NoteModel,
-    Rating, ReviewDecision, StockModelKind, Store,
+    Rating, ReviewDecision, StockModelKind, Store, UiState, UiView,
 };
 
 use crate::{
@@ -65,6 +65,32 @@ impl View {
             | Self::AddCard
             | Self::Settings
             | Self::Statistics => "ranki",
+        }
+    }
+}
+
+impl From<UiView> for View {
+    fn from(saved: UiView) -> Self {
+        match saved {
+            UiView::Decks => Self::Decks,
+            UiView::Browse => Self::Browse,
+            UiView::Review => Self::Review,
+            UiView::AddCard => Self::AddCard,
+            UiView::Settings => Self::Settings,
+            UiView::Statistics => Self::Statistics,
+        }
+    }
+}
+
+impl From<View> for UiView {
+    fn from(view: View) -> Self {
+        match view {
+            View::Decks => Self::Decks,
+            View::Browse => Self::Browse,
+            View::Review => Self::Review,
+            View::AddCard => Self::AddCard,
+            View::Settings => Self::Settings,
+            View::Statistics => Self::Statistics,
         }
     }
 }
@@ -643,6 +669,40 @@ impl Root {
     pub(crate) fn end_nav_drag(&mut self, cx: &mut Context<Self>) {
         if self.nav_drag.take().is_some() {
             cx.notify();
+            self.persist_state(cx);
+        }
+    }
+}
+
+impl Root {
+    fn state_snapshot(&self, cx: &App) -> UiState {
+        let mut expanded = self.expanded.iter().cloned().collect::<Vec<_>>();
+        expanded.sort();
+        UiState {
+            view: self.view.into(),
+            previous_view: self.previous_view.into(),
+            theme: Some(self.options.theme),
+            nav_width: Some(self.nav_width),
+            selected_deck: self
+                .selected
+                .and_then(|index| self.decks.get(index))
+                .map(|deck| deck.id),
+            expanded_decks: expanded,
+            deck_query: self.deck_search.read(cx).text(),
+            browse_query: self.browse.search.read(cx).text(),
+            review_all_decks: self.review.scope_all,
+        }
+    }
+
+    pub(crate) fn persist_state(&mut self, cx: &mut Context<Self>) {
+        self.options.ui_state = self.state_snapshot(cx);
+        let saver = Arc::clone(&self.save_settings);
+        if let Err(error) = saver(&self.options) {
+            self.show_toast(
+                ToastKind::Error,
+                format!("Could not save window state: {error}"),
+                cx,
+            );
         }
     }
 }
@@ -670,9 +730,13 @@ impl Root {
     ) -> Self {
         let Launch {
             store,
-            options,
+            mut options,
             save_settings,
         } = launch;
+        let saved = options.ui_state.clone();
+        if let Some(theme) = saved.theme {
+            options.theme = theme;
+        }
         warm_brand(cx);
         let focus = cx.focus_handle();
         let dialog_focus = cx.focus_handle();
@@ -689,7 +753,12 @@ impl Root {
             field.set_edit_hook(hook.clone());
             field
         };
-        let deck_search = cx.new(|cx| make_field(cx, "Search decks"));
+        let deck_hook = Self::deck_search_edit_hook(cx);
+        let deck_search = cx.new(|cx| {
+            let mut field = make_field(cx, "Search decks");
+            field.set_edit_hook(deck_hook);
+            field
+        });
         let browse_search = cx.new(|cx| {
             TextField::new(cx, "Search name, tag:any_tag or deck:any_deck")
         });
@@ -807,6 +876,43 @@ impl Root {
             font_family: theme::ui_font_family(),
         };
         root.reload(cx);
+        root.nav_width = theme::nav_width(
+            saved
+                .nav_width
+                .filter(|width| width.is_finite())
+                .unwrap_or(theme::NAV_WIDTH),
+        );
+        root.expanded = saved
+            .expanded_decks
+            .into_iter()
+            .filter(|path| !path.is_empty())
+            .collect();
+        root.rebuild_deck_rows();
+        root.view = saved.view.into();
+        root.previous_view = saved.previous_view.into();
+        root.review.scope_all = saved.review_all_decks;
+        if let Some(id) = saved.selected_deck {
+            root.selected = root
+                .decks
+                .iter()
+                .position(|deck| deck.id == id)
+                .or(root.selected);
+        }
+        root.deck_search
+            .update(cx, |field, cx| field.seed(saved.deck_query, cx));
+        root.refresh_visible_deck_rows(cx);
+        root.browse
+            .search
+            .update(cx, |field, cx| field.seed(saved.browse_query, cx));
+        root.refresh_browse(cx);
+        if root.view == View::Review {
+            match root.selected {
+                Some(index) if !saved.review_all_decks => {
+                    root.study_deck(index, cx);
+                }
+                _ => root.study_all(cx),
+            }
+        }
         root.reset_fields(cx);
         root.refresh_field_colors(cx);
         if let Ok(prefill) = env::var("RANKI_UI_DEV_FIELDS") {
@@ -1146,6 +1252,19 @@ impl Root {
         })
     }
 
+    fn deck_search_edit_hook(cx: &mut Context<Self>) -> EditHook {
+        let weak = cx.entity().downgrade();
+        Arc::new(move |app| {
+            let weak = weak.clone();
+            app.defer(move |app| {
+                let _ = weak.update(app, |root, cx| {
+                    root.persist_state(cx);
+                    cx.notify();
+                });
+            });
+        })
+    }
+
     /// A create-deck error stays until the name changes.
     fn create_field_hook(cx: &mut Context<Self>) -> EditHook {
         let weak = cx.entity().downgrade();
@@ -1195,6 +1314,7 @@ impl Root {
         self.options.theme = choice;
         self.refresh_field_colors(cx);
         cx.notify();
+        self.persist_state(cx);
     }
 
     pub(crate) fn now() -> i64 {
@@ -1249,6 +1369,7 @@ impl Root {
         self.add.deck_picker = false;
         self.add.color_picker = None;
         self.reload(cx);
+        self.persist_state(cx);
     }
 
     fn request_reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1864,6 +1985,7 @@ impl Root {
             self.view = View::Review;
             self.ensure_current(cx);
             cx.notify();
+            self.persist_state(cx);
         }
     }
 
@@ -1890,6 +2012,7 @@ impl Root {
         self.view = View::Review;
         self.ensure_current(cx);
         cx.notify();
+        self.persist_state(cx);
     }
 
     /// Restarts the session the summary just ended, with the same scope.
@@ -2403,6 +2526,7 @@ impl Root {
                 self.create_modal = false;
                 self.clear_toast();
                 self.reload(cx);
+                self.persist_state(cx);
                 window.focus(&self.focus);
             }
             Err(error) => {
@@ -2531,6 +2655,7 @@ impl Root {
         self.card_menu = None;
         window.focus(&self.focus);
         cx.notify();
+        self.persist_state(cx);
     }
 
     /// Removes a card from a session that may still hold it in its queues.
@@ -2721,6 +2846,7 @@ impl Root {
         }
         self.rebuild_deck_rows();
         cx.notify();
+        self.persist_state(cx);
     }
 
     pub(crate) fn tick_focus(&mut self, window: &mut Window) {
@@ -2919,6 +3045,9 @@ impl Root {
             UiAction::SyncNow => self.sync_now(cx),
             UiAction::SyncKeepLocal => self.resolve_sync_conflict(true, cx),
             UiAction::SyncKeepRemote => self.resolve_sync_conflict(false, cx),
+        }
+        if self.state_snapshot(cx) != self.options.ui_state {
+            self.persist_state(cx);
         }
         if self.confirmation.is_some() != had_dialog {
             if self.confirmation.is_some() {

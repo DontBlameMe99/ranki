@@ -1,7 +1,7 @@
 //! Loads the shared config schema from disk.
 
 use ranki_model::config::parse;
-pub use ranki_model::{Config, Settings};
+pub use ranki_model::{Config, Settings, UiState};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -37,6 +37,59 @@ pub fn save(config: &Config) -> io::Result<()> {
     }
     let text = toml::to_string(config).map_err(io::Error::other)?;
     fs::write(path, text)
+}
+
+/// Reads the GUI's layout state from `ui-state.toml` beside the config file.
+pub fn load_ui_state() -> UiState {
+    config_path(
+        env::var_os("XDG_CONFIG_HOME").as_deref(),
+        env::var_os("HOME").as_deref(),
+    )
+    .map_or_else(UiState::default, |path| read_ui_state(&path))
+}
+
+/// Writes GUI layout state without touching the declarative config file.
+pub fn save_ui_state(state: &UiState) -> io::Result<()> {
+    let Some(path) = config_path(
+        env::var_os("XDG_CONFIG_HOME").as_deref(),
+        env::var_os("HOME").as_deref(),
+    ) else {
+        return Ok(());
+    };
+    write_ui_state(&path, state)
+}
+
+fn read_ui_state(config: &Path) -> UiState {
+    let path = ui_state_path(config);
+    match fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text).unwrap_or_else(|error| {
+            eprintln!(
+                "ranki: ui state: cannot read {}: {error}",
+                path.display()
+            );
+            UiState::default()
+        }),
+        Err(error) if error.kind() == ErrorKind::NotFound => UiState::default(),
+        Err(error) => {
+            eprintln!(
+                "ranki: ui state: cannot read {}: {error}",
+                path.display()
+            );
+            UiState::default()
+        }
+    }
+}
+
+fn write_ui_state(config: &Path, state: &UiState) -> io::Result<()> {
+    let path = ui_state_path(config);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, toml::to_string(state).map_err(io::Error::other)?)
+}
+
+fn ui_state_path(config: &Path) -> PathBuf {
+    config.with_file_name("ui-state.toml")
 }
 
 pub fn config_path(
@@ -99,12 +152,12 @@ pub fn resolve_settings(
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
+    use std::{ffi::OsStr, fs};
 
     use clap::Parser;
 
-    use super::{Config, config_path, resolve_settings};
+    use super::{Config, UiState, config_path, resolve_settings};
     use crate::Cli;
 
     fn cli(args: &[&str]) -> Cli {
@@ -121,6 +174,27 @@ mod tests {
             path.as_deref(),
             Some(Path::new("/tmp/xdg/ranki/config.toml"))
         );
+    }
+
+    #[test]
+    fn ui_state_lives_beside_config_and_survives_reload() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = dir.path().join("ranki/config.toml");
+        assert_eq!(
+            super::ui_state_path(&config),
+            dir.path().join("ranki/ui-state.toml")
+        );
+        let state = UiState {
+            view: ranki_model::UiView::Browse,
+            nav_width: Some(140.0),
+            expanded_decks: vec![String::from("Topic")],
+            ..UiState::default()
+        };
+        super::write_ui_state(&config, &state).expect("write ui state");
+        assert_eq!(super::read_ui_state(&config), state);
+        fs::write(super::ui_state_path(&config), "view = 'nope'")
+            .expect("write invalid ui state");
+        assert_eq!(super::read_ui_state(&config), UiState::default());
     }
 
     #[test]

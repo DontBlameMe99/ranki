@@ -1,7 +1,9 @@
 use gpui::AppContext as _;
 use std::collections::VecDeque;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Duration;
 
 use ranki_model::Store as _;
@@ -2751,6 +2753,221 @@ fn popup_actions_do_not_study_the_deck_below(cx: &mut gpui::TestAppContext) {
         confirmation.is_none(),
         "dialog click must still confirm the removal"
     );
+}
+
+fn recording_saver() -> (crate::SettingsSaver, Arc<Mutex<Option<Options>>>) {
+    let latest = Arc::new(Mutex::new(None));
+    let for_saver = Arc::clone(&latest);
+    let saver: crate::SettingsSaver = Arc::new(move |settings| {
+        *for_saver.lock().expect("settings lock") = Some(settings.clone());
+        Ok(())
+    });
+    (saver, latest)
+}
+
+#[gpui::test]
+fn saved_window_layout_is_restored(cx: &mut gpui::TestAppContext) {
+    let mut options = Options::default();
+    let state = &mut options.ui_state;
+    state.view = ranki_model::UiView::Browse;
+    state.previous_view = ranki_model::UiView::AddCard;
+    state.theme = Some(ranki_model::ThemeChoice::Light);
+    state.nav_width = Some(140.0);
+    state.selected_deck = Some(1);
+    state.expanded_decks = vec![String::from("Default")];
+    state.deck_query = String::from("deck term");
+    state.browse_query = String::from("card term");
+    state.review_all_decks = true;
+
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options,
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    let restored = cx.read_entity(&root, |root, cx| {
+        (
+            root.view,
+            root.previous_view,
+            root.options.theme,
+            root.nav_width,
+            root.selected,
+            root.expanded.contains("Default"),
+            root.deck_search.read(cx).text(),
+            root.browse.search.read(cx).text(),
+            root.review.scope_all,
+        )
+    });
+    assert_eq!(restored.0, View::Browse);
+    assert_eq!(restored.1, View::AddCard);
+    assert_eq!(restored.2, ranki_model::ThemeChoice::Light);
+    assert_eq!(restored.3, 140.0);
+    assert_eq!(restored.4, Some(0));
+    assert!(restored.5);
+    assert_eq!(restored.6, "deck term");
+    assert_eq!(restored.7, "card term");
+    assert!(restored.8);
+}
+
+#[gpui::test]
+fn layout_changes_are_saved_and_restored(cx: &mut gpui::TestAppContext) {
+    let (saver, latest) = recording_saver();
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: saver,
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| {
+            root.dispatch(UiAction::OpenSettings, window, cx);
+            root.toggle_deck(String::from("Topic"), cx);
+            root.set_theme(ranki_model::ThemeChoice::Dark, cx);
+        });
+    });
+
+    let recorded = latest
+        .lock()
+        .expect("settings lock")
+        .clone()
+        .expect("recorded settings");
+    assert_eq!(recorded.ui_state.view, ranki_model::UiView::Settings);
+    assert!(
+        recorded
+            .ui_state
+            .expanded_decks
+            .contains(&String::from("Topic"))
+    );
+    assert_eq!(
+        recorded.ui_state.theme,
+        Some(ranki_model::ThemeChoice::Dark)
+    );
+
+    let (restarted, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: recorded,
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    let restored = cx.read_entity(&restarted, |root, _| {
+        (
+            root.view,
+            root.options.theme,
+            root.expanded.contains("Topic"),
+        )
+    });
+    assert_eq!(restored.0, View::Settings);
+    assert_eq!(restored.1, ranki_model::ThemeChoice::Dark);
+    assert!(restored.2);
+}
+
+#[gpui::test]
+fn search_queries_are_saved_on_edit(cx: &mut gpui::TestAppContext) {
+    let (saver, latest) = recording_saver();
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: saver,
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update_entity(&root, |root, cx| {
+        root.deck_search
+            .update(cx, |field, cx| field.insert_text("deck term", cx));
+        root.browse
+            .search
+            .update(cx, |field, cx| field.insert_text("card term", cx));
+    });
+    cx.run_until_parked();
+
+    let recorded = latest
+        .lock()
+        .expect("settings lock")
+        .clone()
+        .expect("recorded settings");
+    assert_eq!(recorded.ui_state.deck_query, "deck term");
+    assert_eq!(recorded.ui_state.browse_query, "card term");
+}
+
+#[gpui::test]
+fn editing_a_browse_card_saves_the_add_card_view(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (saver, latest) = recording_saver();
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: saver,
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| {
+            root.browse.rows =
+                vec![browser_test_row(String::from("Question?"))];
+            root.start_card_edit(1, window, cx);
+        });
+    });
+
+    let recorded = latest
+        .lock()
+        .expect("settings lock")
+        .clone()
+        .expect("recorded settings");
+    assert_eq!(recorded.ui_state.view, ranki_model::UiView::AddCard);
+    assert_eq!(recorded.ui_state.previous_view, ranki_model::UiView::Browse);
+}
+
+#[gpui::test]
+fn reloading_the_collection_saves_the_reset_view(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (saver, latest) = recording_saver();
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: saver,
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update_entity(&root, |root, cx| {
+        root.view = View::Statistics;
+        root.reload_collection(cx);
+    });
+
+    let recorded = latest
+        .lock()
+        .expect("settings lock")
+        .clone()
+        .expect("recorded settings");
+    assert_eq!(recorded.ui_state.view, ranki_model::UiView::Decks);
 }
 
 #[gpui::test]

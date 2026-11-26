@@ -588,7 +588,8 @@ fn open_gui(
     let collection = open_or_create(&settings.collection)?;
     drop(collection);
     let store = ReopeningCollection::new(&settings.collection);
-    let options = settings.clone();
+    let mut options = settings.clone();
+    options.ui_state = config::load_ui_state();
     let saved = Arc::new(Mutex::new(config.clone()));
     let latest = Arc::new(Mutex::new(None::<config::Settings>));
     let latest_for_saver = Arc::clone(&latest);
@@ -599,15 +600,23 @@ fn open_gui(
                 .map_err(|_| String::from("settings lock poisoned"))?;
             *latest_guard = Some(current.clone());
         }
+        let state_result = config::save_ui_state(&current.ui_state);
         let mut config_guard = saved
             .lock()
             .map_err(|_| String::from("config lock poisoned"))?;
-        config_guard.sync.enabled = current.sync.enabled;
-        config_guard
-            .sync
-            .username
-            .clone_from(&current.sync.username);
-        config::save(&config_guard).map_err(|error| error.to_string())
+        let sync_changed = config_guard.sync.enabled != current.sync.enabled
+            || config_guard.sync.username != current.sync.username;
+        let config_result = if sync_changed {
+            let mut updated = config_guard.clone();
+            updated.sync.enabled = current.sync.enabled;
+            updated.sync.username.clone_from(&current.sync.username);
+            config::save(&updated).map(|()| *config_guard = updated)
+        } else {
+            Ok(())
+        };
+        state_result
+            .and(config_result)
+            .map_err(|error| error.to_string())
     });
     ranki_ui::run(Box::new(store), options, save_settings);
     let latest_guard = latest.lock().map_err(|_| {
