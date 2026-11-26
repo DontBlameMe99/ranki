@@ -2435,9 +2435,16 @@ fn tag_suggestions_open_while_typing_and_commit_a_tag(
             cx,
         )
     });
+    let preset = [
+        "long-existing-language-tag",
+        "another-long-existing-tag",
+        "third-long-existing-tag",
+    ];
     cx.simulate_resize(size(px(1280.), px(800.)));
     cx.update_entity(&root, |root, cx| {
         root.view = View::AddCard;
+        root.add.tag_chips =
+            preset.iter().map(|tag| (*tag).to_owned()).collect();
         cx.notify();
     });
     let focus = cx.read_entity(&root, |root, cx| {
@@ -2466,13 +2473,38 @@ fn tag_suggestions_open_while_typing_and_commit_a_tag(
         .expect("first suggestion bounds");
     assert!(first.origin.y >= input.bottom());
 
-    cx.simulate_keystrokes("down enter");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        cx.read_entity(&root, |root, _| root.add.tag_suggestions_dismissed),
+        "escape dismisses the popup"
+    );
+    cx.simulate_keystrokes("backspace backspace j a");
+    cx.run_until_parked();
+    draw(cx);
+    assert!(
+        !cx.read_entity(&root, |root, _| root.add.tag_suggestions_dismissed),
+        "typing reopens the popup"
+    );
+
+    cx.simulate_keystrokes("down");
+    assert_eq!(
+        cx.read_entity(&root, |root, _| root.add.tag_suggestion),
+        1,
+        "down highlights the next suggestion"
+    );
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     draw(cx);
     let (chips, text) = cx.read_entity(&root, |root, cx| {
         (root.add.tag_chips.clone(), root.add.tags.read(cx).text())
     });
-    assert_eq!(chips, ["japanese"]);
+    let mut expected = preset
+        .iter()
+        .map(|tag| (*tag).to_owned())
+        .collect::<Vec<_>>();
+    expected.push(String::from("japanese"));
+    assert_eq!(chips, expected);
     assert_eq!(text, "");
 
     cx.simulate_keystrokes("v e r");
@@ -2486,7 +2518,8 @@ fn tag_suggestions_open_while_typing_and_commit_a_tag(
     let (chips, text) = cx.read_entity(&root, |root, cx| {
         (root.add.tag_chips.clone(), root.add.tags.read(cx).text())
     });
-    assert_eq!(chips, ["japanese", "verb"]);
+    expected.push(String::from("verb"));
+    assert_eq!(chips, expected);
     assert_eq!(text, "");
     assert!(
         cx.read_entity(&root, |root, _| root.add.tag_suggestions_dismissed),

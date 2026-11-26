@@ -2617,6 +2617,7 @@ impl Root {
                         self.refresh_stats();
                         self.refresh_browse(cx);
                         self.record_local_write();
+                        self.refresh_known_tags();
                         self.show_toast(ToastKind::Success, "Card removed", cx);
                     }
                     Err(error) => self.show_toast(
@@ -4116,6 +4117,11 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new(
             "enter",
             AcceptTagSuggestion,
+            Some("ranki_tag_input > ranki_input"),
+        ),
+        KeyBinding::new(
+            "escape",
+            DismissTagSuggestions,
             Some("ranki_tag_input > ranki_input"),
         ),
         KeyBinding::new("cmd-enter", SaveNote, Some("ranki_input")),

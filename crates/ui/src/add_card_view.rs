@@ -10,7 +10,10 @@ use gpui::{
 };
 
 use crate::{
-    app::{AcceptTagSuggestion, Root, UiAction, note_type_name, resolve_model},
+    app::{
+        AcceptTagSuggestion, DismissTagSuggestions, Root, UiAction,
+        note_type_name, resolve_model,
+    },
     card_view::{self, Side},
     components::{
         ClickHandler, Interaction, icon, keycap, removable_chip, same_press,
@@ -386,14 +389,13 @@ impl Root {
                         this.add.tag_suggestions_dismissed = false;
                         this.add.tag_suggestion =
                             this.add.tag_suggestion.saturating_add(1).min(last);
+                        cx.notify();
                         cx.stop_propagation();
                     } else if key.eq_ignore_ascii_case("up") {
                         this.add.tag_suggestions_dismissed = false;
                         this.add.tag_suggestion =
                             this.add.tag_suggestion.saturating_sub(1);
-                        cx.stop_propagation();
-                    } else if key.eq_ignore_ascii_case("escape") {
-                        this.add.tag_suggestions_dismissed = true;
+                        cx.notify();
                         cx.stop_propagation();
                     }
                 },
@@ -408,6 +410,12 @@ impl Root {
                     let index =
                         this.add.tag_suggestion.min(key_suggestions - 1);
                     this.choose_tag_suggestion(index, window, cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &DismissTagSuggestions, _, cx| {
+                    this.add.tag_suggestions_dismissed = true;
+                    cx.notify();
                 },
             ));
         let weak = cx.entity().downgrade();
@@ -720,7 +728,8 @@ impl Root {
             .debug_selector(|| "add-tag-suggestions-popup".to_owned())
             .absolute()
             .left(px(0.))
-            .top(px(52.))
+            .top(relative(1.0))
+            .mt(px(SPACE_INLINE))
             .w(px(280.))
             .occlude()
             .on_mouse_down_out(cx.listener(
