@@ -499,7 +499,8 @@ impl Root {
             ));
         }
 
-        let mut form = div().flex().w_full().gap(px(ADD_GAP));
+        let mut form =
+            div().mt(px(SPACE_SECTION)).flex().w_full().gap(px(ADD_GAP));
         if side_by_side && !occlusion_mode {
             let editor = div()
                 .flex_1()
