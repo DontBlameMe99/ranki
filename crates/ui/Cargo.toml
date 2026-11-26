@@ -12,6 +12,7 @@ ranki-core.workspace = true
 ranki-storage.workspace = true
 ranki-sync.workspace = true
 gpui.workspace = true
+latex-rust.workspace = true
 futures = "0.3"
 image = "0.25"
 serde_json.workspace = true
