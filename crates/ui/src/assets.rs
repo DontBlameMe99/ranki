@@ -103,6 +103,12 @@ const ICONS: &[(&str, &str)] = &[
         "icon-layers",
         "<path d=\"m12 2 9 5-9 5-9-5 9-5z\"/><path d=\"m3 12 9 5 9-5M3 17l9 5 9-5\"/>",
     ),
+    ("icon-code", "<path d=\"m16 18 6-6-6-6M8 6l-6 6 6 6\"/>"),
+    ("icon-math", "<path d=\"M18 7V4H6l6 8-6 8h12v-3\"/>"),
+    (
+        "icon-image",
+        "<rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\"/><circle cx=\"9\" cy=\"9\" r=\"2\"/><path d=\"m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21\"/>",
+    ),
 ];
 
 /// Serves embedded icons and local Anki media without touching the collection.
@@ -150,6 +156,12 @@ mod tests {
         };
         assert!(assets.load("rai.svg").unwrap().is_some());
         assert!(assets.load("icon-plus").unwrap().is_some());
+        for name in ["icon-code", "icon-math", "icon-image"] {
+            assert!(
+                assets.load(name).unwrap().is_some(),
+                "{name} must be embedded"
+            );
+        }
         assert!(assets.load("missing-file").unwrap().is_none());
     }
 
