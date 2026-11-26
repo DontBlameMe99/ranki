@@ -130,21 +130,40 @@ def ranki(*args, env=None):
                           text=True).stdout
 
 
+def ranki_data(path):
+    return WORK / "data" / path.stem
+
+
+def ranki_collection(path):
+    return ranki_data(path) / "ranki" / "collection.anki2"
+
+
+def remove_file(path):
+    if path.is_symlink() or path.exists():
+        path.unlink()
+
+
 def ranki_env(path):
+    data = ranki_data(path)
+    app = data / "ranki"
+    app.mkdir(parents=True, exist_ok=True)
+    collection = app / "collection.anki2"
+    if not path.is_symlink() and not path.exists():
+        path.symlink_to(collection)
     config = WORK / "config"
     (config / "ranki").mkdir(parents=True, exist_ok=True)
     return {
         "XDG_CONFIG_HOME": str(config),
+        "XDG_DATA_HOME": str(data),
         "RANKI_DEV_NOW_SECS": str(NOW),
-        "collection": str(path),
     }
 
 
 def import_ranki(package, path):
-    if path.exists():
-        path.unlink()
+    remove_file(path)
+    remove_file(ranki_collection(path))
     env = ranki_env(path)
-    ranki("--collection", path, "import", package, env=env)
+    ranki("import", package, env=env)
 
 
 def anki_import(col, package):
@@ -304,7 +323,7 @@ def _anki_queue(col):
 def review_ranki(path, ratings, keys):
     env = ranki_env(path)
     for rating, key in zip(ratings, keys):
-        due = ranki("--collection", path, "due", "--limit", "100000", env=env)
+        due = ranki("due", "--limit", "100000", env=env)
         lookup = {}
         for line in due.splitlines():
             cid, did, _ = line.split("\t")
@@ -321,7 +340,7 @@ def review_ranki(path, ratings, keys):
         conn.close()
         if found is None:
             raise RuntimeError(f"ranki has no due card {key}")
-        ranki("--collection", path, "answer", found, rating, env=env)
+        ranki("answer", found, rating, env=env)
     return keys[:len(ratings)]
 
 
@@ -372,7 +391,7 @@ def compare_package(package, root, label, reviews=6):
                                 with_scheduling=True, with_deck_configs=True), limit=None)
     col.close()
     env = ranki_env(ranki_path)
-    ranki("--collection", ranki_path, "export", ranki_export, env=env)
+    ranki("export", ranki_export, env=env)
     a_hash = hashlib.sha256(anki_export.read_bytes()).hexdigest()
     r_hash = hashlib.sha256(ranki_export.read_bytes()).hexdigest()
     if a_hash != r_hash:

@@ -5,13 +5,17 @@ repository.workspace = true
 edition.workspace    = true
 license.workspace    = true
 
+[features]
+default = ["desktop"]
+desktop = ["dep:ranki-ui"]
+
 [dependencies]
 ranki-model.workspace = true
 ranki-core.workspace = true
 ranki-storage.workspace = true
 ranki-sync = { path = "../sync" }
 ranki-format.workspace = true
-ranki-ui.workspace = true
+ranki-ui = { workspace = true, optional = true }
 clap.workspace = true
 serde.workspace = true
 toml = "0.9"

@@ -9,13 +9,9 @@
 
 use std::env;
 use std::fs;
-use std::fs::OpenOptions;
-use std::io;
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use ranki_model::Config;
@@ -37,8 +33,8 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
 
+#[cfg(unix)]
 const PRIVATE_BITS: u32 = 0o077;
-const STATE_MODE: u32 = 0o600;
 
 /// Credentials loaded for one process. Passwords are only held for login.
 pub(super) struct SyncAuth {
@@ -166,7 +162,7 @@ fn read_state(path: &Path) -> Option<SyncState> {
 /// Whether a previous login left a host key in the local sync state.
 #[must_use]
 pub(super) fn has_stored_key(settings: &Settings) -> bool {
-    read_state(&state_path(&settings.collection))
+    read_state(&settings.paths.sync_state)
         .is_some_and(|state| !state.host_key.is_empty())
 }
 
@@ -226,12 +222,6 @@ where
     let auth = load_auth(settings, &env());
     let automatic = auto_enabled && !manual && (auth.is_some() || stored_key());
     (auth, automatic)
-}
-
-/// Path of the sync state file beside a collection.
-#[must_use]
-pub(super) fn state_path(collection: &Path) -> PathBuf {
-    ranki_sync::state_path(collection)
 }
 
 /// Adapts an injected transport to the generic sync client.
@@ -351,17 +341,17 @@ fn build_client<T: SyncTransport>(
     settings: &Settings,
     auth: Option<&SyncAuth>,
 ) -> Result<SyncClient<T>, SyncError> {
-    let state_path = state_path(&settings.collection);
+    let state_path = settings.paths.sync_state.clone();
     if let Some(key) =
         auth.and_then(|credentials| credentials.host_key.as_deref())
     {
-        store_host_key(&state_path, key)
+        ranki_sync::set_host_key(&state_path, key)
             .map_err(|error| SyncError::State(error.to_string()))?;
     }
     SyncClient::new(
         transport,
-        &settings.collection,
-        &settings.media_dir,
+        &settings.paths.collection,
+        &settings.paths.media_dir,
         &state_path,
     )
 }
@@ -400,30 +390,19 @@ fn non_empty(value: String) -> Option<String> {
 }
 
 fn read_hkey_file(path: &Path) -> Option<String> {
-    let mode = fs::metadata(path).ok()?.permissions().mode();
-    if mode & PRIVATE_BITS != 0 {
-        eprintln!(
-            "ranki: sync: ignoring {}; host-key files must be mode 0600",
-            path.display()
-        );
-        return None;
+    #[cfg(unix)]
+    {
+        let mode = fs::metadata(path).ok()?.permissions().mode();
+        if mode & PRIVATE_BITS != 0 {
+            eprintln!(
+                "ranki: sync: ignoring {}; host-key files must be mode 0600",
+                path.display()
+            );
+            return None;
+        }
     }
     let text = fs::read_to_string(path).ok()?;
     non_empty(text.trim().to_owned())
-}
-
-fn store_host_key(path: &Path, key: &str) -> io::Result<()> {
-    let mut state = read_state(path).unwrap_or_default();
-    key.clone_into(&mut state.host_key);
-    let text = serde_json::to_string(&state).map_err(io::Error::other)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(STATE_MODE)
-        .open(path)?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()
 }
 
 #[cfg(test)]
@@ -483,6 +462,7 @@ impl SyncTransport for SharedMock {
 mod tests {
     use std::cell::Cell;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::path::PathBuf;
@@ -512,14 +492,16 @@ mod tests {
     use super::load_auth;
     use super::manual_sync;
     use super::outcome_text;
-    use super::state_path;
     use super::sync_once;
     use ranki_model::Store;
 
     fn settings(path: &Path) -> ranki_model::Settings {
         ranki_model::Settings {
-            collection: path.join("collection.anki2"),
-            media_dir: path.join("collection.media"),
+            paths: ranki_model::DataPaths {
+                collection: path.join("collection.anki2"),
+                media_dir: path.join("collection.media"),
+                sync_state: path.join("ranki-sync.json"),
+            },
             sync: ranki_model::SyncSettings {
                 enabled: true,
                 ..ranki_model::SyncSettings::default()
@@ -597,7 +579,8 @@ mod tests {
             "last_success": null,
             "failures": 0,
         });
-        fs::write(state_path(&settings.collection), state.to_string()).unwrap();
+        fs::write(settings.paths.sync_state.clone(), state.to_string())
+            .unwrap();
     }
 
     #[test]
@@ -649,6 +632,7 @@ mod tests {
         assert_eq!(transport.request_count(), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn host_key_file_must_be_private() {
         let directory = tempfile::tempdir().unwrap();
@@ -699,8 +683,7 @@ mod tests {
             .unwrap();
         assert_eq!(transport.requests()[0].method, SyncMethod::HostKey);
         assert_eq!(transport.requests()[0].host_key, "");
-        let state =
-            fs::read_to_string(state_path(&settings.collection)).unwrap();
+        let state = fs::read_to_string(&settings.paths.sync_state).unwrap();
         assert!(state.contains("cached-hkey"));
         assert!(!state.contains("secret"));
     }
@@ -751,7 +734,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(outcome_text(&outcome), "downloaded");
-        assert!(settings.collection.exists());
+        assert!(settings.paths.collection.exists());
         let methods: Vec<SyncMethod> = transport
             .requests()
             .iter()
@@ -772,7 +755,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         collection_with_cards(directory.path());
         let settings = settings(directory.path());
-        let before = fs::metadata(&settings.collection).unwrap().len();
+        let before = fs::metadata(&settings.paths.collection).unwrap().len();
         let mut transport =
             MockTransport::new().with_response(SyncMethod::Meta, meta(false));
         let outcome = sync_once(
@@ -783,7 +766,10 @@ mod tests {
         .unwrap();
         assert!(matches!(outcome, ranki_sync::SyncOutcome::Conflict { .. }));
         assert_eq!(transport.request_count(), 1);
-        assert_eq!(fs::metadata(&settings.collection).unwrap().len(), before);
+        assert_eq!(
+            fs::metadata(&settings.paths.collection).unwrap().len(),
+            before
+        );
     }
 
     #[test]
@@ -824,9 +810,16 @@ mod tests {
     }
 
     #[test]
-    fn state_file_sits_beside_the_collection() {
-        let path = PathBuf::from("/data/collection.anki2");
-        assert_eq!(state_path(&path), PathBuf::from("/data/ranki-sync.json"));
+    fn data_paths_keep_sync_state_inside_the_app_directory() {
+        let paths = ranki_model::DataPaths::new("/data/ranki");
+        assert_eq!(
+            paths.sync_state,
+            PathBuf::from("/data/ranki/ranki-sync.json")
+        );
+        assert_eq!(
+            paths.collection,
+            PathBuf::from("/data/ranki/collection.anki2")
+        );
     }
 
     #[test]

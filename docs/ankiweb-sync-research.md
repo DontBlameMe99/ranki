@@ -19,7 +19,7 @@ new endpoint. Sources are listed in section 9.
 Every call is an HTTP POST. The `anki-sync` header contains JSON:
 
 ```json
-{"v":11,"k":"<host key>","c":"ranki,0.1.0,<build>,linux","s":"<random base62>"}
+{"v":11,"k":"<host key>","c":"ranki,0.1.0,<build>,<platform>","s":"<random base62>"}
 ```
 
 `k` is the long-lived host key (`hkey`), empty on login. `s` is a fresh
@@ -55,7 +55,9 @@ Collection endpoints, all under `sync/`:
 | `download` | `{}` | raw collection bytes |
 
 `cv` must follow Anki's `anki,<version>,<platform>` shape. AnkiWeb returns HTTP
-400 with body `400` otherwise. Ranki reports `anki,ranki-0.1.0,linux`.
+400 with body `400` otherwise. Ranki reports `anki,ranki-0.1.0,<platform>`, where
+the platform token comes from the build target, so mobile builds report `android`
+or `ios`.
 
 Media endpoints under `msync/`: `begin`, `mediaChanges`, `uploadChanges`,
 `downloadFiles`, `mediaSanity`. Most media responses use a JSON wrapper with `data`
@@ -238,8 +240,8 @@ impl<T: SyncTransport> SyncClient<T> {
 ```
 
 `new` returns `Ok(None)` when no credentials exist. `startup` and `shutdown`
-become no-ops in that case. State lives at
-`<collection parent>/ranki-sync.json`, written atomically with mode `0600` and
+become no-ops in that case. The caller supplies the state path inside Ranki's
+app data directory. It is written atomically with mode `0600` on Unix and
 redacted from diagnostics.
 
 `sync_once` flow:

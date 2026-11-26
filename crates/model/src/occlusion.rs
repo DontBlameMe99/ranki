@@ -249,10 +249,12 @@ pub fn import_image(source: &Path, media_dir: &Path) -> io::Result<String> {
 
     fs::create_dir_all(media_dir)?;
     let mut stored = name.to_owned();
-    let mut suffix = 2;
+    let mut suffix: u32 = 2;
     while media_dir.join(&stored).exists() {
         stored = format!("{stem}-{suffix}.{extension}");
-        suffix += 1;
+        suffix = suffix
+            .checked_add(1)
+            .ok_or_else(|| invalid("too many duplicate image names"))?;
     }
     fs::copy(source, media_dir.join(&stored))?;
     Ok(stored)
@@ -298,9 +300,11 @@ mod tests {
         image_field, image_occlusion_fields, import_image, is_image_name,
         occlusion_field, ratio, relative_position,
     };
-    use ranki_model::parse_image_occlusion_field;
+    use crate::image_occlusion::ShapeKind;
+    use crate::parse_image_occlusion_field;
     use std::fs;
     use std::path::PathBuf;
+    use std::process;
 
     #[expect(
         clippy::too_many_arguments,
@@ -328,10 +332,7 @@ mod tests {
         );
         let field = parse_image_occlusion_field(&marker);
         assert_eq!(field.shapes.len(), 1);
-        assert_eq!(
-            field.shapes[0].shape,
-            ranki_model::image_occlusion::ShapeKind::Rect
-        );
+        assert_eq!(field.shapes[0].shape, ShapeKind::Rect);
         assert_eq!(field.shapes[0].ordinals, [1]);
         for (key, value) in [
             ("left", "0.25"),
@@ -363,10 +364,7 @@ mod tests {
         assert_eq!(parsed.shapes.len(), 2);
         assert_eq!(parsed.shapes[0].ordinals, [1]);
         assert_eq!(parsed.shapes[1].ordinals, [2]);
-        assert_eq!(
-            parsed.shapes[0].shape,
-            ranki_model::image_occlusion::ShapeKind::Ellipse
-        );
+        assert_eq!(parsed.shapes[0].shape, ShapeKind::Ellipse);
         assert!(field.contains("<br>{{c2::image-occlusion:rect:"));
     }
 
@@ -467,7 +465,7 @@ mod tests {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join(".tmp")
-            .join(format!("occlusion-{name}-{}", std::process::id()));
+            .join(format!("occlusion-{name}-{}", process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("scratch directory");
         dir

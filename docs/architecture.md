@@ -19,6 +19,21 @@ directly, so a collection created here opens in Anki and vice versa.
 - `crates/bench` (`ranki-bench`): headless benchmark harness for Ranki surfaces.
 - `crates/bin` (`ranki`): CLI and AnkiConnect-compatible JSON-RPC server.
 
+## Storage layout
+
+`DataPaths` in `crates/model` owns Ranki's storage layout: `collection.anki2`,
+`collection.media/`, and `ranki-sync.json` under one app data directory. Desktop
+builds resolve that directory from `RANKI_DATA_DIR`, `XDG_DATA_HOME/ranki`, or
+`~/.local/share/ranki`. CLI, GUI, sync, AnkiConnect, and MCP all use these paths.
+Users do not point Ranki at an Anki profile; package import and export move data
+between apps.
+
+That directory is the portability seam. A mobile entry point supplies the
+platform's app data and config directories through `RANKI_DATA_DIR` and
+`RANKI_CONFIG_DIR`, or by constructing `DataPaths` directly. Building `ranki`
+with `--no-default-features` leaves GPUI and the Wayland window out of the
+binary.
+
 ## Contract
 
 The `Store` trait in `crates/model/src/lib.rs` is the boundary between layers.

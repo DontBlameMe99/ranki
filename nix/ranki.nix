@@ -6,7 +6,7 @@ self: {
 }: let
   cfg = config.programs.ranki;
   tomlFormat = pkgs.formats.toml {};
-  hasConfig = cfg.collection != null || cfg.mediaDir != null || cfg.settings != {};
+  hasConfig = cfg.settings != {};
 
   validOrNull = predicate: value: value == null || predicate value;
   # Ranges mirror the Rust config validator (crates/bin/src/config.rs), the source of truth.
@@ -15,13 +15,10 @@ self: {
       if builtins.isAttrs (settings.${name} or null)
       then settings.${name}
       else {};
-    general = section "general";
     ui = section "ui";
     scheduler = section "scheduler";
   in
-    validOrNull builtins.isString (general.collection or null)
-    && validOrNull builtins.isString (general.media_dir or null)
-    && validOrNull (value: builtins.elem value ["dark" "light" "system"]) (
+    validOrNull (value: builtins.elem value ["dark" "light" "system"]) (
       ui.theme or null
     )
     && validOrNull (value: builtins.isFloat value && value >= 8.0 && value <= 40.0) (
@@ -45,20 +42,6 @@ in {
       description = "Ranki package. Null uses an externally installed binary.";
     };
 
-    collection = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "/home/user/.local/share/Anki2/main/collection.anki2";
-      description = "Collection path written to general.collection.";
-    };
-
-    mediaDir = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "/home/user/.local/share/Anki2/main/collection.media";
-      description = "Media directory written to general.media_dir.";
-    };
-
     settings = lib.mkOption {
       type = lib.types.addCheck tomlFormat.type validSettings;
       default = {};
@@ -71,8 +54,7 @@ in {
       };
       description = ''
         Freeform TOML attribute set written to ~/.config/ranki/config.toml.
-        Recognized sections are general, ui, and scheduler. Values in settings
-        override collection and mediaDir when the same key is present.
+        Recognized sections are ui, scheduler, and sync.
       '';
     };
 
@@ -94,13 +76,7 @@ in {
 
     xdg.configFile."ranki/config.toml" = lib.mkIf hasConfig {
       source = tomlFormat.generate "ranki-config.toml" (
-        lib.filterAttrsRecursive (_: v: v != null) (
-          lib.recursiveUpdate {
-            general.collection = cfg.collection;
-            general.media_dir = cfg.mediaDir;
-          }
-          cfg.settings
-        )
+        lib.filterAttrsRecursive (_: v: v != null) cfg.settings
       );
       force = cfg.forceConfig;
     };

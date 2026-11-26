@@ -10,10 +10,6 @@ mod merge;
 mod package;
 mod schema;
 
-use std::io::Write as _;
-use std::path::Path;
-use std::path::PathBuf;
-
 pub use error::FormatError;
 use ranki_model::Id;
 use ranki_storage::Collection;
@@ -22,6 +18,10 @@ use rusqlite::OptionalExtension;
 use rusqlite::params;
 use rusqlite::params_from_iter;
 use serde_json::Value;
+use std::io::Write as _;
+use std::path::Path;
+use std::path::PathBuf;
+use tempfile::Builder;
 use tempfile::NamedTempFile;
 
 /// Counts inserted records from an `.apkg` import.
@@ -43,7 +43,12 @@ pub fn import_apkg(
     collection: &Path,
     media_dir: &Path,
 ) -> Result<ImportReport, FormatError> {
-    let contents = package::read_apkg(imported_package)?;
+    let scratch_dir = collection
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    schema::ensure_parent(collection)?;
+    let contents = package::read_apkg(imported_package, scratch_dir)?;
     let source_crt = package_creation_time(contents.collection.path())?;
     let renames = media::copy_media(media_dir, &contents.media)?;
     let media_count = contents.media.len();
@@ -121,7 +126,14 @@ pub fn export_deck_apkg(
 
 fn deck_snapshot(collection: &Path) -> Result<NamedTempFile, FormatError> {
     let bytes = package::snapshot_collection(collection)?;
-    let mut snapshot = NamedTempFile::new()
+    let parent = collection
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut snapshot = Builder::new()
+        .prefix(".ranki-deck-")
+        .suffix(".anki2")
+        .tempfile_in(parent)
         .map_err(error::io_error("cannot create deck export snapshot"))?;
     snapshot
         .write_all(&bytes)

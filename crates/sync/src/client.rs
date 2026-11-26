@@ -2,7 +2,7 @@ use crate::error::{Result, SyncError};
 use crate::media;
 use crate::state::SyncState;
 use crate::transport::{
-    META_CLIENT_VERSION, SyncMethod, SyncResponse, SyncTransport,
+    SyncMethod, SyncResponse, SyncTransport, meta_client_version,
     normalize_endpoint,
 };
 use crate::wire::{self, MAX_COLLECTION_BYTES, SYNC_VERSION};
@@ -194,9 +194,10 @@ impl<T: SyncTransport> SyncClient<T> {
     /// response is invalid, or the clocks differ by more than five minutes.
     pub fn status(&mut self) -> Result<RemoteStatus> {
         self.require_host_key()?;
+        let client_version = meta_client_version();
         let request = MetaRequest {
             v: SYNC_VERSION,
-            cv: META_CLIENT_VERSION,
+            cv: &client_version,
         };
         let body = wire::frame_json(&request)?;
         let response = self.send(SyncMethod::Meta, &body)?;
@@ -299,7 +300,7 @@ impl<T: SyncTransport> SyncClient<T> {
     )]
     fn sync_media(&mut self) -> Result<()> {
         let body = wire::frame_json(&media::BeginRequest {
-            v: META_CLIENT_VERSION.to_owned(),
+            v: meta_client_version(),
         })?;
         let response = self.send(SyncMethod::MediaBegin, &body)?;
         let server_usn = media::parse_begin(&wire::decode(&response)?)?;

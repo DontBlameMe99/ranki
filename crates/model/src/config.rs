@@ -5,7 +5,7 @@
     reason = "serde field validators must return Result"
 )]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -60,6 +60,32 @@ pub struct UiState {
     pub review_all_decks: bool,
 }
 
+/// Files owned by Ranki inside one application data directory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataPaths {
+    pub collection: PathBuf,
+    pub media_dir: PathBuf,
+    pub sync_state: PathBuf,
+}
+
+impl DataPaths {
+    /// Builds Ranki's storage layout under an app-supplied data directory.
+    #[must_use]
+    pub fn new(data_dir: impl Into<PathBuf>) -> Self {
+        let root = data_dir.into();
+        Self {
+            collection: root.join("collection.anki2"),
+            media_dir: root.join("collection.media"),
+            sync_state: root.join("ranki-sync.json"),
+        }
+    }
+}
+
+impl Default for DataPaths {
+    fn default() -> Self {
+        Self::new(PathBuf::new())
+    }
+}
 /// Settings after CLI flags, config, and defaults are merged.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[expect(
@@ -68,6 +94,8 @@ pub struct UiState {
 )]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
+    pub paths: DataPaths,
+    /// Legacy benchmark fields. Production code uses `paths`.
     pub collection: PathBuf,
     pub media_dir: PathBuf,
     pub theme: ThemeChoice,
@@ -117,6 +145,7 @@ impl Default for SyncSettings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            paths: DataPaths::default(),
             collection: PathBuf::new(),
             media_dir: PathBuf::new(),
             theme: ThemeChoice::System,
@@ -135,37 +164,14 @@ impl Default for Settings {
         }
     }
 }
-
-/// Default media directory next to a collection file.
-#[must_use]
-pub fn media_dir_for(collection: &Path) -> PathBuf {
-    let parent = collection.parent().unwrap_or_else(|| Path::new("."));
-    parent.join("collection.media")
-}
-
 impl Settings {
-    /// CLI flags win over the config file, which wins over built-in defaults.
+    /// Resolves preferences while keeping storage paths app-owned.
     #[must_use]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "CLI, config, and fallback paths are separate inputs"
-    )]
-    pub fn resolve(
-        cli_collection: Option<PathBuf>,
-        cli_media_dir: Option<PathBuf>,
-        fallback_collection: Option<PathBuf>,
-        config: &Config,
-    ) -> Self {
-        let collection = cli_collection
-            .or_else(|| config.general.collection.clone().map(PathBuf::from))
-            .or(fallback_collection)
-            .unwrap_or_default();
-        let media_dir = cli_media_dir
-            .or_else(|| config.general.media_dir.clone().map(PathBuf::from))
-            .unwrap_or_else(|| media_dir_for(&collection));
+    pub fn resolve(config: &Config, paths: DataPaths) -> Self {
         Self {
-            collection,
-            media_dir,
+            paths,
+            collection: PathBuf::new(),
+            media_dir: PathBuf::new(),
             theme: config.ui.theme,
             font_size: config.ui.font_size,
             review_batch_size: config.ui.review_batch_size,
@@ -189,13 +195,11 @@ impl Settings {
         }
     }
 }
-
 /// Raw TOML configuration. Unknown keys and out-of-range values fall back to
 /// defaults with a warning naming the full key.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub general: GeneralConfig,
     pub ui: UiConfig,
     pub scheduler: SchedulerConfig,
     pub sync: SyncConfig,
@@ -234,15 +238,6 @@ impl Default for SyncConfig {
             backoff_ms: 1_000,
         }
     }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct GeneralConfig {
-    #[serde(deserialize_with = "collection_field")]
-    pub collection: Option<String>,
-    #[serde(deserialize_with = "media_dir_field")]
-    pub media_dir: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -302,7 +297,6 @@ impl Default for SchedulerConfig {
     }
 }
 
-const GENERAL_KEYS: &[&str] = &["collection", "media_dir"];
 const UI_KEYS: &[&str] = &[
     "theme",
     "font_size",
@@ -338,8 +332,10 @@ pub fn parse(input: &str) -> Config {
         warn("config root must be a table; using defaults");
         return Config::default();
     };
+    if root.contains_key("general") {
+        warn("general is ignored; Ranki manages its own data directory");
+    }
     Config {
-        general: section(root, "general", GENERAL_KEYS),
         ui: section(root, "ui", UI_KEYS),
         scheduler: section(root, "scheduler", SCHEDULER_KEYS),
         sync: section(root, "sync", SYNC_KEYS),
@@ -413,20 +409,6 @@ where
             Ok(None)
         }
     }
-}
-
-fn collection_field<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    optional_text(deserializer, "general.collection")
-}
-
-fn media_dir_field<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    optional_text(deserializer, "general.media_dir")
 }
 
 fn theme_field<'de, D>(deserializer: D) -> Result<ThemeChoice, D::Error>
@@ -657,10 +639,10 @@ where
 }
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use super::{
-        Config, Settings, ThemeChoice, UiState, UiView, media_dir_for, parse,
+        Config, DataPaths, Settings, ThemeChoice, UiState, UiView, parse,
     };
 
     #[test]
@@ -672,12 +654,10 @@ mod tests {
     #[test]
     fn full_config_is_parsed() {
         let config = parse(
-            "[general]\ncollection = '/data/c.anki2'\nmedia_dir = '/data/media'\n\
-             [ui]\ntheme = 'light'\nfont_size = 18.0\nreview_batch_size = 40\n\
+            "[ui]\ntheme = 'light'\nfont_size = 18.0\nreview_batch_size = 40\n\
              show_keyboard_hints = false\n\
              [scheduler]\ndesired_retention = 0.85\n",
         );
-        assert_eq!(config.general.collection.as_deref(), Some("/data/c.anki2"));
         assert_eq!(config.ui.theme, ThemeChoice::Light);
         assert_eq!(config.ui.font_size, 18.0);
         assert_eq!(config.ui.review_batch_size, 40);
@@ -753,7 +733,7 @@ mod tests {
             None
         );
         let config = parse("[ui]\nreduce_motion = true\n");
-        let settings = Settings::resolve(None, None, None, &config);
+        let settings = Settings::resolve(&config, DataPaths::default());
         assert_eq!(settings.reduce_motion, Some(true));
     }
 
@@ -771,40 +751,31 @@ mod tests {
     }
 
     #[test]
-    fn resolution_prefers_cli_then_config_then_fallback() {
-        let mut config = Config::default();
-        config.general.collection = Some(String::from("/config/c.anki2"));
-        config.general.media_dir = Some(String::from("/config/media"));
-        let settings = Settings::resolve(
-            Some(PathBuf::from("/cli/c.anki2")),
-            Some(PathBuf::from("/cli/media")),
-            Some(PathBuf::from("/default.anki2")),
-            &config,
-        );
-        assert_eq!(settings.collection, Path::new("/cli/c.anki2"));
-        assert_eq!(settings.media_dir, Path::new("/cli/media"));
-
-        let settings = Settings::resolve(
-            None,
-            None,
-            Some(PathBuf::from("/default")),
-            &config,
-        );
-        assert_eq!(settings.collection, Path::new("/config/c.anki2"));
-        assert_eq!(settings.media_dir, Path::new("/config/media"));
-
-        let settings = Settings::resolve(
-            None,
-            None,
-            Some(PathBuf::from("/tmp/default.anki2")),
-            &Config::default(),
-        );
-        assert_eq!(settings.collection, Path::new("/tmp/default.anki2"));
-        assert_eq!(settings.media_dir, Path::new("/tmp/collection.media"));
+    fn resolution_uses_only_app_owned_paths() {
+        let paths = DataPaths::new("/data/ranki");
+        let settings = Settings::resolve(&Config::default(), paths.clone());
+        assert_eq!(settings.paths, paths);
         assert_eq!(
-            media_dir_for(Path::new("/data/c.anki2")),
-            Path::new("/data/collection.media")
+            settings.paths.collection,
+            Path::new("/data/ranki/collection.anki2")
         );
+        assert_eq!(
+            settings.paths.media_dir,
+            Path::new("/data/ranki/collection.media")
+        );
+        assert_eq!(
+            settings.paths.sync_state,
+            Path::new("/data/ranki/ranki-sync.json")
+        );
+    }
+
+    #[test]
+    fn legacy_storage_paths_are_ignored() {
+        let config = parse(
+            "[general]\ncollection = '/home/user/.local/share/Anki2/main/collection.anki2'\n\
+             media_dir = '/home/user/.local/share/Anki2/main/collection.media'\n",
+        );
+        assert_eq!(config, Config::default());
     }
     #[test]
     fn sync_section_is_parsed() {
@@ -868,7 +839,7 @@ mod tests {
         config.scheduler.decay = 0.3;
         config.scheduler.last_optimized = 12;
         config.scheduler.reviews_since = 9;
-        let settings = Settings::resolve(None, None, None, &config);
+        let settings = Settings::resolve(&config, DataPaths::default());
         assert!(settings.sync.enabled);
         assert!(!settings.sync.auto);
         assert_eq!(settings.sync.username.as_deref(), Some("alice"));

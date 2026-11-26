@@ -7,14 +7,15 @@ pub mod cloze;
 pub mod config;
 mod id;
 pub mod image_occlusion;
+pub mod occlusion;
 pub mod raw;
 pub mod stock;
 pub use cloze::cloze_markers;
 pub use cloze::cloze_ordinal;
 pub use cloze::cloze_ordinals;
 pub use config::{
-    Config, GeneralConfig, SchedulerConfig, Settings, SyncConfig, SyncSettings,
-    ThemeChoice, UiConfig, UiState, UiView, media_dir_for,
+    Config, DataPaths, SchedulerConfig, Settings, SyncConfig, SyncSettings,
+    ThemeChoice, UiConfig, UiState, UiView,
 };
 pub use id::next_id;
 pub use image_occlusion::parse_image_occlusion_field;

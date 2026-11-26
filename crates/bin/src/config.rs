@@ -1,7 +1,9 @@
 //! Loads the shared config schema from disk.
 
+#[cfg(feature = "desktop")]
+pub use ranki_model::UiState;
 use ranki_model::config::parse;
-pub use ranki_model::{Config, Settings, UiState};
+pub use ranki_model::{Config, DataPaths, Settings};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -12,9 +14,10 @@ use std::path::PathBuf;
 
 use crate::Cli;
 
-/// Reads `$XDG_CONFIG_HOME/ranki/config.toml`, then the home fallback.
+/// Reads the config file from an explicit directory or desktop defaults.
 pub fn load() -> Config {
     let path = config_path(
+        env::var_os("RANKI_CONFIG_DIR").as_deref(),
         env::var_os("XDG_CONFIG_HOME").as_deref(),
         env::var_os("HOME").as_deref(),
     );
@@ -24,14 +27,19 @@ pub fn load() -> Config {
 /// Writes the shared config back after optimizer updates.
 ///
 /// # Errors
-/// Returns an error when the config directory or file cannot be written.
+/// Returns an error when the config file cannot be written or no path is set.
 pub fn save(config: &Config) -> io::Result<()> {
-    let Some(path) = config_path(
+    let path = config_path(
+        env::var_os("RANKI_CONFIG_DIR").as_deref(),
         env::var_os("XDG_CONFIG_HOME").as_deref(),
         env::var_os("HOME").as_deref(),
-    ) else {
-        return Ok(());
-    };
+    )
+    .ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            "cannot resolve the config path; set RANKI_CONFIG_DIR or HOME",
+        )
+    })?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -39,26 +47,35 @@ pub fn save(config: &Config) -> io::Result<()> {
     fs::write(path, text)
 }
 
+#[cfg(feature = "desktop")]
 /// Reads the GUI's layout state from `ui-state.toml` beside the config file.
 pub fn load_ui_state() -> UiState {
     config_path(
+        env::var_os("RANKI_CONFIG_DIR").as_deref(),
         env::var_os("XDG_CONFIG_HOME").as_deref(),
         env::var_os("HOME").as_deref(),
     )
     .map_or_else(UiState::default, |path| read_ui_state(&path))
 }
 
+#[cfg(feature = "desktop")]
 /// Writes GUI layout state without touching the declarative config file.
 pub fn save_ui_state(state: &UiState) -> io::Result<()> {
-    let Some(path) = config_path(
+    let path = config_path(
+        env::var_os("RANKI_CONFIG_DIR").as_deref(),
         env::var_os("XDG_CONFIG_HOME").as_deref(),
         env::var_os("HOME").as_deref(),
-    ) else {
-        return Ok(());
-    };
+    )
+    .ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            "cannot resolve the config path; set RANKI_CONFIG_DIR or HOME",
+        )
+    })?;
     write_ui_state(&path, state)
 }
 
+#[cfg(feature = "desktop")]
 fn read_ui_state(config: &Path) -> UiState {
     let path = ui_state_path(config);
     match fs::read_to_string(&path) {
@@ -80,6 +97,7 @@ fn read_ui_state(config: &Path) -> UiState {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn write_ui_state(config: &Path, state: &UiState) -> io::Result<()> {
     let path = ui_state_path(config);
     if let Some(parent) = path.parent() {
@@ -88,23 +106,50 @@ fn write_ui_state(config: &Path, state: &UiState) -> io::Result<()> {
     fs::write(path, toml::to_string(state).map_err(io::Error::other)?)
 }
 
+#[cfg(feature = "desktop")]
 fn ui_state_path(config: &Path) -> PathBuf {
     config.with_file_name("ui-state.toml")
 }
 
+/// Resolves the config file from an explicit directory or desktop defaults.
+#[must_use]
 pub fn config_path(
+    config_dir: Option<&OsStr>,
     xdg: Option<&OsStr>,
     home: Option<&OsStr>,
 ) -> Option<PathBuf> {
-    xdg.filter(|value| !value.is_empty()).map_or_else(
-        || {
+    config_dir
+        .filter(|value| !value.is_empty())
+        .map(|dir| PathBuf::from(dir).join("config.toml"))
+        .or_else(|| {
+            xdg.filter(|value| !value.is_empty())
+                .map(|dir| PathBuf::from(dir).join("ranki/config.toml"))
+        })
+        .or_else(|| {
             home.filter(|value| !value.is_empty())
                 .map(|dir| PathBuf::from(dir).join(".config/ranki/config.toml"))
-        },
-        |dir| Some(PathBuf::from(dir).join("ranki/config.toml")),
-    )
+        })
 }
 
+/// Resolves Ranki's data directory from an explicit value or desktop defaults.
+#[must_use]
+pub fn data_dir_path(
+    data_dir: Option<&OsStr>,
+    xdg: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Option<PathBuf> {
+    data_dir
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            xdg.filter(|value| !value.is_empty())
+                .map(|dir| PathBuf::from(dir).join("ranki"))
+        })
+        .or_else(|| {
+            home.filter(|value| !value.is_empty())
+                .map(|dir| PathBuf::from(dir).join(".local/share/ranki"))
+        })
+}
 fn read_config(path: &Path) -> Config {
     match fs::read_to_string(path) {
         Ok(text) => parse(&text),
@@ -116,19 +161,14 @@ fn read_config(path: &Path) -> Config {
     }
 }
 
-/// CLI flags win over the config file, which wins over built-in defaults.
+/// Resolves CLI sync flags over the config file.
 #[must_use]
 pub fn resolve_settings(
     cli: &Cli,
     config: &Config,
-    fallback_collection: Option<PathBuf>,
+    paths: DataPaths,
 ) -> Settings {
-    let mut settings = Settings::resolve(
-        cli.collection.clone(),
-        cli.media_dir.clone(),
-        fallback_collection,
-        config,
-    );
+    let mut settings = Settings::resolve(config, paths);
     if cli.sync {
         settings.sync.enabled = true;
     }
@@ -152,12 +192,18 @@ pub fn resolve_settings(
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-    use std::{ffi::OsStr, fs};
+    use std::ffi::OsStr;
+    #[cfg(feature = "desktop")]
+    use std::fs;
+    use std::path::Path;
 
     use clap::Parser;
 
-    use super::{Config, UiState, config_path, resolve_settings};
+    #[cfg(feature = "desktop")]
+    use super::UiState;
+    use super::{
+        Config, DataPaths, config_path, data_dir_path, resolve_settings,
+    };
     use crate::Cli;
 
     fn cli(args: &[&str]) -> Cli {
@@ -165,8 +211,19 @@ mod tests {
     }
 
     #[test]
+    fn config_path_prefers_an_explicit_directory() {
+        let path = config_path(
+            Some(OsStr::new("/app-config")),
+            Some(OsStr::new("/tmp/xdg")),
+            Some(OsStr::new("/home/user")),
+        );
+        assert_eq!(path.as_deref(), Some(Path::new("/app-config/config.toml")));
+    }
+
+    #[test]
     fn config_path_prefers_xdg_config_home() {
         let path = config_path(
+            None,
             Some(OsStr::new("/tmp/xdg")),
             Some(OsStr::new("/home/user")),
         );
@@ -176,6 +233,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "desktop")]
     #[test]
     fn ui_state_lives_beside_config_and_survives_reload() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -199,33 +257,53 @@ mod tests {
 
     #[test]
     fn config_path_falls_back_to_home() {
-        let path = config_path(None, Some(OsStr::new("/home/user")));
+        let path = config_path(None, None, Some(OsStr::new("/home/user")));
         assert_eq!(
             path.as_deref(),
             Some(Path::new("/home/user/.config/ranki/config.toml"))
         );
-        assert_eq!(config_path(None, None), None);
+        assert_eq!(config_path(None, None, None), None);
     }
 
     #[test]
-    fn configured_collection_needs_no_home_fallback() {
-        let mut config = Config::default();
-        config.general.collection =
-            Some(String::from("/config/collection.anki2"));
-        let settings = resolve_settings(&cli(&["ranki", "mcp"]), &config, None);
-        assert_eq!(settings.collection, Path::new("/config/collection.anki2"));
-        assert_eq!(settings.media_dir, Path::new("/config/collection.media"));
-    }
-
-    #[test]
-    fn fallback_is_used_without_config_or_flags() {
-        let settings = resolve_settings(
-            &cli(&["ranki", "gui"]),
-            &Config::default(),
-            Some(PathBuf::from("/tmp/default.anki2")),
+    fn data_path_prefers_an_explicit_directory() {
+        let path = data_dir_path(
+            Some(OsStr::new("/app-data")),
+            Some(OsStr::new("/data")),
+            Some(OsStr::new("/home/user")),
         );
-        assert_eq!(settings.collection, Path::new("/tmp/default.anki2"));
-        assert_eq!(settings.media_dir, Path::new("/tmp/collection.media"));
+        assert_eq!(path.as_deref(), Some(Path::new("/app-data")));
+    }
+
+    #[test]
+    fn data_path_prefers_xdg_data_home() {
+        let path = data_dir_path(
+            None,
+            Some(OsStr::new("/data")),
+            Some(OsStr::new("/home/user")),
+        );
+        assert_eq!(path.as_deref(), Some(Path::new("/data/ranki")));
+    }
+
+    #[test]
+    fn data_path_falls_back_to_home() {
+        let path = data_dir_path(None, None, Some(OsStr::new("/home/user")));
+        assert_eq!(
+            path.as_deref(),
+            Some(Path::new("/home/user/.local/share/ranki"))
+        );
+        assert_eq!(data_dir_path(None, None, None), None);
+    }
+
+    #[test]
+    fn resolved_settings_keep_app_owned_paths() {
+        let paths = DataPaths::new("/data/ranki");
+        let settings = resolve_settings(
+            &cli(&["ranki", "mcp"]),
+            &Config::default(),
+            paths.clone(),
+        );
+        assert_eq!(settings.paths, paths);
     }
     #[test]
     fn sync_cli_flags_override_config() {
@@ -244,7 +322,7 @@ mod tests {
                 "decks",
             ]),
             &config,
-            None,
+            DataPaths::default(),
         );
         assert!(!settings.sync.enabled);
         assert!(settings.sync.auto);
@@ -257,7 +335,7 @@ mod tests {
         let settings = resolve_settings(
             &cli(&["ranki", "--sync", "--no-sync-auto", "decks"]),
             &config,
-            None,
+            DataPaths::default(),
         );
         assert!(settings.sync.enabled);
         assert!(!settings.sync.auto);
