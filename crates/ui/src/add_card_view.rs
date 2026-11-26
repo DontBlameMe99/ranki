@@ -14,6 +14,7 @@ use crate::{
     card_view::{self, Side},
     components::{
         ClickHandler, Interaction, icon, keycap, removable_chip, same_press,
+        search_field_icon,
     },
     occlusion::{self, OcclusionMask},
     theme::{
@@ -819,6 +820,7 @@ impl Root {
     pub(crate) fn render_deck_picker(
         &self,
         colors: crate::theme::Palette,
+        window: &Window,
         cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let query = self.add.deck_filter.read(cx).text();
@@ -943,7 +945,19 @@ impl Root {
                     .px(px(SPACE_RELATED))
                     .rounded(px(10.))
                     .bg(colors.base)
-                    .child(icon("icon-search", 15., colors.subtext))
+                    .id("add-deck-search")
+                    .on_click(cx.listener(
+                        |this, _: &ClickEvent, window, cx| {
+                            let field = this.add.deck_filter.clone();
+                            window.focus(field.read(cx).focus_handle());
+                        },
+                    ))
+                    .child(search_field_icon(
+                        self.add.deck_filter.read(cx).focus_handle(),
+                        15.,
+                        colors,
+                        window,
+                    ))
                     .child(div().flex_1().min_w(px(120.)).child(filter)),
             )
             .child(list)

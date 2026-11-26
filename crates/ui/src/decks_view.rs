@@ -10,7 +10,7 @@ use crate::{
     app::{self, Root, UiAction, due_total},
     components::{
         ButtonTone, Interaction, action_button, icon, icon_tile, keycap, panel,
-        same_press,
+        same_press, search_field_icon,
     },
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED,
@@ -103,7 +103,12 @@ impl Root {
                                         );
                                     },
                                 ))
-                                .child(icon("icon-search", 18., colors.subtext))
+                                .child(search_field_icon(
+                                    self.deck_search.read(cx).focus_handle(),
+                                    18.,
+                                    colors,
+                                    window,
+                                ))
                                 .child(
                                     div()
                                         .flex_1()
