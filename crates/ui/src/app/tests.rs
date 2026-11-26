@@ -1,5 +1,5 @@
 use gpui::AppContext as _;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -72,6 +72,73 @@ impl ranki_model::Store for ModalStore {
 
     fn note(&self, _: Id) -> Result<Option<Note>, StoreError> {
         Ok(None)
+    }
+
+    fn add_note(&mut self, _: &NewNote) -> Result<Vec<Id>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn apply_review(&mut self, _: &ReviewDecision) -> Result<Id, StoreError> {
+        Ok(0)
+    }
+
+    fn stats(
+        &self,
+        _: Option<Id>,
+        _: i64,
+    ) -> Result<ranki_model::DeckStats, StoreError> {
+        Ok(ranki_model::DeckStats::default())
+    }
+
+    fn collection_modified(&self) -> Result<i64, StoreError> {
+        Ok(0)
+    }
+
+    fn collection_created(&self) -> Result<i64, StoreError> {
+        Ok(0)
+    }
+}
+
+struct BrowseStore {
+    decks: Vec<Deck>,
+    models: Vec<NoteModel>,
+    cards: HashMap<Id, Card>,
+    notes: HashMap<Id, Note>,
+    ids: Vec<Id>,
+}
+
+impl ranki_model::Store for BrowseStore {
+    fn decks(&self) -> Result<Vec<Deck>, StoreError> {
+        Ok(self.decks.clone())
+    }
+
+    fn models(&self) -> Result<Vec<NoteModel>, StoreError> {
+        Ok(self.models.clone())
+    }
+
+    fn find_cards(&self, _: &str) -> Result<Vec<Id>, StoreError> {
+        Ok(self.ids.clone())
+    }
+
+    fn card(&self, id: Id) -> Result<Option<Card>, StoreError> {
+        Ok(self.cards.get(&id).cloned())
+    }
+
+    fn note(&self, id: Id) -> Result<Option<Note>, StoreError> {
+        Ok(self.notes.get(&id).cloned())
+    }
+
+    fn create_deck(&mut self, name: &str) -> Result<Deck, StoreError> {
+        ModalStore.create_deck(name)
+    }
+
+    fn due_cards(
+        &self,
+        _: Option<Id>,
+        _: usize,
+        _: i64,
+    ) -> Result<Vec<Card>, StoreError> {
+        Ok(Vec::new())
     }
 
     fn add_note(&mut self, _: &NewNote) -> Result<Vec<Id>, StoreError> {
@@ -197,6 +264,99 @@ fn browse_panels_fill_the_window_for_any_card(cx: &mut gpui::TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn browse_loads_cards_past_the_first_page(cx: &mut gpui::TestAppContext) {
+    let mut store = BrowseStore {
+        decks: vec![
+            Deck {
+                id: 10,
+                name: String::from("WorldFlags"),
+                description: String::new(),
+            },
+            Deck {
+                id: 11,
+                name: String::from("personal"),
+                description: String::new(),
+            },
+        ],
+        models: ranki_model::stock_models(),
+        cards: HashMap::new(),
+        notes: HashMap::new(),
+        ids: Vec::new(),
+    };
+    for (deck_id, count) in [(10, 201), (11, 1)] {
+        for index in 0..count {
+            let id = i64::try_from(store.ids.len() + 1).expect("id");
+            store.ids.push(id);
+            let _ = store.cards.insert(
+                id,
+                Card {
+                    id,
+                    note_id: id,
+                    deck_id,
+                    ordinal: 0,
+                    modified: 0,
+                    usn: 0,
+                    card_type: CardType::New,
+                    queue: CardQueue::New,
+                    due: 0,
+                    interval: 0,
+                    factor: 0,
+                    reps: 0,
+                    lapses: 0,
+                    left: 0,
+                    original_due: 0,
+                    original_deck_id: 0,
+                    flags: 0,
+                    data: String::new(),
+                },
+            );
+            let _ = store.notes.insert(
+                id,
+                Note {
+                    id,
+                    guid: String::new(),
+                    model_id: 0,
+                    modified: 0,
+                    usn: 0,
+                    tags: Vec::new(),
+                    fields: vec![format!("Question {index}"), "Answer".into()],
+                    sort_field: String::new(),
+                    checksum: 0,
+                    flags: 0,
+                    data: String::new(),
+                },
+            );
+        }
+    }
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(store),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update_entity(&root, super::Root::refresh_browse);
+    cx.update_entity(&root, |root, _| {
+        assert_eq!(root.browse.rows.len(), 202);
+        let groups = root
+            .browse
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                crate::browser_view::BrowseEntry::Group(group) => {
+                    Some((group.path.as_str(), group.count))
+                }
+                crate::browser_view::BrowseEntry::Card { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(groups, [("WorldFlags", 201), ("personal", 1)]);
+    });
+}
 #[gpui::test]
 fn create_deck_modal_closes_only_on_outside_click(
     cx: &mut gpui::TestAppContext,
