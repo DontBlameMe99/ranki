@@ -223,17 +223,17 @@
     },
     "storage/stats": {
       "budget_ms": 20.0,
-      "median_ms": 0.033135,
+      "median_ms": 0.031882,
       "method": 1,
       "repeat": 5,
       "samples": 10,
-      "sha": "8f0503bb7c2188a4378c5cfa3e6d529e99e28763",
-      "updated_at": "2026-11-26T09:18:52.043328+00:00",
+      "sha": "5d5906278d2cea6e010387801043117fb302cf28",
+      "updated_at": "2026-11-26T10:15:46.356617+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.033609
+      "worst_median_ms": 0.031911
     }
   },
-  "sha": "1387286934eec8dd09d43c03fb89b4a33dafaf9b",
+  "sha": "5d5906278d2cea6e010387801043117fb302cf28",
   "version": 1,
   "workload_hash": "41c505710405ce82"
 }
