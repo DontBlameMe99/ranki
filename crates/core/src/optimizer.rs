@@ -107,7 +107,9 @@ pub const fn should_auto_optimize(trigger: OptimizationTrigger) -> bool {
 pub fn optimize(input: &OptimizationInput<'_>) -> OptimizationReport {
     let items = training_items(input.records);
     let decay = f64::from(input.current_params.decay());
-    let before = log_loss(&items, input.current_params.weights(), decay);
+    let factor = forgetting_factor(decay);
+    let before =
+        log_loss(&items, input.current_params.weights(), factor, decay);
     let can_fit = items.len() >= MIN_TRAINING_ITEMS
         && items.iter().any(|item| item.sequence_length > 1);
     if !can_fit {
@@ -121,15 +123,16 @@ pub fn optimize(input: &OptimizationInput<'_>) -> OptimizationReport {
         };
     }
 
-    let candidate = fit(&items, input.current_params);
-    let after = log_loss(&items, candidate.weights(), decay);
+    let candidate = fit(&items, input.current_params, factor);
+    let after = log_loss(&items, candidate.weights(), factor, decay);
     let accepted = after < before;
+    let selected_loss = if accepted { after } else { before };
     let params = if accepted {
         candidate
     } else {
         input.current_params.clone()
     };
-    let health_check = health_check(&items, &params);
+    let health_check = health_check(&items, selected_loss);
     OptimizationReport {
         params,
         items: items.len(),
@@ -190,11 +193,19 @@ fn forgetting_factor(decay: f64) -> f64 {
     (-0.9_f64.ln() / decay).exp() - 1.0
 }
 
-fn retrievability(item: &TrainingItem, weights: &[f32], decay: f64) -> f64 {
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the cached factor and decay drive every retrievability call"
+)]
+fn retrievability(
+    item: &TrainingItem,
+    weights: &[f32],
+    factor: f64,
+    decay: f64,
+) -> f64 {
     let index = stability_index(item.initial_rating);
     let stability = f64::from(weights.get(index).copied().unwrap_or(0.001))
         .max(STABILITY_MIN);
-    let factor = forgetting_factor(decay);
     (1.0 + factor * f64::from(item.elapsed_days) / stability).powf(-decay)
 }
 
@@ -202,10 +213,19 @@ fn count(items: &[TrainingItem]) -> f64 {
     f64::from(u32::try_from(items.len()).unwrap_or(u32::MAX)).max(1.0)
 }
 
-fn log_loss(items: &[TrainingItem], weights: &[f32], decay: f64) -> f64 {
+#[expect(
+    clippy::too_many_arguments,
+    reason = "loss takes the cached factor once instead of recomputing exp"
+)]
+fn log_loss(
+    items: &[TrainingItem],
+    weights: &[f32],
+    factor: f64,
+    decay: f64,
+) -> f64 {
     let mut total = 0.0;
     for item in items {
-        let predicted = retrievability(item, weights, decay)
+        let predicted = retrievability(item, weights, factor, decay)
             .clamp(PROBABILITY_EPS, 1.0 - PROBABILITY_EPS);
         let actual = observed(item.rating);
         total -=
@@ -214,18 +234,22 @@ fn log_loss(items: &[TrainingItem], weights: &[f32], decay: f64) -> f64 {
     total / count(items)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the gradient reuses the factor computed before training"
+)]
 fn batch_gradient(
     items: &[TrainingItem],
     weights: &[f32],
+    factor: f64,
     decay: f64,
 ) -> [f64; 4] {
     let mut gradient = [0.0_f64; 4];
-    let factor = forgetting_factor(decay);
     for item in items {
         let index = stability_index(item.initial_rating);
         let stability = f64::from(weights.get(index).copied().unwrap_or(0.001))
             .max(STABILITY_MIN);
-        let predicted = retrievability(item, weights, decay)
+        let predicted = retrievability(item, weights, factor, decay)
             .clamp(PROBABILITY_EPS, 1.0 - PROBABILITY_EPS);
         let actual = observed(item.rating);
         let ratio = factor * f64::from(item.elapsed_days) / stability;
@@ -294,7 +318,11 @@ fn shuffle<T>(items: &mut [T], rng: &mut Rng) {
     }
 }
 
-fn fit(items: &[TrainingItem], current: &FsrsParams) -> FsrsParams {
+fn fit(
+    items: &[TrainingItem],
+    current: &FsrsParams,
+    factor: f64,
+) -> FsrsParams {
     let mut weights = *current.weights();
     let mut order = items.to_vec();
     let mut rng = Rng::new(RANDOM_SEED);
@@ -303,19 +331,17 @@ fn fit(items: &[TrainingItem], current: &FsrsParams) -> FsrsParams {
         shuffle(&mut order, &mut rng);
         let rate = learning_rate(epoch);
         for batch in order.chunks(BATCH_SIZE) {
-            let gradient = batch_gradient(batch, &weights, decay);
+            let gradient = batch_gradient(batch, &weights, factor, decay);
             update_weights(&mut weights, &gradient, rate);
         }
     }
     FsrsParams::from_fsrs6(&weights).unwrap_or_else(|| current.clone())
 }
 
-fn health_check(items: &[TrainingItem], params: &FsrsParams) -> Option<bool> {
+fn health_check(items: &[TrainingItem], loss: f64) -> Option<bool> {
     if items.len() <= HEALTH_CHECK_ITEMS {
         return None;
     }
-    let decay = f64::from(params.decay());
-    let loss = log_loss(items, params.weights(), decay);
     Some(loss <= HEALTH_LOG_LOSS)
 }
 
@@ -568,11 +594,15 @@ mod tests {
                 sequence_length: 2,
             })
             .collect::<Vec<_>>();
-        assert_eq!(health_check(&items, &FsrsParams::default()), Some(false));
+        let params = FsrsParams::default();
+        let decay = f64::from(params.decay());
+        let factor = forgetting_factor(decay);
+        let loss = log_loss(&items, params.weights(), factor, decay);
+        assert_eq!(health_check(&items, loss), Some(false));
         assert_eq!(
             health_check(
                 items.get(..HEALTH_CHECK_ITEMS).unwrap_or_default(),
-                &FsrsParams::default()
+                loss
             ),
             None
         );
@@ -596,14 +626,16 @@ mod tests {
         .collect::<Vec<_>>();
         let weights = ANKI_DEFAULT_PARAMS;
         let decay = f64::from(weights.get(20).copied().unwrap_or_default());
-        let gradient = batch_gradient(&items, &weights, decay);
+        let factor = forgetting_factor(decay);
+        let gradient = batch_gradient(&items, &weights, factor, decay);
         let step = 1e-5;
         for index in 0..4 {
             let theta =
                 f64::from(weights.get(index).copied().unwrap_or_default()).ln();
-            let finite = (objective(&items, index, theta + step, decay)
-                - objective(&items, index, theta - step, decay))
-                / (2.0 * step);
+            let finite =
+                (objective(&items, index, theta + step, factor, decay)
+                    - objective(&items, index, theta - step, factor, decay))
+                    / (2.0 * step);
             let analytic = gradient.get(index).copied().unwrap_or_default();
             assert!(
                 (finite - analytic).abs() < 1e-3,
@@ -620,6 +652,7 @@ mod tests {
         items: &[TrainingItem],
         index: usize,
         theta: f64,
+        factor: f64,
         decay: f64,
     ) -> f64 {
         let mut trial = ANKI_DEFAULT_PARAMS;
@@ -628,7 +661,7 @@ mod tests {
         }
         let prior =
             f64::from(ANKI_DEFAULT_PARAMS.get(index).copied().unwrap_or(0.001));
-        log_loss(items, &trial, decay)
+        log_loss(items, &trial, factor, decay)
             + L2_GAMMA * (theta - prior.ln()).powi(2) / count(items)
     }
 
@@ -641,5 +674,336 @@ mod tests {
         });
         assert!(!result.accepted);
         assert_eq!(result.params, current);
+    }
+
+    const DEFAULT_WEIGHT_BITS: [u32; 21] = [
+        0x3e59_1687,
+        0x3fa5_844d,
+        0x4013_9db2,
+        0x4104_bac7,
+        0x40cd_39c1,
+        0x3f55_59b4,
+        0x4041_3dd9,
+        0x3a83_126f,
+        0x3fef_a440,
+        0x3e2a_9931,
+        0x3f4b_c6a8,
+        0x3fbd_e354,
+        0x3d7b_7e91,
+        0x3e86_9ad4,
+        0x3fd2_fb7f,
+        0x3f19_f55a,
+        0x3fef_bb30,
+        0x3f0a_e148,
+        0x3dba_c711,
+        0x3d86_c227,
+        0x3e1d_e69b,
+    ];
+    const ACCEPTED_WEIGHT_BITS: [u32; 21] = [
+        0x3e59_1687,
+        0x3fa5_844d,
+        0x4017_06e4,
+        0x4104_bac7,
+        0x40cd_39c1,
+        0x3f55_59b4,
+        0x4041_3dd9,
+        0x3a83_126f,
+        0x3fef_a440,
+        0x3e2a_9931,
+        0x3f4b_c6a8,
+        0x3fbd_e354,
+        0x3d7b_7e91,
+        0x3e86_9ad4,
+        0x3fd2_fb7f,
+        0x3f19_f55a,
+        0x3fef_bb30,
+        0x3f0a_e148,
+        0x3dba_c711,
+        0x3d86_c227,
+        0x3e1d_e69b,
+    ];
+    const HEALTH_WEIGHT_BITS: [u32; 21] = [
+        0x3e59_1687,
+        0x3fa5_844d,
+        0x4017_076d,
+        0x4104_bac7,
+        0x40cd_39c1,
+        0x3f55_59b4,
+        0x4041_3dd9,
+        0x3a83_126f,
+        0x3fef_a440,
+        0x3e2a_9931,
+        0x3f4b_c6a8,
+        0x3fbd_e354,
+        0x3d7b_7e91,
+        0x3e86_9ad4,
+        0x3fd2_fb7f,
+        0x3f19_f55a,
+        0x3fef_bb30,
+        0x3f0a_e148,
+        0x3dba_c711,
+        0x3d86_c227,
+        0x3e1d_e69b,
+    ];
+    const REJECTED_WEIGHT_BITS: [u32; 21] = [
+        0x3a83_126f,
+        0x3a83_126f,
+        0x3a83_126f,
+        0x3a83_126f,
+        0x40cd_39c1,
+        0x3f55_59b4,
+        0x4041_3dd9,
+        0x3a83_126f,
+        0x3fef_a440,
+        0x3e2a_9931,
+        0x3f4b_c6a8,
+        0x3fbd_e354,
+        0x3d7b_7e91,
+        0x3e86_9ad4,
+        0x3fd2_fb7f,
+        0x3f19_f55a,
+        0x3fef_bb30,
+        0x3f0a_e148,
+        0x3dba_c711,
+        0x3d86_c227,
+        0x3e1d_e69b,
+    ];
+
+    #[derive(Clone, Copy)]
+    struct GoldenReport {
+        items: usize,
+        accepted: bool,
+        log_loss_before: u64,
+        log_loss_after: u64,
+        health_check: Option<bool>,
+        weight_bits: [u32; 21],
+        decay_bits: u32,
+    }
+
+    fn assert_report_bits(actual: &OptimizationReport, golden: GoldenReport) {
+        assert_eq!(actual.items, golden.items);
+        assert_eq!(actual.accepted, golden.accepted);
+        assert_eq!(actual.log_loss_before.to_bits(), golden.log_loss_before);
+        assert_eq!(actual.log_loss_after.to_bits(), golden.log_loss_after);
+        assert_eq!(actual.health_check, golden.health_check);
+        assert_eq!(actual.params.decay().to_bits(), golden.decay_bits);
+        for (index, (actual, expected)) in actual
+            .params
+            .weights()
+            .iter()
+            .zip(golden.weight_bits)
+            .enumerate()
+        {
+            assert_eq!(
+                actual.to_bits(),
+                expected,
+                "weight {index} bits differ"
+            );
+        }
+    }
+
+    fn low_stability_params() -> FsrsParams {
+        let mut weights = ANKI_DEFAULT_PARAMS;
+        for weight in weights.iter_mut().take(4) {
+            *weight = 0.001;
+        }
+        FsrsParams::from_fsrs6(&weights).unwrap_or_default()
+    }
+
+    fn paired_outcome_dataset(
+        count: usize,
+        days: u32,
+        outcome: Rating,
+    ) -> Vec<ReviewRecord> {
+        let mut records = paired_dataset(count, days);
+        for record in records.iter_mut().skip(1).step_by(2) {
+            record.rating = outcome;
+        }
+        records
+    }
+
+    #[test]
+    fn golden_noop_report_bits() {
+        assert_report_bits(
+            &report(&[]),
+            GoldenReport {
+                items: 0,
+                accepted: false,
+                log_loss_before: 0x0000_0000_0000_0000,
+                log_loss_after: 0x0000_0000_0000_0000,
+                health_check: None,
+                weight_bits: DEFAULT_WEIGHT_BITS,
+                decay_bits: 0x3e1d_e69b,
+            },
+        );
+    }
+
+    #[test]
+    fn golden_accepted_report_bits() {
+        assert_report_bits(
+            &report(&paired_dataset(80, 30)),
+            GoldenReport {
+                items: 80,
+                accepted: true,
+                log_loss_before: 0x3fd9_de06_e036_8d7e,
+                log_loss_after: 0x3fd9_a88e_442e_a77e,
+                health_check: None,
+                weight_bits: ACCEPTED_WEIGHT_BITS,
+                decay_bits: 0x3e1d_e69b,
+            },
+        );
+    }
+
+    #[test]
+    fn golden_rejected_report_bits() {
+        let current = low_stability_params();
+        let records = paired_outcome_dataset(80, 30, Rating::Again);
+        assert_report_bits(
+            &optimize(&OptimizationInput {
+                records: &records,
+                current_params: &current,
+            }),
+            GoldenReport {
+                items: 80,
+                accepted: false,
+                log_loss_before: 0x3fcd_4de2_39b8_18b5,
+                log_loss_after: 0x3fcd_59c2_76a6_258e,
+                health_check: None,
+                weight_bits: REJECTED_WEIGHT_BITS,
+                decay_bits: 0x3e1d_e69b,
+            },
+        );
+    }
+
+    #[test]
+    fn golden_health_check_report_bits() {
+        assert_report_bits(
+            &report(&paired_dataset(301, 30)),
+            GoldenReport {
+                items: 301,
+                accepted: true,
+                log_loss_before: 0x3fd9_de06_e036_8d43,
+                log_loss_after: 0x3fd9_a885_faa8_05c9,
+                health_check: Some(true),
+                weight_bits: HEALTH_WEIGHT_BITS,
+                decay_bits: 0x3e1d_e69b,
+            },
+        );
+
+        let current = low_stability_params();
+        let records = paired_outcome_dataset(301, 30, Rating::Again);
+        assert_report_bits(
+            &optimize(&OptimizationInput {
+                records: &records,
+                current_params: &current,
+            }),
+            GoldenReport {
+                items: 301,
+                accepted: false,
+                log_loss_before: 0x3fcd_4de2_39b8_18c0,
+                log_loss_after: 0x3fcd_4de2_39b8_18c0,
+                health_check: Some(true),
+                weight_bits: REJECTED_WEIGHT_BITS,
+                decay_bits: 0x3e1d_e69b,
+            },
+        );
+    }
+
+    #[test]
+    fn health_check_uses_the_selected_candidate_loss() {
+        let records = paired_outcome_dataset(301, 28, Rating::Again);
+        let result = report(&records);
+
+        assert!(result.accepted);
+        assert_eq!(result.log_loss_before.to_bits(), 0x3ff1_f0a1_82aa_7bff);
+        assert_eq!(result.log_loss_after.to_bits(), 0x3ff1_b8bf_0938_029e);
+        assert_eq!(result.health_check, Some(true));
+    }
+
+    fn old_forgetting_factor(decay: f64) -> f64 {
+        (-0.9_f64.ln() / decay).exp() - 1.0
+    }
+
+    fn old_retrievability(
+        item: &TrainingItem,
+        weights: &[f32],
+        decay: f64,
+    ) -> f64 {
+        let index = stability_index(item.initial_rating);
+        let stability = f64::from(weights.get(index).copied().unwrap_or(0.001))
+            .max(STABILITY_MIN);
+        let factor = old_forgetting_factor(decay);
+        (1.0 + factor * f64::from(item.elapsed_days) / stability).powf(-decay)
+    }
+
+    fn old_log_loss(
+        items: &[TrainingItem],
+        weights: &[f32],
+        decay: f64,
+    ) -> f64 {
+        let mut total = 0.0;
+        for item in items {
+            let predicted = old_retrievability(item, weights, decay)
+                .clamp(PROBABILITY_EPS, 1.0 - PROBABILITY_EPS);
+            let actual = observed(item.rating);
+            total -= actual * predicted.ln()
+                + (1.0 - actual) * (1.0 - predicted).ln();
+        }
+        total / count(items)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the old and cached paths need weight, decay and factor"
+    )]
+    fn assert_retrievability_bits(
+        items: &[TrainingItem],
+        weights: &[f32; 21],
+        decay: f64,
+        factor: f64,
+    ) {
+        for item in items {
+            assert_eq!(
+                old_retrievability(item, weights, decay).to_bits(),
+                retrievability(item, weights, factor, decay).to_bits()
+            );
+        }
+    }
+
+    fn assert_loss_bits_for_ratings(
+        weights: &[f32; 21],
+        decay: f64,
+        factor: f64,
+    ) {
+        let ratings = [Rating::Again, Rating::Hard, Rating::Good, Rating::Easy];
+        let pairs = ratings.into_iter().flat_map(|initial| {
+            ratings.into_iter().map(move |outcome| (initial, outcome))
+        });
+        for (initial, outcome) in pairs {
+            let items = [1_u32, 7, 30, 365].map(|days| TrainingItem {
+                initial_rating: initial,
+                rating: outcome,
+                elapsed_days: days,
+                sequence_length: 2,
+            });
+            assert_eq!(
+                old_log_loss(&items, weights, decay).to_bits(),
+                log_loss(&items, weights, factor, decay).to_bits()
+            );
+            assert_retrievability_bits(&items, weights, decay, factor);
+        }
+    }
+
+    #[test]
+    fn factored_loss_matches_old_loss_bit_for_bit() {
+        let weights = ANKI_DEFAULT_PARAMS;
+        for decay in [0.15_f64, 0.5, 0.9, 1.7, 3.25] {
+            let factor = forgetting_factor(decay);
+            assert_eq!(
+                old_forgetting_factor(decay).to_bits(),
+                factor.to_bits()
+            );
+            assert_loss_bits_for_ratings(&weights, decay, factor);
+        }
     }
 }
