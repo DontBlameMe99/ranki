@@ -210,10 +210,11 @@ pub const fn card_colors(theme: Theme) -> &'static [ColorSwatch] {
     }
 }
 
-/// Parses `#rgb` and `#rrggbb` into an opaque GPUI color.
+/// Parses `#rgb`, `rgb`, `#rrggbb`, and `rrggbb` into an opaque GPUI color.
 #[must_use]
 pub fn parse_hex_color(input: &str) -> Option<Rgba> {
-    let raw = input.trim().strip_prefix('#')?;
+    let input = input.trim();
+    let raw = input.strip_prefix('#').unwrap_or(input);
     let value = match raw.len() {
         3 => {
             let r = raw.get(0..1)?;
@@ -983,7 +984,8 @@ mod tests {
     fn hex_colors_accept_short_and_long_forms() {
         assert_eq!(parse_hex_color("#f38ba8"), Some(MOCHA.red));
         assert_eq!(parse_hex_color("#fba"), parse_hex_color("#ffbbaa"));
-        assert_eq!(parse_hex_color("fba"), None);
+        assert_eq!(parse_hex_color("fba"), parse_hex_color("#ffbbaa"));
+        assert_eq!(parse_hex_color("cba6f7"), parse_hex_color("#cba6f7"));
         assert_eq!(parse_hex_color(" #4c4f69 "), Some(LATTE.text));
         assert_eq!(parse_hex_color("#12345"), None);
         assert_eq!(parse_hex_color("#gggggg"), None);

@@ -1089,11 +1089,11 @@ impl Root {
             |color| div().w(px(30.)).h(px(30.)).rounded(px(8.)).bg(color),
         );
         let hint = if custom.trim().is_empty() {
-            "Enter #rrggbb"
+            "Enter rrggbb (# optional)"
         } else if custom_color.is_some() {
             "Custom"
         } else {
-            "Use #rgb or #rrggbb"
+            "Use 3 or 6 hex digits"
         };
         let target = picker.target;
         let field = self.add.color_hex.clone();
@@ -1187,8 +1187,15 @@ impl Root {
         cx: &mut Context<Self>,
     ) {
         let focus = field.read(cx).focus_handle().clone();
+        let value = value.trim();
+        let value =
+            if value.starts_with('#') || parse_hex_color(value).is_none() {
+                value.to_owned()
+            } else {
+                format!("#{value}")
+            };
         field.update(cx, |field, cx| {
-            let (open, close) = color_tags(target, value);
+            let (open, close) = color_tags(target, &value);
             field.wrap_markup((&open, &close), cx);
         });
         self.close_color_picker(window, cx);
@@ -1371,16 +1378,16 @@ fn formatting_toolbar(
             window.focus(&image_handle);
         }),
     ));
-    for (label, target) in [
-        ("Text color", ColorTarget::Text),
-        ("Highlight", ColorTarget::Background),
+    for (label, icon_name, target) in [
+        ("Text color", "icon-text-color", ColorTarget::Text),
+        ("Highlight", "icon-highlight", ColorTarget::Background),
     ] {
         let color_field = field.clone();
         let color_handle = handle.clone();
         let color_weak = weak.clone();
         toolbar = toolbar.child(button(
             label,
-            None,
+            Some(icon_name),
             false,
             Box::new(move |event: &ClickEvent, window, cx| {
                 let anchor = event.position();

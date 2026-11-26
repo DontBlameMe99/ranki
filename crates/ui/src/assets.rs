@@ -166,6 +166,14 @@ const ICONS: &[(&str, &str)] = &[
         "icon-image",
         "<rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\"/><circle cx=\"9\" cy=\"9\" r=\"2\"/><path d=\"m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21\"/>",
     ),
+    (
+        "icon-text-color",
+        "<path d=\"M4 20h16\"/><path d=\"M12 4 6 18\"/><path d=\"M12 4l6 14\"/><path d=\"M8.5 13h7\"/>",
+    ),
+    (
+        "icon-highlight",
+        "<path d=\"m9 11-6 6v3h9l3-3\"/><path d=\"m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4\"/>",
+    ),
 ];
 
 /// Serves embedded icons and local Anki media without touching the collection.
@@ -213,7 +221,13 @@ mod tests {
         };
         assert!(assets.load("rai.svg").unwrap().is_some());
         assert!(assets.load("icon-plus").unwrap().is_some());
-        for name in ["icon-code", "icon-math", "icon-image"] {
+        for name in [
+            "icon-code",
+            "icon-math",
+            "icon-image",
+            "icon-text-color",
+            "icon-highlight",
+        ] {
             assert!(
                 assets.load(name).unwrap().is_some(),
                 "{name} must be embedded"

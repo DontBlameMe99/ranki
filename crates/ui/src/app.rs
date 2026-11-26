@@ -771,7 +771,7 @@ impl Root {
             field.set_edit_hook(create_hook);
             field
         });
-        let color_hex = cx.new(|cx| make_field(cx, "#rrggbb"));
+        let color_hex = cx.new(|cx| make_field(cx, "rrggbb"));
         let deck_filter = cx.new(|cx| make_field(cx, "Search decks"));
         let media_filter = cx.new(|cx| make_field(cx, "Filter images"));
         let rename_field = cx.new(|cx| make_field(cx, "New name"));
