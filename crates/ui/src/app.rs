@@ -21,7 +21,7 @@ use ranki_model::{
 
 use crate::{
     Options, SettingsSaver, ThemeChoice,
-    browser_view::BrowseState,
+    browser_view::{BrowseState, browse_expand_paths},
     card_view::{self, MediaKind, MediaRef, RenderedCard},
     components::warm_brand,
     occlusion::{
@@ -737,6 +737,8 @@ impl Root {
             browse: BrowseState {
                 search: browse_search,
                 rows: Vec::new(),
+                entries: Vec::new(),
+                expanded: HashSet::new(),
                 total: 0,
                 selected: None,
                 error: None,
@@ -826,6 +828,32 @@ impl Root {
                 root.view = View::Browse;
                 root.refresh_browse(cx);
             }
+            _ => {}
+        }
+        if root.dev_reveal {
+            if let Ok(spec) = env::var("RANKI_UI_DEV_BROWSE_QUERY") {
+                let (query, expand) =
+                    spec.split_once(':').unwrap_or((&spec, "1"));
+                root.view = View::Browse;
+                root.browse.search.update(cx, |field, cx| {
+                    field.seed(query.to_owned(), cx);
+                });
+                root.refresh_browse(cx);
+                if expand != "0" {
+                    root.browse.expanded =
+                        browse_expand_paths(&root.browse.rows);
+                    root.rebuild_browse_entries();
+                }
+            }
+            if let Ok(paths) = env::var("RANKI_UI_DEV_OPEN_BROWSE_GROUP") {
+                root.view = View::Browse;
+                for path in paths.split('|').filter(|path| !path.is_empty()) {
+                    let _ = root.browse.expanded.insert(path.to_owned());
+                }
+                root.rebuild_browse_entries();
+            }
+        }
+        match env::var("RANKI_UI_DEV_VIEW").as_deref() {
             Ok("question") => {
                 root.study_all(cx);
                 root.review.phase = Phase::Question;
