@@ -11,13 +11,13 @@ use crate::{
     text_field::{EditHook, TextField},
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_RELATED,
-        SPACE_SECTION, Style, blend, interval_label,
+        SPACE_SECTION, Style, alpha, blend, interval_label,
     },
 };
 use gpui::{
-    ClickEvent, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window,
-    div, px,
+    ClickEvent, Context, Entity, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement, Pixels, Point, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, px,
 };
 use ranki_model::{Card, CardQueue, Deck, Id, Note, NoteModel};
 
@@ -235,6 +235,22 @@ impl Root {
         }
     }
 
+    /// Opens or closes the card actions menu for one result.
+    pub(crate) fn toggle_card_menu(
+        &mut self,
+        id: Id,
+        anchor: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let open = self.card_menu.is_some_and(|menu| menu.id == id);
+        self.card_menu = if open {
+            None
+        } else {
+            Some(crate::app::CardMenu { id, anchor })
+        };
+        cx.notify();
+    }
+
     pub(crate) fn render_browse(
         &mut self,
         window: &mut Window,
@@ -337,7 +353,8 @@ impl Root {
                 .child(browse_cell("DECK", 1, colors))
                 .child(browse_cell("TYPE", 2, colors))
                 .child(browse_cell("STATE", 3, colors))
-                .child(browse_cell("DUE", 4, colors)),
+                .child(browse_cell("DUE", 4, colors))
+                .child(div().w(px(BROWSE_ACTION_WIDTH)).flex_none()),
         );
         for row in &self.browse.rows {
             let id = row.card.id;
@@ -378,6 +395,12 @@ impl Root {
                 .focus(move |style| {
                     style.bg(blend(hover_bg, colors.text, 0.08))
                 })
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        this.toggle_card_menu(id, event.position, cx);
+                    }),
+                )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.select_browse_row(id, cx);
                 }));
@@ -404,7 +427,71 @@ impl Root {
                         .text_color(color)
                         .font_weight(gpui::FontWeight::SEMIBOLD),
                 )
-                .child(browse_cell(due_label(&row.card), 4, colors));
+                .child(browse_cell(due_label(&row.card), 4, colors))
+                .child({
+                    let menu_open =
+                        self.card_menu.is_some_and(|menu| menu.id == id);
+                    Interaction::new(
+                        alpha(colors.text, 0.0),
+                        if menu_open {
+                            alpha(colors.mauve, 0.24)
+                        } else {
+                            alpha(colors.mauve, 0.12)
+                        },
+                        if menu_open {
+                            alpha(colors.mauve, 0.32)
+                        } else {
+                            alpha(colors.mauve, 0.22)
+                        },
+                        colors.mauve,
+                    )
+                    .apply(
+                        div()
+                            .id(SharedString::from(format!("browse-menu-{id}")))
+                            .debug_selector(|| format!("browse-menu-{id}"))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(BROWSE_ACTION_WIDTH))
+                            .h(px(30.))
+                            .rounded(px(8.))
+                            .bg(if menu_open {
+                                alpha(colors.mauve, 0.16)
+                            } else {
+                                alpha(colors.text, 0.0)
+                            })
+                            .cursor_pointer(),
+                    )
+                    .on_click(cx.listener(
+                        move |this, event: &ClickEvent, _, cx| {
+                            let same_press = match event {
+                                ClickEvent::Mouse(click) => this
+                                    .card_menu_dismissed_press
+                                    .as_ref()
+                                    .is_some_and(|down| {
+                                        down.button == click.down.button
+                                            && down.position
+                                                == click.down.position
+                                            && down.click_count
+                                                == click.down.click_count
+                                            && down.first_mouse
+                                                == click.down.first_mouse
+                                    }),
+                                ClickEvent::Keyboard(_) => false,
+                            };
+                            cx.stop_propagation();
+                            this.card_menu_dismissed_press = None;
+                            if !same_press {
+                                this.toggle_card_menu(id, event.position(), cx);
+                            }
+                        },
+                    ))
+                    .child(icon(
+                        "icon-more",
+                        18.,
+                        colors.overlay,
+                    ))
+                });
             table = table.child(line);
         }
         if self.browse.rows.is_empty() {
@@ -603,6 +690,7 @@ fn browse_meta(
 
 const BROWSE_PREVIEW_WIDTH: f32 = 320.;
 const BROWSE_COLUMNS: [f32; 5] = [1.0, 130., 90., 85., 60.];
+const BROWSE_ACTION_WIDTH: f32 = 30.;
 
 #[cfg(test)]
 mod tests {

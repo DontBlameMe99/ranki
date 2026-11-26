@@ -534,6 +534,37 @@ pub trait Store {
     /// Returns [`StoreError`] if the note is invalid or the write fails.
     fn add_note(&mut self, note: &NewNote) -> Result<Vec<Id>, StoreError>;
 
+    /// Replaces fields, tags, note type, and deck of an existing note.
+    ///
+    /// Card ids and review history are preserved. Every card of the note
+    /// moves to `deck_id`. Implementations that cannot edit notes return
+    /// [`StoreError::Unsupported`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the note, model, or deck is missing, the
+    /// field count does not match the model, or the write fails.
+    fn update_note(
+        &mut self,
+        _note: &Note,
+        _deck_id: Id,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported(
+            "update_note is not supported by this store".to_owned(),
+        ))
+    }
+
+    /// Deletes one card, its review log, and its note when no cards remain.
+    ///
+    /// Implementations that cannot delete cards return
+    /// [`StoreError::Unsupported`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the card is missing or the write fails.
+    fn remove_card(&mut self, id: Id) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported(format!(
+            "remove_card is not supported for card {id}"
+        )))
+    }
     /// Persists a scheduled review and its log entry atomically.
     ///
     /// # Errors

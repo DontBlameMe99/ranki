@@ -48,6 +48,7 @@ use ranki_model::DeckStats;
 use ranki_model::DeckTotals;
 use ranki_model::Id;
 use ranki_model::NewNote;
+use ranki_model::Note;
 use ranki_model::NoteModel;
 use ranki_model::RevLog;
 use ranki_model::ReviewDecision;
@@ -698,6 +699,109 @@ impl Store for Collection {
         )?;
         transaction.commit().map_err(backend)?;
         Ok(cards)
+    }
+
+    fn update_note(
+        &mut self,
+        note: &Note,
+        deck_id: Id,
+    ) -> Result<(), StoreError> {
+        let model = self
+            .model_list()?
+            .into_iter()
+            .find(|model| model.id == note.model_id)
+            .ok_or_else(|| {
+                StoreError::NotFound(format!("model {}", note.model_id))
+            })?;
+        if note.fields.is_empty() || note.fields.len() != model.fields.len() {
+            return Err(invalid("field count does not match model"));
+        }
+        if !self.deck_subtree(deck_id)?.contains(&deck_id) {
+            return Err(StoreError::NotFound(format!("deck {deck_id}")));
+        }
+        let transaction = self.conn.transaction().map_err(backend)?;
+        let exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM notes WHERE id = ?1)",
+                [note.id],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        if !exists {
+            return Err(StoreError::NotFound(format!("note {}", note.id)));
+        }
+        let mut expected = model.card_ordinals(&note.fields);
+        expected.sort_unstable();
+        let mut statement = transaction
+            .prepare("SELECT ord FROM cards WHERE nid = ?1 ORDER BY ord")
+            .map_err(backend)?;
+        let rows = statement
+            .query_map([note.id], |row| row.get::<_, i64>(0))
+            .map_err(backend)?;
+        let mut stored = Vec::new();
+        for row in rows {
+            stored.push(
+                u16::try_from(row.map_err(backend)?)
+                    .map_err(|_| invalid("card ordinal out of range"))?,
+            );
+        }
+        if expected != stored {
+            return Err(invalid("editing would change the card set"));
+        }
+        drop(statement);
+        let usn = update_col(&transaction, false)?;
+        let modified = anki::now_secs()?;
+        let first = note.fields.first().map_or("", String::as_str);
+        let sort_field =
+            anki::sort_field(&note.fields, usize::from(model.sort_field_index));
+        let checksum = anki::checksum(first);
+        transaction
+            .execute(
+                "UPDATE notes SET mid = ?1, mod = ?2, usn = ?3, tags = ?4, flds = ?5, \
+                 sfld = ?6, csum = ?7, flags = ?8, data = ?9 WHERE id = ?10",
+                params![
+                    note.model_id,
+                    modified,
+                    usn,
+                    anki::encode_tags(&note.tags),
+                    anki::encode_fields(&note.fields),
+                    sort_field,
+                    anki::csum_value(checksum),
+                    note.flags,
+                    note.data,
+                    note.id,
+                ],
+            )
+            .map_err(backend)?;
+        transaction
+            .execute(
+                "UPDATE cards SET did = ?1, mod = ?2, usn = ?3 WHERE nid = ?4",
+                params![deck_id, modified, usn, note.id],
+            )
+            .map_err(backend)?;
+        transaction.commit().map_err(backend)
+    }
+
+    fn remove_card(&mut self, id: Id) -> Result<(), StoreError> {
+        let Some(card) = self.card(id)? else {
+            return Err(StoreError::NotFound(format!("card {id}")));
+        };
+        let transaction = self.conn.transaction().map_err(backend)?;
+        delete_cards(&transaction, &[id])?;
+        let deleted_notes = delete_orphan_notes(&transaction, &[card.note_id])?;
+        let col = records::read_col(&transaction)?;
+        let stamp = col_stamp(&col)?;
+        write_col_metadata(&transaction, &stamp, None)?;
+        write_graves(
+            &transaction,
+            &stamp,
+            &Graves {
+                cards: vec![id],
+                notes: deleted_notes,
+                decks: Vec::new(),
+            },
+        )?;
+        transaction.commit().map_err(backend)
     }
 
     fn apply_review(
@@ -1708,5 +1812,144 @@ mod tests {
         assert_eq!(history[0].id, log.id);
         assert_eq!(history[0].card_id, log.card_id);
         assert_eq!(history[0].kind, RevLogKind::Review);
+    }
+
+    #[test]
+    fn update_note_keeps_cards_and_moves_them_to_the_chosen_deck() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("collection.anki2");
+        let mut collection = Collection::create(&path).unwrap();
+        let ids = collection
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![String::from("front"), String::from("back")],
+                tags: Vec::new(),
+            })
+            .unwrap();
+        let card = collection.card(ids[0]).unwrap().unwrap();
+        let mut note = collection.note(card.note_id).unwrap().unwrap();
+        note.fields = vec![String::from("new front"), String::from("new back")];
+        note.tags = vec![String::from("edited")];
+        let other = collection.create_deck("Other").unwrap();
+
+        collection.update_note(&note, other.id).unwrap();
+
+        let saved = collection.note(note.id).unwrap().unwrap();
+        assert_eq!(saved.fields, note.fields);
+        assert_eq!(saved.tags, note.tags);
+        let saved_card = collection.card(card.id).unwrap().unwrap();
+        assert_eq!(saved_card.deck_id, other.id);
+        assert_eq!(saved_card.reps, card.reps);
+    }
+
+    #[test]
+    fn remove_card_deletes_its_log_and_orphan_note() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("collection.anki2");
+        let mut collection = Collection::create(&path).unwrap();
+        let ids = collection
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![String::from("front"), String::from("back")],
+                tags: Vec::new(),
+            })
+            .unwrap();
+        let card = collection.card(ids[0]).unwrap().unwrap();
+        let note_id = card.note_id;
+        let log = RevLog {
+            id: 1_700_000_000_000,
+            card_id: card.id,
+            usn: 0,
+            ease: Rating::Good,
+            interval: 1,
+            last_interval: 0,
+            factor: 2_500,
+            time_ms: 100,
+            kind: RevLogKind::Review,
+        };
+        collection
+            .apply_review(&ReviewDecision {
+                card: card.clone(),
+                expected_modified: card.modified,
+                expected_usn: card.usn,
+                revlog: log,
+            })
+            .unwrap();
+
+        collection.remove_card(card.id).unwrap();
+
+        assert!(collection.card(card.id).unwrap().is_none());
+        assert!(collection.note(note_id).unwrap().is_none());
+        assert_eq!(collection.review_history().unwrap().len(), 0);
+        let grave: i64 = collection
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM graves WHERE oid = ?1 AND type = 0",
+                [card.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(grave, 1);
+    }
+
+    #[test]
+    fn removing_one_cloze_card_keeps_the_shared_note() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("collection.anki2");
+        let mut collection = Collection::create(&path).unwrap();
+        let model = collection
+            .ensure_model(ranki_model::StockModelKind::Cloze)
+            .unwrap();
+        let ids = collection
+            .add_note(&NewNote {
+                model_id: model.id,
+                deck_id: 1,
+                fields: vec![
+                    String::from("{{c1::one}} {{c2::two}}"),
+                    String::new(),
+                ],
+                tags: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(ids.len(), 2);
+
+        collection.remove_card(ids[0]).unwrap();
+
+        assert!(collection.card(ids[0]).unwrap().is_none());
+        assert!(collection.card(ids[1]).unwrap().is_some());
+        let card = collection.card(ids[1]).unwrap().unwrap();
+        assert!(collection.note(card.note_id).unwrap().is_some());
+    }
+
+    #[test]
+    fn update_note_rejects_cloze_edits_that_change_the_card_set() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("collection.anki2");
+        let mut collection = Collection::create(&path).unwrap();
+        let model = collection
+            .ensure_model(ranki_model::StockModelKind::Cloze)
+            .unwrap();
+        let ids = collection
+            .add_note(&NewNote {
+                model_id: model.id,
+                deck_id: 1,
+                fields: vec![
+                    String::from("{{c1::one}} {{c2::two}}"),
+                    String::new(),
+                ],
+                tags: Vec::new(),
+            })
+            .unwrap();
+        let card = collection.card(ids[0]).unwrap().unwrap();
+        let mut note = collection.note(card.note_id).unwrap().unwrap();
+        note.fields = vec![String::from("{{c1::one}}"), String::new()];
+
+        assert!(collection.update_note(&note, 1).is_err());
+        assert_eq!(
+            collection.note(note.id).unwrap().unwrap().fields,
+            vec![String::from("{{c1::one}} {{c2::two}}"), String::new()]
+        );
     }
 }

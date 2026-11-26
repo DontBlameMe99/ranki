@@ -79,6 +79,15 @@ impl Root {
                         .map(ToOwned::to_owned)
                 })
         });
+        let tabs = if self.card_edit.is_some() {
+            model
+                .map(|model| {
+                    vec![(note_type_name(model), self.add.model_index)]
+                })
+                .unwrap_or_default()
+        } else {
+            note_type_tabs(&models)
+        };
         let save = self.action_click(UiAction::SaveNote);
         let content_width =
             f32::from(window.viewport_size().width) - NAV_WIDTH - PAGE_X * 2.0;
@@ -112,7 +121,7 @@ impl Root {
                     div()
                         .text_size(px(28.))
                         .font_weight(gpui::FontWeight::BOLD)
-                        .child("New card"),
+                        .child(if self.card_edit.is_some() { "Edit card" } else { "New card" }),
                 ),
             )
             .child(div().h(px(20.)))
@@ -218,7 +227,7 @@ impl Root {
                             .p(px(SPACE_INLINE))
                             .rounded(px(12.))
                             .bg(colors.surface0)
-                            .children(note_type_tabs(&models).into_iter().map(
+                            .children(tabs.into_iter().map(
                                 |(label, index)| {
                                     let selected =
                                         index == self.add.model_index;
@@ -553,7 +562,11 @@ impl Root {
                         )
                         .on_click(save)
                         .child(icon("icon-plus", 18., style.ink()))
-                        .child("Add card")
+                        .child(if self.card_edit.is_some() {
+                            "Save changes"
+                        } else {
+                            "Add card"
+                        })
                         .child(keycap("Ctrl+Enter", colors, true)),
                 ),
         );
