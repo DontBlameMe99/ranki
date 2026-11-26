@@ -59,6 +59,11 @@ impl Root {
         let rendered_answer = model.map(|model| {
             card_view::preview_rendered(model, &field_values, Side::Answer)
         });
+        let (question_media, answer_media) = if occlusion_mode {
+            (Vec::new(), Vec::new())
+        } else {
+            preview_media(rendered_question.as_ref(), rendered_answer.as_ref())
+        };
         let preview_text = rendered_question.as_ref().map_or_else(
             || String::from("Choose a note type"),
             card_view::preview_text,
@@ -448,6 +453,12 @@ impl Root {
                         .font_family(crate::theme::font_for_text(&reading))
                         .child(reading)
                 }))
+                .children(card_view::media_column(
+                    &question_media,
+                    &self.options.media_dir,
+                    colors,
+                    120.,
+                ))
                 .child(div().w_full().h(px(1.)).bg(colors.surface1))
                 .child(
                     div()
@@ -459,6 +470,12 @@ impl Root {
                         ))
                         .child(preview_answer),
                 )
+                .children(card_view::media_column(
+                    &answer_media,
+                    &self.options.media_dir,
+                    colors,
+                    120.,
+                ))
                 .children(preview_example.map(|example| {
                     div()
                         .w_full()
@@ -1003,6 +1020,20 @@ pub fn has_preview_content(values: &[String]) -> bool {
     values.iter().any(|value| !value.trim().is_empty())
 }
 
+/// Media shown beside the question and answer halves of the add-card preview.
+fn preview_media(
+    question: Option<&card_view::RenderedCard>,
+    answer: Option<&card_view::RenderedCard>,
+) -> (Vec<card_view::MediaRef>, Vec<card_view::MediaRef>) {
+    let Some(question) = question else {
+        return (Vec::new(), Vec::new());
+    };
+    let answer = answer.map_or_else(Vec::new, |answer| {
+        card_view::answer_only_media(&question.media, &answer.media)
+    });
+    (question.media.clone(), answer)
+}
+
 /// Cloze buttons shown for cloze notes, in the order they appear.
 const CLOZE_BUTTONS: [(&str, u32); 3] =
     [("[…] New c1", 1), ("[…] New c2", 2), ("[…] New c3", 3)];
@@ -1361,6 +1392,57 @@ mod tests {
             String::from(" "),
             String::from("問い")
         ]));
+    }
+
+    #[test]
+    fn preview_media_shows_images_for_regular_cards() {
+        use crate::card_view::Side;
+        let basic = ranki_model::StockModelKind::Basic.definition();
+        let fields = vec![
+            String::from("<img src=\"front.png\">Question?"),
+            String::from("<img src=\"back.png\">Answer"),
+        ];
+        let question =
+            crate::card_view::preview_rendered(&basic, &fields, Side::Question);
+        let answer =
+            crate::card_view::preview_rendered(&basic, &fields, Side::Answer);
+        let (front, back) =
+            super::preview_media(Some(&question), Some(&answer));
+        assert_eq!(
+            front
+                .iter()
+                .map(|media| media.name.as_str())
+                .collect::<Vec<_>>(),
+            ["front.png"]
+        );
+        assert_eq!(
+            back.iter()
+                .map(|media| media.name.as_str())
+                .collect::<Vec<_>>(),
+            ["back.png"]
+        );
+
+        let cloze = ranki_model::StockModelKind::Cloze.definition();
+        let fields = vec![
+            String::from(
+                "<img src=\"shared.png\">The {{c1::capital}} is Paris.",
+            ),
+            String::new(),
+        ];
+        let question =
+            crate::card_view::preview_rendered(&cloze, &fields, Side::Question);
+        let answer =
+            crate::card_view::preview_rendered(&cloze, &fields, Side::Answer);
+        let (front, back) =
+            super::preview_media(Some(&question), Some(&answer));
+        assert_eq!(
+            front
+                .iter()
+                .map(|media| media.name.as_str())
+                .collect::<Vec<_>>(),
+            ["shared.png"]
+        );
+        assert_eq!(back, Vec::new());
     }
 
     #[test]
