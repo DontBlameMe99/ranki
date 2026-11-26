@@ -641,6 +641,7 @@ pub struct Root {
     pub(crate) review_stage_scroll: ScrollHandle,
     pub(crate) scrollbar_drag: Option<ScrollbarDrag>,
     pub(crate) scrollbar_layouts: BTreeMap<&'static str, (Bounds<Pixels>, f32)>,
+    pub(crate) browse_smooth: SmoothScroll,
     pub(crate) sync: SyncUiState,
     pub(crate) sync_run: Arc<crate::sync_view::SyncRun>,
     pub(crate) save_settings: SettingsSaver,
@@ -1096,6 +1097,7 @@ impl Root {
         let signed_in = sync_state
             .as_ref()
             .is_some_and(|state| !state.host_key.is_empty());
+        let browse_scroll = ScrollHandle::new();
         let mut root = Self {
             scheduler: from_settings(&options),
             store,
@@ -1130,6 +1132,7 @@ impl Root {
                 error: None,
                 generation: 0,
                 loading: false,
+                viewport: None,
             },
             create_field,
             create_modal: false,
@@ -1177,11 +1180,12 @@ impl Root {
             settings_scroll: ScrollHandle::new(),
             add_scroll: ScrollHandle::new(),
             deck_picker_scroll: ScrollHandle::new(),
-            browse_scroll: ScrollHandle::new(),
+            browse_scroll: browse_scroll.clone(),
             browse_detail_scroll: ScrollHandle::new(),
             review_stage_scroll: ScrollHandle::new(),
             scrollbar_drag: None,
             scrollbar_layouts: BTreeMap::new(),
+            browse_smooth: SmoothScroll::with_handle(browse_scroll),
             sync: SyncUiState {
                 username: sync_username,
                 password: sync_password,
@@ -1306,6 +1310,20 @@ impl Root {
                 timer.await;
                 let _ = this.update(cx, |root, cx| {
                     root.decks_scroll.wheel(distance);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        if let Ok(distance) = env::var("RANKI_UI_DEV_BROWSE_SCROLL")
+            && let Ok(distance) = distance.parse::<f32>()
+        {
+            let timer =
+                cx.background_executor().timer(Duration::from_millis(300));
+            cx.spawn(async move |this, cx| {
+                timer.await;
+                let _ = this.update(cx, |root, cx| {
+                    root.browse_smooth.wheel(distance);
                     cx.notify();
                 });
             })

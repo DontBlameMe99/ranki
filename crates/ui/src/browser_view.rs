@@ -20,10 +20,16 @@ use crate::{
 };
 use gpui::{
     ClickEvent, Context, Entity, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Point, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    MouseDownEvent, ParentElement, Pixels, Point, ScrollWheelEvent,
+    SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 use ranki_model::{Card, CardQueue, Deck, Id, Note, NoteModel};
+
+/// Rendered height of a browse table line.
+const GROUP_HEIGHT: f32 = 48.0;
+const CARD_HEIGHT: f32 = 52.0;
+/// Rows outside this margin are built too, so wheel steps do not reveal gaps.
+const ROW_OVERSCAN: f32 = 240.0;
 
 /// One search result, with both sides rendered once for the table and preview.
 #[derive(Clone, Debug)]
@@ -80,6 +86,8 @@ pub struct BrowseState {
     pub error: Option<String>,
     pub generation: u64,
     pub loading: bool,
+    /// Last known table viewport height, used to clamp after result changes.
+    pub viewport: Option<f32>,
 }
 
 /// Renders both sides of one card and resolves its deck and note type names.
@@ -287,6 +295,60 @@ pub fn build_browse_entries(
     entries
 }
 
+/// Line range to build for the current scroll position.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrowseWindow {
+    pub first: usize,
+    pub last: usize,
+    /// Combined height of the lines before `first`.
+    pub before: f32,
+    /// Combined height of the lines from `last` on.
+    pub after: f32,
+    pub height: f32,
+}
+
+fn browse_entry_height(entry: &BrowseEntry) -> f32 {
+    match entry {
+        BrowseEntry::Group(_) => GROUP_HEIGHT,
+        BrowseEntry::Card { .. } => CARD_HEIGHT,
+    }
+}
+
+/// Picks the visible lines plus a fixed overscan. Spacers keep the scroll
+/// height of the lines that are left out.
+#[must_use]
+pub fn browse_visible_window(
+    entries: &[BrowseEntry],
+    offset: f32,
+    viewport: f32,
+    header: f32,
+) -> BrowseWindow {
+    let mut tops = Vec::with_capacity(entries.len().saturating_add(1));
+    let mut height = 0.0;
+    tops.push(height);
+    for entry in entries {
+        height += browse_entry_height(entry);
+        tops.push(height);
+    }
+    let top = offset - header - ROW_OVERSCAN;
+    let bottom = offset - header + viewport + ROW_OVERSCAN;
+    let mut first = 0;
+    while first < entries.len() && tops[first + 1] <= top {
+        first += 1;
+    }
+    let mut last = first;
+    while last < entries.len() && tops[last] < bottom {
+        last += 1;
+    }
+    BrowseWindow {
+        first,
+        last,
+        before: tops[first],
+        after: height - tops[last],
+        height,
+    }
+}
+
 impl Root {
     /// Refreshes the table after each edit, debounced by the search clock.
     pub(crate) fn browse_edit_hook(cx: &mut Context<Self>) -> EditHook {
@@ -371,6 +433,14 @@ impl Root {
     pub(crate) fn rebuild_browse_entries(&mut self) {
         self.browse.entries =
             build_browse_entries(&self.browse.rows, &self.browse.expanded);
+        let height = self
+            .browse
+            .entries
+            .iter()
+            .map(browse_entry_height)
+            .sum::<f32>();
+        let max = (height - self.browse.viewport.unwrap_or(0.0)).max(0.0);
+        self.browse_smooth.clamp(max);
     }
 
     pub(crate) fn toggle_browse_group(
@@ -418,6 +488,8 @@ impl Root {
         let columns = BrowseColumns::for_width(width);
         let show_detail_side = width >= 900.0;
         let show_detail = width >= BROWSE_DETAIL_MIN_WIDTH;
+        let smooth = self.motion_ms(1) > 0;
+        self.browse_smooth.advance(window, smooth);
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let query = self.browse.search.read(cx).text();
@@ -497,6 +569,16 @@ impl Root {
             .border_color(colors.surface0)
             .overflow_scroll()
             .track_scroll(&self.browse_scroll);
+        if smooth {
+            table = table.on_scroll_wheel(cx.listener(
+                |this, event: &ScrollWheelEvent, window, cx| {
+                    let delta = event.delta.pixel_delta(window.line_height());
+                    this.browse_smooth.wheel(-f32::from(delta.y));
+                    window.refresh();
+                    cx.stop_propagation();
+                },
+            ));
+        }
         table = table.child(
             div()
                 .flex()
@@ -525,7 +607,30 @@ impl Root {
                     .flatten(),
                 ),
         );
-        for entry in &self.browse.entries {
+        let handle = self.browse_smooth.handle();
+        let viewport = f32::from(handle.bounds().size.height);
+        let viewport_changed = match self.browse.viewport {
+            Some(previous) => (viewport - previous).abs() > 0.5,
+            None => true,
+        };
+        self.browse.viewport = Some(viewport);
+        if viewport_changed {
+            cx.notify();
+        }
+        let header = handle.bounds_for_item(0).map_or_else(
+            || 2.0 * SPACE_RELATED + f32::from(window.line_height()),
+            |bounds| f32::from(bounds.size.height),
+        );
+        let visible = browse_visible_window(
+            &self.browse.entries,
+            self.browse_smooth.offset(),
+            viewport,
+            header,
+        );
+        if visible.first > 0 {
+            table = table.child(div().h(px(visible.before)).flex_none());
+        }
+        for entry in &self.browse.entries[visible.first..visible.last] {
             if let BrowseEntry::Group(group) = entry {
                 table = table.child(self.render_browse_group(group, cx));
                 continue;
@@ -559,10 +664,11 @@ impl Root {
             };
             let mut line = div()
                 .id(key.clone())
+                .debug_selector(|| key.to_string())
                 .flex()
                 .items_center()
                 .gap(px(SPACE_GROUP))
-                .h(px(52.))
+                .h(px(CARD_HEIGHT))
                 .px(px(SPACE_BLOCK))
                 .pl(px(SPACE_BLOCK + SPACE_SECTION * *entry_depth as f32))
                 .border_t_1()
@@ -689,6 +795,9 @@ impl Root {
                 });
             table = table.child(line);
         }
+        if visible.last < self.browse.entries.len() {
+            table = table.child(div().h(px(visible.after)).flex_none());
+        }
         if self.browse.rows.is_empty() {
             table = table.child(self.render_browse_empty(
                 error.as_deref(),
@@ -727,7 +836,7 @@ impl Root {
             .flex()
             .items_center()
             .gap(px(SPACE_GROUP))
-            .h(px(48.))
+            .h(px(GROUP_HEIGHT))
             .px(px(SPACE_BLOCK))
             .pl(px(SPACE_BLOCK + SPACE_SECTION * group.depth as f32))
             .border_t_1()
@@ -1009,6 +1118,7 @@ impl BrowseColumns {
 
 #[cfg(test)]
 mod tests {
+    use gpui::SharedString;
     use std::collections::HashSet;
 
     use ranki_model::{
@@ -1017,7 +1127,8 @@ mod tests {
     };
 
     use super::{
-        BrowseColumns, BrowseEntry, browse_expand_paths, browser_row,
+        BrowseColumns, BrowseEntry, BrowseGroup, CARD_HEIGHT, GROUP_HEIGHT,
+        browse_expand_paths, browse_visible_window, browser_row,
         build_browse_entries, due_label, preview_line, queue_label,
         sort_browser_rows,
     };
@@ -1366,5 +1477,68 @@ mod tests {
             Some("Abkhazia.png")
         );
         assert_eq!(row.back_media.len(), 0);
+    }
+    #[test]
+    fn browse_window_keeps_only_nearby_lines() {
+        let entries = (0..1_000)
+            .map(|index| {
+                if index % 5 == 0 {
+                    BrowseEntry::Group(BrowseGroup {
+                        path: format!("Deck {index}"),
+                        name: format!("Deck {index}"),
+                        depth: 0,
+                        count: 1,
+                        has_children: false,
+                        expanded: true,
+                        key: SharedString::from(format!("group-{index}")),
+                        chevron_key: SharedString::from(format!(
+                            "chevron-{index}"
+                        )),
+                    })
+                } else {
+                    BrowseEntry::Card {
+                        row: index,
+                        depth: 1,
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let height = |range: std::ops::Range<usize>| {
+            entries[range]
+                .iter()
+                .map(|entry| match entry {
+                    BrowseEntry::Group(_) => GROUP_HEIGHT,
+                    BrowseEntry::Card { .. } => CARD_HEIGHT,
+                })
+                .sum::<f32>()
+        };
+
+        let top = browse_visible_window(&entries, 0.0, 520.0, 40.0);
+        assert_eq!(top.first, 0);
+        assert!(top.last > 0 && top.last < entries.len());
+        assert_eq!(top.before, 0.0);
+        assert!((top.height - top.after - height(0..top.last)).abs() < 0.01);
+
+        let deep = browse_visible_window(&entries, 20_000.0, 520.0, 40.0);
+        assert!(deep.first > 0);
+        assert!(deep.last > deep.first && deep.last < entries.len());
+        assert!((deep.before - height(0..deep.first)).abs() < 0.01);
+        assert!(
+            (deep.height
+                - deep.before
+                - deep.after
+                - height(deep.first..deep.last))
+            .abs()
+                < 0.01
+        );
+
+        let all = browse_visible_window(&entries, 0.0, 100_000.0, 40.0);
+        assert_eq!((all.first, all.last), (0, entries.len()));
+        assert_eq!((all.before, all.after), (0.0, 0.0));
+
+        let past = browse_visible_window(&entries, 100_000.0, 520.0, 40.0);
+        assert_eq!((past.first, past.last), (entries.len(), entries.len()));
+        assert_eq!(past.after, 0.0);
+        assert!((past.before - past.height).abs() < 0.01);
     }
 }
