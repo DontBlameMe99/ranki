@@ -154,9 +154,9 @@ fn display_math(expression: &str) -> String {
                 let (denominator, next) = math_argument(expression, cursor);
                 cursor = next;
                 output.push('(');
-                output.push_str(&fraction_part(&numerator));
+                output.push_str(&group_part(&numerator));
                 output.push('/');
-                output.push_str(&fraction_part(&denominator));
+                output.push_str(&group_part(&denominator));
                 output.push(')');
                 continue;
             }
@@ -165,7 +165,7 @@ fn display_math(expression: &str) -> String {
                 let (radicand, next) = math_argument(expression, cursor);
                 cursor = next;
                 output.push('√');
-                output.push_str(&radicand);
+                output.push_str(&group_part(&radicand));
                 continue;
             }
             let name = rest
@@ -197,13 +197,22 @@ fn display_math(expression: &str) -> String {
         if rest.starts_with('^') || rest.starts_with('_') {
             let superscript = rest.starts_with('^');
             let after = cursor.saturating_add(1);
+            let grouped = expression
+                .get(after..)
+                .is_some_and(|tail| tail.starts_with('{'));
             let (token, next) = math_argument(expression, after);
             cursor = next;
             if let Some(script) = script_glyph(&token, superscript) {
                 output.push_str(&script);
             } else {
                 output.push(if superscript { '^' } else { '_' });
-                output.push_str(&token);
+                if grouped {
+                    output.push('(');
+                    output.push_str(&token);
+                    output.push(')');
+                } else {
+                    output.push_str(&token);
+                }
             }
             continue;
         }
@@ -216,8 +225,8 @@ fn display_math(expression: &str) -> String {
     output
 }
 
-/// Keeps a slash fraction unambiguous when its part has several terms.
-fn fraction_part(text: &str) -> String {
+/// Keeps slash fractions and radicals unambiguous for compound operands.
+fn group_part(text: &str) -> String {
     let compound = text.chars().any(|character| {
         character.is_whitespace()
             || matches!(character, '+' | '-' | '=' | '/' | '×' | '÷')
@@ -231,10 +240,19 @@ fn fraction_part(text: &str) -> String {
 
 /// Reads a braced group or the next single token as a math argument.
 fn math_argument(input: &str, start: usize) -> (String, usize) {
-    if input.get(start..).is_some_and(|rest| rest.starts_with('{')) {
-        math_group(input, start.saturating_add(1))
+    let mut cursor = start;
+    while input.get(cursor..).is_some_and(|rest| {
+        rest.starts_with(|character: char| character.is_ascii_whitespace())
+    }) {
+        cursor = cursor.saturating_add(1);
+    }
+    if input
+        .get(cursor..)
+        .is_some_and(|rest| rest.starts_with('{'))
+    {
+        math_group(input, cursor.saturating_add(1))
     } else {
-        let (token, next) = math_token(input, start);
+        let (token, next) = math_token(input, cursor);
         (display_math(&token), next)
     }
 }
@@ -253,11 +271,11 @@ fn raw_group(input: &str, start: usize) -> (String, usize) {
         if rest.starts_with('{') {
             depth = depth.saturating_add(1);
         } else if rest.starts_with('}') {
+            depth = depth.saturating_sub(1);
             if depth == 0 {
                 let end = cursor.saturating_add(1);
                 return (input.get(start..end).unwrap_or("").to_owned(), end);
             }
-            depth = depth.saturating_sub(1);
         }
         let Some(character) = rest.chars().next() else {
             break;
@@ -497,24 +515,16 @@ pub fn strip_tags(input: &str) -> String {
             }
             continue;
         }
-        if let Some((open, close)) =
-            MATH_DELIMITERS.iter().find_map(|(open, close, _)| {
-                rest.starts_with(open).then_some((*open, *close))
-            })
+        if rest.starts_with('<')
+            && rest
+                .get(1..)
+                .and_then(|tail| tail.chars().next())
+                .is_some_and(|character| {
+                    character.is_ascii_alphabetic()
+                        || matches!(character, '/' | '!' | '?')
+                })
+            && let Some(end) = rest.find('>')
         {
-            let after = rest.get(open.len()..).unwrap_or("");
-            if let Some(end) = after.find(close) {
-                let length =
-                    open.len().saturating_add(end).saturating_add(close.len());
-                output.push_str(rest.get(..length).unwrap_or(""));
-                cursor = cursor.saturating_add(length);
-                continue;
-            }
-        }
-        if rest.starts_with('<') {
-            let Some(end) = rest.find('>') else {
-                break;
-            };
             let tag = rest.get(..end.saturating_add(1)).unwrap_or("");
             if tag.starts_with("<br")
                 || tag.starts_with("<hr")
@@ -914,5 +924,36 @@ mod math_tests {
     #[test]
     fn strip_tags_keeps_math_inequalities() {
         assert_eq!(strip_tags("x \\(a < b\\) y"), "x \\(a < b\\) y");
+    }
+
+    #[test]
+    fn compound_radicals_keep_their_scope() {
+        let segments = math_segments("\\(\\sqrt{x+1}\\)");
+        assert_eq!(segments[0].text, "√(x+1)");
+        let segments = math_segments("\\(\\sqrt{x_1}\\)");
+        assert_eq!(segments[0].text, "√x₁");
+    }
+
+    #[test]
+    fn unsupported_grouped_scripts_keep_grouping() {
+        let segments = math_segments("\\(x^{a+b}\\)");
+        assert_eq!(segments[0].text, "x^(a+b)");
+    }
+
+    #[test]
+    fn whitespace_before_math_arguments_is_skipped() {
+        let segments = math_segments("\\(\\frac {a}{b}\\)");
+        assert_eq!(segments[0].text, "(a/b)");
+    }
+
+    #[test]
+    fn unknown_command_group_ends_at_its_brace() {
+        let segments = math_segments("\\(\\operatorname{sin} x^2 + \\alpha\\)");
+        assert_eq!(segments[0].text, "\\operatorname{sin} x² + α");
+    }
+
+    #[test]
+    fn strip_tags_removes_html_formatting_inside_math() {
+        assert_eq!(strip_tags("\\(x<b>+y</b>\\)"), "\\(x+y\\)");
     }
 }
