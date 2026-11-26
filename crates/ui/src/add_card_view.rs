@@ -3,10 +3,10 @@
 use std::collections::BTreeMap;
 
 use gpui::{
-    App, ClickEvent, Context, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    SharedString, StatefulInteractiveElement, Styled, StyledImage, Window, div,
-    img, px, relative,
+    App, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    Pixels, Point, SharedString, StatefulInteractiveElement, Styled,
+    StyledImage, Window, div, img, px, relative,
 };
 
 use crate::{
@@ -17,15 +17,56 @@ use crate::{
         search_field_icon,
     },
     occlusion::{self, OcclusionMask},
+    text_field::TextField,
     theme::{
         ADD_CONTENT_WIDTH, ADD_FORM_WIDTH, ADD_GAP, PAGE_X, PREVIEW_WIDTH,
         SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE, SPACE_RELATED,
-        SPACE_SECTION, Style, alpha,
+        SPACE_SECTION, Style, alpha, card_colors, parse_hex_color,
     },
 };
 
 /// Height of the occlusion drawing area.
 const OCCLUSION_CANVAS_HEIGHT: f32 = 320.0;
+
+/// Which CSS property a color choice edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorTarget {
+    Text,
+    Background,
+}
+
+impl ColorTarget {
+    const fn property(self) -> &'static str {
+        match self {
+            Self::Text => "color",
+            Self::Background => "background-color",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Text => "Text color",
+            Self::Background => "Background color",
+        }
+    }
+}
+
+/// Open state of the card color picker.
+#[derive(Clone, Debug)]
+pub struct ColorPicker {
+    pub target: ColorTarget,
+    pub field: Entity<TextField>,
+    pub anchor: Point<Pixels>,
+}
+
+/// Markup that colors a selection in a note field.
+#[must_use]
+pub fn color_tags(target: ColorTarget, value: &str) -> (String, String) {
+    (
+        format!("<span style=\"{}: {value}\">", target.property()),
+        String::from("</span>"),
+    )
+}
 
 impl Root {
     pub(crate) fn render_add_card(
@@ -64,13 +105,20 @@ impl Root {
         } else {
             preview_media(rendered_question.as_ref(), rendered_answer.as_ref())
         };
-        let preview_text = rendered_question.as_ref().map_or_else(
-            || String::from("Choose a note type"),
-            card_view::preview_text,
+        let preview_question = rendered_question.as_ref().map_or_else(
+            || {
+                div()
+                    .text_size(px(52.))
+                    .text_color(colors.text)
+                    .child("Choose a note type")
+            },
+            |card| card_view::preview_line(card, colors.text, 52.),
         );
-        let preview_answer = rendered_answer
-            .as_ref()
-            .map_or_else(String::new, card_view::preview_text);
+        let preview_answer =
+            rendered_answer.as_ref().map_or_else(div, |card| {
+                card_view::preview_line(card, colors.mauve, 28.)
+                    .font_weight(gpui::FontWeight::BOLD)
+            });
         let preview_reading = model.and_then(|model| {
             field_value(model, &field_values, &["Reading", "Kana"])
         });
@@ -110,11 +158,12 @@ impl Root {
             .flex_col()
             .overflow_scroll()
             .on_scroll_wheel(cx.listener(
-                |this, _: &gpui::ScrollWheelEvent, _, cx| {
+                |this, _: &gpui::ScrollWheelEvent, window, cx| {
                     if this.add.deck_picker {
                         this.add.deck_picker = false;
                         cx.notify();
                     }
+                    this.close_color_picker(window, cx);
                 },
             ))
             .px(px(PAGE_X))
@@ -439,13 +488,7 @@ impl Root {
                 .items_center()
                 .justify_center()
                 .gap(px(SPACE_GROUP))
-                .child(
-                    div()
-                        .text_size(px(52.))
-                        .text_color(colors.text)
-                        .font_family(crate::theme::font_for_text(&preview_text))
-                        .child(preview_text),
-                )
+                .child(preview_question)
                 .children(preview_reading.map(|reading| {
                     div()
                         .text_size(px(14.))
@@ -460,16 +503,7 @@ impl Root {
                     120.,
                 ))
                 .child(div().w_full().h(px(1.)).bg(colors.surface1))
-                .child(
-                    div()
-                        .text_size(px(28.))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(colors.mauve)
-                        .font_family(crate::theme::font_for_text(
-                            &preview_answer,
-                        ))
-                        .child(preview_answer),
-                )
+                .child(preview_answer)
                 .children(card_view::media_column(
                     &answer_media,
                     &self.options.media_dir,
@@ -965,6 +999,201 @@ impl Root {
             )
             .child(list)
     }
+
+    pub(crate) fn render_color_picker(
+        &self,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = self.colors();
+        let theme = self.theme();
+        let style = Style::new(colors, theme);
+        let Some(picker) = self.add.color_picker.as_ref() else {
+            return div().into_any_element();
+        };
+        let mut grid = div().flex().flex_wrap().gap(px(SPACE_INLINE));
+        for (index, swatch) in card_colors(theme).iter().enumerate() {
+            let preview = match swatch.color {
+                Some(color) => div()
+                    .w(px(30.))
+                    .h(px(30.))
+                    .rounded(px(8.))
+                    .bg(color)
+                    .border_1()
+                    .border_color(alpha(colors.text, 0.16)),
+                None => div()
+                    .w(px(30.))
+                    .h(px(30.))
+                    .rounded(px(8.))
+                    .bg(colors.base)
+                    .border_1()
+                    .border_color(colors.surface1)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon("icon-x", 14., colors.overlay)),
+            };
+            let target = picker.target;
+            let field = picker.field.clone();
+            let value = swatch.hex;
+            let name = swatch.name;
+            grid = grid.child(
+                Interaction::surface(colors)
+                    .apply(
+                        div()
+                            .id(SharedString::from(format!(
+                                "add-color-{index}"
+                            )))
+                            .debug_selector(move || {
+                                format!("add-color-{index}")
+                            })
+                            .w(px(60.))
+                            .py(px(SPACE_INLINE))
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(SPACE_INLINE))
+                            .rounded(px(8.))
+                            .cursor_pointer(),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.apply_color(
+                            target,
+                            field.clone(),
+                            value,
+                            window,
+                            cx,
+                        );
+                    }))
+                    .child(preview)
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(colors.subtext)
+                            .child(name),
+                    ),
+            );
+        }
+
+        let custom = self.add.color_hex.read(cx).text();
+        let custom_color = parse_hex_color(&custom);
+        let custom_preview = custom_color.map_or_else(
+            || {
+                div()
+                    .w(px(30.))
+                    .h(px(30.))
+                    .rounded(px(8.))
+                    .bg(colors.surface0)
+                    .border_1()
+                    .border_color(colors.surface1)
+            },
+            |color| div().w(px(30.)).h(px(30.)).rounded(px(8.)).bg(color),
+        );
+        let hint = if custom.trim().is_empty() {
+            "Enter #rrggbb"
+        } else if custom_color.is_some() {
+            "Custom"
+        } else {
+            "Use #rgb or #rrggbb"
+        };
+        let target = picker.target;
+        let field = self.add.color_hex.clone();
+        let custom_field = picker.field.clone();
+        let apply = Interaction::accent(style)
+            .apply(
+                div()
+                    .id("add-color-apply")
+                    .h(px(30.))
+                    .px(px(SPACE_RELATED))
+                    .flex()
+                    .items_center()
+                    .rounded(px(8.))
+                    .bg(colors.mauve)
+                    .text_color(style.ink())
+                    .text_size(px(12.))
+                    .cursor_pointer(),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let value = this.add.color_hex.read(cx).text();
+                if parse_hex_color(&value).is_some() {
+                    this.apply_color(
+                        target,
+                        custom_field.clone(),
+                        &value,
+                        window,
+                        cx,
+                    );
+                }
+            }))
+            .child("Apply");
+
+        div()
+            .id("add-color-picker-popup")
+            .debug_selector(|| "add-color-picker-popup".to_owned())
+            .w(px(276.))
+            .occlude()
+            .on_mouse_down_out(cx.listener(
+                |this, event: &MouseDownEvent, window, cx| {
+                    this.add.color_picker_dismissed_target =
+                        this.add.color_picker.as_ref().map(|p| p.target);
+                    this.add.color_picker = None;
+                    this.add.color_picker_dismissed_press = Some(event.clone());
+                    window.focus(&this.focus);
+                    cx.notify();
+                },
+            ))
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_GROUP))
+            .p(px(SPACE_RELATED))
+            .rounded(px(16.))
+            .border_1()
+            .border_color(colors.surface1)
+            .bg(colors.mantle)
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(colors.text)
+                    .child(picker.target.label()),
+            )
+            .child(grid)
+            .child(
+                div()
+                    .pt(px(SPACE_GROUP))
+                    .border_t_1()
+                    .border_color(colors.surface1)
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_INLINE))
+                    .child(custom_preview)
+                    .child(div().flex_1().min_w(px(84.)).child(field))
+                    .child(apply),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(colors.overlay)
+                    .child(hint),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn apply_color(
+        &mut self,
+        target: ColorTarget,
+        field: Entity<TextField>,
+        value: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focus = field.read(cx).focus_handle().clone();
+        field.update(cx, |field, cx| {
+            let (open, close) = color_tags(target, value);
+            field.wrap_markup((&open, &close), cx);
+        });
+        self.close_color_picker(window, cx);
+        window.focus(&focus);
+    }
 }
 
 /// One drawn mask, translucent red with its cloze ordinal.
@@ -1129,18 +1358,55 @@ fn formatting_toolbar(
     let weak = cx.entity().downgrade();
     let image_field = field.clone();
     let image_handle = handle.clone();
+    let image_weak = weak.clone();
     toolbar = toolbar.child(button(
         "Image",
         Some("icon-image"),
         false,
         Box::new(move |_, window, cx| {
             let field = image_field.clone();
-            let _ = weak.update(cx, |root, cx| {
+            let _ = image_weak.update(cx, |root, cx| {
                 root.upload_field_image(field, cx);
             });
             window.focus(&image_handle);
         }),
     ));
+    for (label, target) in [
+        ("Text color", ColorTarget::Text),
+        ("Highlight", ColorTarget::Background),
+    ] {
+        let color_field = field.clone();
+        let color_handle = handle.clone();
+        let color_weak = weak.clone();
+        toolbar = toolbar.child(button(
+            label,
+            None,
+            false,
+            Box::new(move |event: &ClickEvent, window, cx| {
+                let anchor = event.position();
+                let _ = color_weak.update(cx, |root, cx| {
+                    let same = same_press(
+                        event,
+                        root.add.color_picker_dismissed_press.as_ref(),
+                    ) && root.add.color_picker_dismissed_target
+                        == Some(target);
+                    root.add.color_picker_dismissed_press = None;
+                    root.add.color_picker_dismissed_target = None;
+                    if same {
+                        window.focus(&color_handle);
+                    } else {
+                        root.toggle_color_picker(
+                            target,
+                            color_field.clone(),
+                            anchor,
+                            window,
+                            cx,
+                        );
+                    }
+                });
+            }),
+        ));
+    }
     if is_cloze {
         for (label, number) in CLOZE_BUTTONS {
             toolbar = toolbar.child(button(
@@ -1463,5 +1729,23 @@ mod tests {
             .copied()
             .unwrap_or(("", "", "", false, None));
         assert_eq!((open, close), ("\\(", "\\)"));
+    }
+
+    #[test]
+    fn color_markup_wraps_text_and_background_separately() {
+        let (open, close) =
+            super::color_tags(super::ColorTarget::Text, "#f38ba8");
+        assert_eq!(open, "<span style=\"color: #f38ba8\">");
+        assert_eq!(close, "</span>");
+        let (open, close) =
+            super::color_tags(super::ColorTarget::Background, "inherit");
+        assert_eq!(open, "<span style=\"background-color: inherit\">");
+        let (text, caret) =
+            crate::text_field::wrap_selection("word", 0..4, (&open, &close));
+        assert_eq!(
+            text,
+            "<span style=\"background-color: inherit\">word</span>"
+        );
+        assert_eq!(caret, text.len());
     }
 }

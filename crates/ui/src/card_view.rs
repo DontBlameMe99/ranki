@@ -25,10 +25,9 @@ mod markup;
 pub use markup::cloze_text;
 pub use markup::{
     ClozeSegment, MaskOverlay, MathKind, MediaKind, MediaRef,
-    answer_only_media, cloze_segments, math_segments, media_refs,
-    occlusion_overlays, strip_tags,
+    answer_only_media, math_segments, media_refs, occlusion_overlays,
 };
-use markup::{is_empty_html, normalize_newlines};
+use markup::{ClozeSpan, cloze_spans, is_empty_html, styled_text};
 
 /// Side of the card being rendered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,10 +51,21 @@ pub enum TemplateNode {
     },
 }
 
+/// One piece of card text with its own color override.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TextRun {
+    pub text: String,
+    pub foreground: Option<Rgba>,
+    pub background: Option<Rgba>,
+    /// Math expression already translated to display glyphs.
+    pub math: bool,
+}
+
 /// Result of rendering a template for one card side.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RenderedCard {
     pub text: String,
+    pub runs: Vec<TextRun>,
     pub media: Vec<MediaRef>,
     pub clozes: Vec<ClozeSegment>,
     pub masks: Vec<MaskOverlay>,
@@ -352,17 +362,20 @@ pub fn render_card(
         String::new()
     };
     let rendered = render_template(&source, fields, &front);
-    let text = strip_tags(&rendered);
-    let (text, clozes) = if model.is_cloze() {
-        let clozes = cloze_segments(&text, ordinal, side);
-        let text = clozes
-            .iter()
-            .map(|segment| segment.text.as_str())
-            .collect::<String>();
-        (text, clozes)
+    let styled = styled_text(&rendered);
+    let source_text = styled
+        .iter()
+        .map(|run| run.text.as_str())
+        .collect::<String>();
+    let (runs, clozes) = if model.is_cloze() {
+        let spans = cloze_spans(&source_text, ordinal, side);
+        let clozes = spans.iter().map(|span| span.segment.clone()).collect();
+        (cloze_runs(&styled, &spans), clozes)
     } else {
-        (text, Vec::new())
+        (styled, Vec::new())
     };
+    let runs = apply_math(normalize_runs(runs));
+    let text = runs.iter().map(|run| run.text.as_str()).collect::<String>();
     let masks = if model.is_image_occlusion() {
         note.fields
             .iter()
@@ -373,11 +386,239 @@ pub fn render_card(
         Vec::new()
     };
     RenderedCard {
-        text: normalize_newlines(&text),
+        text,
+        runs,
         media: media_refs(&rendered),
         clozes,
         masks,
     }
+}
+
+/// Applies cloze labels to styled runs without losing their colors.
+fn cloze_runs(styled: &[TextRun], spans: &[ClozeSpan]) -> Vec<TextRun> {
+    let map = RunMap::new(styled);
+    let mut result = Vec::new();
+    let mut cursor = 0usize;
+    for span in spans {
+        if span.start > cursor {
+            map.push_slice(cursor, span.start, &mut result);
+        }
+        if span.label_start < span.label_end {
+            map.push_mapped_slice(
+                span.label_start..span.label_end,
+                &span.segment.text,
+                &mut result,
+            );
+        } else if let Some(run) = map.style_at(span.start, span.end) {
+            result.push(TextRun {
+                text: span.segment.text.clone(),
+                foreground: run.foreground,
+                background: run.background,
+                math: false,
+            });
+        }
+        cursor = cursor.max(span.end);
+    }
+    map.push_slice(cursor, map.end(), &mut result);
+    result
+}
+
+/// Byte offsets of each styled run inside the rendered source text.
+struct RunMap<'a> {
+    runs: &'a [TextRun],
+    bounds: Vec<(usize, usize, usize)>,
+}
+
+impl<'a> RunMap<'a> {
+    fn new(runs: &'a [TextRun]) -> Self {
+        let mut bounds = Vec::new();
+        let mut cursor = 0usize;
+        for (index, run) in runs.iter().enumerate() {
+            let end = cursor.saturating_add(run.text.len());
+            bounds.push((cursor, end, index));
+            cursor = end;
+        }
+        Self { runs, bounds }
+    }
+
+    fn end(&self) -> usize {
+        self.bounds.last().map_or(0, |(_, end, _)| *end)
+    }
+
+    fn style_at(&self, start: usize, end: usize) -> Option<&'a TextRun> {
+        let (_, _, index) = self
+            .bounds
+            .iter()
+            .find(|(from, to, _)| *from < end && *to > start)?;
+        self.runs.get(*index)
+    }
+
+    fn push_slice(&self, start: usize, end: usize, output: &mut Vec<TextRun>) {
+        for &(from, to, index) in &self.bounds {
+            if to <= start || from >= end {
+                continue;
+            }
+            let Some(run) = self.runs.get(index) else {
+                continue;
+            };
+            let from_offset = from.max(start).saturating_sub(from);
+            let to_offset = to.min(end).saturating_sub(from);
+            if let Some(text) = run.text.get(from_offset..to_offset)
+                && !text.is_empty()
+            {
+                output.push(TextRun {
+                    text: text.to_owned(),
+                    foreground: run.foreground,
+                    background: run.background,
+                    math: false,
+                });
+            }
+        }
+    }
+
+    fn push_mapped_slice(
+        &self,
+        range: std::ops::Range<usize>,
+        label: &str,
+        output: &mut Vec<TextRun>,
+    ) {
+        for &(from, to, index) in &self.bounds {
+            let start = from.max(range.start);
+            let end = to.min(range.end);
+            if start >= end {
+                continue;
+            }
+            let Some(run) = self.runs.get(index) else {
+                continue;
+            };
+            let label_from = start.saturating_sub(range.start);
+            let label_to = end.saturating_sub(range.start);
+            if let Some(text) = label.get(label_from..label_to)
+                && !text.is_empty()
+            {
+                output.push(TextRun {
+                    text: text.to_owned(),
+                    foreground: run.foreground,
+                    background: run.background,
+                    math: false,
+                });
+            }
+        }
+    }
+}
+
+/// Drops blank lines and merges adjacent runs with the same style.
+fn normalize_runs(runs: Vec<TextRun>) -> Vec<TextRun> {
+    let lines = split_lines(&runs);
+    let mut output = Vec::new();
+    for line in lines {
+        if !line.iter().any(|run| !run.text.trim().is_empty()) {
+            continue;
+        }
+        if !output.is_empty() {
+            output.push(TextRun::default());
+            if let Some(break_run) = output.last_mut() {
+                break_run.text.push('\n');
+            }
+        }
+        output.extend(line);
+    }
+    output
+}
+
+/// Translates `MathJax` delimiters into display glyphs and keeps italic ranges.
+fn apply_math(runs: Vec<TextRun>) -> Vec<TextRun> {
+    let mut output: Vec<TextRun> = Vec::new();
+    for run in runs {
+        for segment in math_segments(&run.text) {
+            let math = segment.kind != MathKind::Text;
+            if let Some(last) = output.last_mut()
+                && last.math == math
+                && last.foreground == run.foreground
+                && last.background == run.background
+            {
+                last.text.push_str(&segment.text);
+            } else {
+                output.push(TextRun {
+                    text: segment.text,
+                    foreground: run.foreground,
+                    background: run.background,
+                    math,
+                });
+            }
+        }
+    }
+    output
+}
+
+fn split_lines(runs: &[TextRun]) -> Vec<Vec<TextRun>> {
+    let mut lines: Vec<Vec<TextRun>> = vec![Vec::new()];
+    for run in runs {
+        for (index, line) in run.text.split('\n').enumerate() {
+            if index > 0 {
+                lines.push(Vec::new());
+            }
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(current) = lines.last_mut() {
+                current.push(TextRun {
+                    text: line.to_owned(),
+                    foreground: run.foreground,
+                    background: run.background,
+                    math: run.math,
+                });
+            }
+        }
+    }
+    lines
+}
+
+fn text_lines(card: &RenderedCard) -> Vec<Vec<TextRun>> {
+    if card.runs.is_empty() {
+        return card
+            .text
+            .lines()
+            .map(|line| {
+                vec![TextRun {
+                    text: line.to_owned(),
+                    foreground: None,
+                    background: None,
+                    math: false,
+                }]
+            })
+            .collect();
+    }
+    split_lines(&card.runs)
+}
+
+/// Draws one line of card text, keeping per-run color overrides.
+#[must_use]
+pub fn rendered_line(runs: &[TextRun], color: Rgba, size_px: f32) -> Div {
+    let plain = runs.iter().map(|run| run.text.as_str()).collect::<String>();
+    let mut line = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .justify_center()
+        .text_size(px(size_px))
+        .font_family(crate::theme::font_for_text(&plain));
+    for run in runs {
+        let mut part = div().text_color(run.foreground.unwrap_or(color));
+        if let Some(background) = run.background {
+            part = part.bg(background).px(px(2.)).rounded(px(4.));
+        }
+        let text = run.text.clone();
+        let content = if run.math {
+            StyledText::new(text.clone())
+                .with_highlights([(0..text.len(), FontStyle::Italic.into())])
+                .into_any_element()
+        } else {
+            text.into_any_element()
+        };
+        line = line.child(part.child(content));
+    }
+    line
 }
 
 /// Draws cloze and occlusion content as a compact text block.
@@ -390,61 +631,35 @@ pub fn rendered_text(card: &RenderedCard, color: Rgba, size_px: f32) -> Div {
         .gap(px(SPACE_GROUP))
         .text_size(px(size_px))
         .text_color(color);
-    for line in display_lines(&card.text) {
-        let mut content = String::new();
-        let mut highlights = Vec::new();
-        for run in line {
-            let start = content.len();
-            content.push_str(&run.text);
-            if run.math {
-                highlights
-                    .push((start..content.len(), FontStyle::Italic.into()));
-            }
-        }
-        block = block.child(
-            div()
-                .font_family(crate::theme::font_for_text(&content))
-                .child(StyledText::new(content).with_highlights(highlights)),
-        );
+    for line in text_lines(card) {
+        block = block.child(rendered_line(&line, color, size_px));
     }
     block
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DisplayRun {
-    text: String,
-    math: bool,
+/// Styled runs for the last visible line of a rendered card.
+#[must_use]
+pub fn preview_runs(rendered: &RenderedCard) -> Vec<TextRun> {
+    let mut lines = text_lines(rendered);
+    let last = lines
+        .iter()
+        .rposition(|line| line.iter().any(|run| !run.text.trim().is_empty()))
+        .unwrap_or(0);
+    lines.get_mut(last).cloned().unwrap_or_default()
 }
 
-/// Groups translated text into lines, keeping math ranges for italics.
-fn display_lines(text: &str) -> Vec<Vec<DisplayRun>> {
-    let mut lines: Vec<Vec<DisplayRun>> = vec![Vec::new()];
-    for segment in math_segments(text) {
-        let math = segment.kind != MathKind::Text;
-        for (index, part) in segment.text.split('\n').enumerate() {
-            if index > 0 {
-                lines.push(Vec::new());
-            }
-            if part.is_empty() {
-                continue;
-            }
-            if let Some(line) = lines.last_mut()
-                && line.last().is_some_and(|run| run.math == math)
-                && let Some(run) = line.last_mut()
-            {
-                run.text.push_str(part);
-            } else if let Some(line) = lines.last_mut() {
-                line.push(DisplayRun {
-                    text: part.to_owned(),
-                    math,
-                });
-            }
-        }
+/// Draws one preview line with its color overrides.
+#[must_use]
+pub fn preview_line(rendered: &RenderedCard, color: Rgba, size_px: f32) -> Div {
+    let runs = preview_runs(rendered);
+    if runs.is_empty() {
+        div()
+            .text_size(px(size_px))
+            .text_color(color)
+            .child(preview_text(rendered))
+    } else {
+        rendered_line(&runs, color, size_px)
     }
-    while lines.last().is_some_and(Vec::is_empty) {
-        lines.pop();
-    }
-    lines
 }
 
 /// GPUI overlays for parsed image-occlusion masks.
@@ -830,11 +1045,11 @@ pub fn preview_card(
 
 #[cfg(test)]
 mod tests {
+    use super::markup::{ClozeKind, cloze_segments, strip_tags, styled_text};
     use super::{
         CardRequest, MediaKind, MediaRef, Side, TemplateNode,
-        answer_only_media, cloze_text, markup::ClozeKind, media_refs,
-        occlusion_overlays, parse_template, preview_card, render_card,
-        strip_tags,
+        answer_only_media, cloze_text, media_refs, occlusion_overlays,
+        parse_template, preview_card, render_card,
     };
     use ranki_model::{CardTemplate, Note, NoteKind};
 
@@ -992,7 +1207,7 @@ mod tests {
     #[test]
     fn cloze_answer_reveals_active_and_inactive() {
         let segments =
-            super::cloze_segments("{{c1::one}} {{c2::two}}", 0, Side::Answer);
+            cloze_segments("{{c1::one}} {{c2::two}}", 0, Side::Answer);
         assert_eq!(segments[0].kind, ClozeKind::ActiveAnswer);
         assert_eq!(segments[2].kind, ClozeKind::Inactive);
         assert_eq!(
@@ -1223,9 +1438,10 @@ mod tests {
 
     #[test]
     fn math_runs_stay_inline_with_surrounding_text() {
-        let lines = super::display_lines("Find \\(x^2\\) today");
-        assert_eq!(lines.len(), 1);
-        let runs = lines.first().map_or(&[][..], |line| line.as_slice());
+        let runs = super::apply_math(vec![super::TextRun {
+            text: String::from("Find \\(x^2\\) today"),
+            ..Default::default()
+        }]);
         assert_eq!(runs.len(), 3);
         assert_eq!(runs[0].text, "Find ");
         assert!(!runs[0].math);
@@ -1244,5 +1460,105 @@ mod tests {
             CardRequest::question(0),
         );
         assert_eq!(super::preview_text(&rendered), "Area πr²");
+    }
+
+    #[test]
+    fn inline_colors_survive_template_rendering() {
+        let form = model(
+            &["Front", "Back"],
+            "{{Front}}",
+            "{{FrontSide}}<hr id=answer>{{Back}}",
+        );
+        let card = render_card(
+            &form,
+            &note(&[
+                "<span style=\"color: #f38ba8; background-color: #1e1e2e\">Pink</span> plain",
+                "Answer",
+            ]),
+            CardRequest::question(0),
+        );
+        assert_eq!(card.text, "Pink plain");
+        assert_eq!(card.runs.len(), 2);
+        assert_eq!(card.runs[0].text, "Pink");
+        assert_eq!(card.runs[0].foreground, Some(crate::theme::MOCHA.red));
+        assert_eq!(card.runs[0].background, Some(crate::theme::MOCHA.base));
+        assert_eq!(card.runs[1].text, " plain");
+        assert_eq!(card.runs[1].foreground, None);
+        assert_eq!(card.runs[1].background, None);
+    }
+
+    #[test]
+    fn nested_color_spans_inherit_unset_properties() {
+        let runs = styled_text(
+            "<span style=\"background-color: #f9e2af\">base<span style=\"color: #f38ba8\">colored</span></span>",
+        );
+        assert_eq!(runs[0].text, "base");
+        assert_eq!(
+            runs[0].background,
+            crate::theme::parse_hex_color("#f9e2af")
+        );
+        assert_eq!(runs[0].foreground, None);
+        assert_eq!(runs[1].text, "colored");
+        assert_eq!(runs[1].foreground, Some(crate::theme::MOCHA.red));
+        assert_eq!(
+            runs[1].background,
+            crate::theme::parse_hex_color("#f9e2af")
+        );
+        let inherited = styled_text(
+            "<span style=\"color:#f38ba8\">one<span style=\"color:inherit\"> two</span></span>",
+        );
+        assert_eq!(inherited[0].text, "one two");
+        assert_eq!(inherited[0].foreground, Some(crate::theme::MOCHA.red));
+    }
+
+    #[test]
+    fn color_runs_follow_cloze_question_and_answer_labels() {
+        let mut form = model(&["Text"], "{{cloze:Text}}", "{{cloze:Text}}");
+        form.kind = NoteKind::Cloze;
+        let note = note(&[
+            "<span style=\"color:#a6e3a1\">{{c1::Paris}} is nice</span>",
+            "",
+        ]);
+        let question = render_card(&form, &note, CardRequest::question(0));
+        assert_eq!(question.text, "[...] is nice");
+        assert!(
+            question.runs[0].text.starts_with("[...]"),
+            "question label keeps its place in the styled line"
+        );
+        assert!(
+            question
+                .runs
+                .iter()
+                .all(|run| run.foreground == Some(crate::theme::MOCHA.green))
+        );
+        let answer = render_card(&form, &note, CardRequest::answer_only(0));
+        assert_eq!(answer.text, "Paris is nice");
+        assert!(
+            answer.runs[0].text.starts_with("Paris"),
+            "answer label keeps its place in the styled line"
+        );
+        assert!(
+            answer
+                .runs
+                .iter()
+                .all(|run| run.foreground == Some(crate::theme::MOCHA.green))
+        );
+    }
+
+    #[test]
+    fn cloze_labels_keep_colors_from_each_source_run() {
+        let mut form = model(&["Text"], "{{cloze:Text}}", "{{cloze:Text}}");
+        form.kind = NoteKind::Cloze;
+        let note = note(&[
+            "<span style=\"color:#f38ba8\">{{c1::one</span><span style=\"color:#a6e3a1\"> two}}</span>",
+            "",
+        ]);
+        let answer = render_card(&form, &note, CardRequest::answer_only(0));
+        assert_eq!(answer.text, "one two");
+        assert_eq!(answer.runs[0].text, "one");
+        assert_eq!(answer.runs[0].foreground, Some(crate::theme::MOCHA.red));
+        assert_eq!(answer.runs[1].text, " two");
+        assert_eq!(answer.runs[1].foreground, Some(crate::theme::MOCHA.green));
+        assert_eq!(answer.runs.len(), 2);
     }
 }

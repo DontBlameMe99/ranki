@@ -1,6 +1,9 @@
 //! Pure parsing of card markup into media, cloze, and occlusion data.
 
-use super::Side;
+use gpui::Rgba;
+
+use super::{Side, TextRun};
+use crate::theme::parse_hex_color;
 use ranki_model::{
     cloze_ordinal,
     image_occlusion::{ImageOcclusionField, ShapeKind},
@@ -484,13 +487,14 @@ pub(super) fn is_empty_html(value: &str) -> bool {
     strip_tags(value).trim().is_empty() && media_refs(value).is_empty()
 }
 
-/// Converts the supported markup subset to plain text with line breaks.
+/// Converts supported markup to colored text runs.
 #[must_use]
-pub fn strip_tags(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
+pub(super) fn styled_text(input: &str) -> Vec<TextRun> {
+    let mut runs = Vec::new();
+    let mut style = Style::default();
+    let mut stack = Vec::new();
     let mut cursor = 0usize;
-    while cursor < input.len() {
-        let rest = input.get(cursor..).unwrap_or("");
+    while let Some(rest) = input.get(cursor..) {
         if rest.starts_with("<script") || rest.starts_with("<style") {
             let closing = if rest.starts_with("<script") {
                 "</script>"
@@ -525,24 +529,121 @@ pub fn strip_tags(input: &str) -> String {
                 })
             && let Some(end) = rest.find('>')
         {
-            let tag = rest.get(..end.saturating_add(1)).unwrap_or("");
+            let tag_end = end.saturating_add(1);
+            let tag = rest.get(..tag_end).unwrap_or("");
             if tag.starts_with("<br")
                 || tag.starts_with("<hr")
                 || tag.starts_with("</div")
                 || tag.starts_with("</p")
             {
-                output.push('\n');
+                push_text(&mut runs, "\n", style);
             }
-            cursor = cursor.saturating_add(end).saturating_add(1);
+            let lower = tag.to_ascii_lowercase();
+            if lower.starts_with("</span") || lower.starts_with("</font") {
+                if let Some(previous) = stack.pop() {
+                    style = previous;
+                }
+            } else if lower.starts_with("<span") || lower.starts_with("<font") {
+                stack.push(style);
+                style = style_from_tag(tag, &lower, style);
+            }
+            cursor = cursor.saturating_add(tag_end);
             continue;
         }
         let Some(character) = rest.chars().next() else {
             break;
         };
-        output.push(character);
+        let mut encoded = [0u8; 4];
+        push_text(&mut runs, character.encode_utf8(&mut encoded), style);
         cursor = cursor.saturating_add(character.len_utf8());
     }
-    normalize_newlines(&decode_entities(&output))
+    for run in &mut runs {
+        run.text = decode_entities(&run.text);
+    }
+    runs
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Style {
+    foreground: Option<Rgba>,
+    background: Option<Rgba>,
+}
+
+fn push_text(runs: &mut Vec<TextRun>, text: &str, style: Style) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = runs.last_mut()
+        && last.foreground == style.foreground
+        && last.background == style.background
+    {
+        last.text.push_str(text);
+    } else {
+        runs.push(TextRun {
+            text: text.to_owned(),
+            foreground: style.foreground,
+            background: style.background,
+            math: false,
+        });
+    }
+}
+
+/// Reads the two CSS properties the card color picker writes.
+fn style_from_tag(tag: &str, lower: &str, parent: Style) -> Style {
+    let mut style = parent;
+    if let Some(declarations) = attribute(tag, lower, "style") {
+        for declaration in declarations.split(';') {
+            let Some((property, value)) = declaration.split_once(':') else {
+                continue;
+            };
+            match property.trim() {
+                "color" => {
+                    style.foreground = css_color(value, parent.foreground);
+                }
+                "background-color" | "background" => {
+                    style.background = css_color(value, parent.background);
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(value) = attribute(tag, lower, "color") {
+        style.foreground = css_color(value, parent.foreground);
+    }
+    style
+}
+
+fn attribute<'a>(tag: &'a str, lower: &str, name: &str) -> Option<&'a str> {
+    let marker = format!("{name}=");
+    let at = lower.find(&marker)?;
+    let tail = tag.get(at.saturating_add(marker.len())..)?;
+    let quote = tail.chars().next()?;
+    if quote == '"' || quote == '\'' {
+        let rest = tail.get(1..)?;
+        let end = rest.find(quote)?;
+        rest.get(..end)
+    } else {
+        tail.split(|c: char| c.is_whitespace() || c == '>').next()
+    }
+}
+
+fn css_color(value: &str, inherited: Option<Rgba>) -> Option<Rgba> {
+    let value = value.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "inherit" | "initial" | "unset" => inherited,
+        "transparent" => None,
+        _ => parse_hex_color(&value),
+    }
+}
+
+/// Converts the supported markup subset to plain text with line breaks.
+#[must_use]
+pub fn strip_tags(input: &str) -> String {
+    let text = styled_text(input)
+        .iter()
+        .map(|run| run.text.as_str())
+        .collect::<String>();
+    normalize_newlines(&text)
 }
 
 /// Decodes the HTML entities Anki fields use for displayed characters.
@@ -674,28 +775,39 @@ pub fn media_refs(input: &str) -> Vec<MediaRef> {
     refs
 }
 
-/// Renders a cloze field for a one-based card number and side.
+/// A cloze match together with its source range in the rendered markup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ClozeSpan {
+    pub start: usize,
+    pub end: usize,
+    /// Source range whose text matches `segment.text`, when it does.
+    pub label_start: usize,
+    pub label_end: usize,
+    pub segment: ClozeSegment,
+}
+
+/// Renders a cloze field for a one-based card number and side, keeping ranges.
 #[must_use]
-pub fn cloze_segments(
+pub(super) fn cloze_spans(
     text: &str,
     ordinal: u16,
     side: Side,
-) -> Vec<ClozeSegment> {
+) -> Vec<ClozeSpan> {
     let number = ordinal.saturating_add(1);
-    let mut segments = Vec::new();
+    let mut spans = Vec::new();
     let mut cursor = 0usize;
     while let Some(rest) = text.get(cursor..) {
         let Some(start) = rest.find("{{c") else {
-            push_plain(&mut segments, rest);
+            push_plain(&mut spans, text, cursor, text.len());
             break;
         };
         let start = cursor.saturating_add(start);
-        push_plain(&mut segments, text.get(cursor..start).unwrap_or(""));
+        push_plain(&mut spans, text, cursor, start);
         let Some(rest) = text.get(start.saturating_add(2)..) else {
             break;
         };
         let Some(separator) = rest.find("::") else {
-            push_plain(&mut segments, text.get(start..).unwrap_or(""));
+            push_plain(&mut spans, text, start, text.len());
             break;
         };
         let numbers = rest
@@ -734,17 +846,62 @@ pub fn cloze_segments(
             ClozeKind::ActiveAnswer | ClozeKind::Inactive => answer.to_owned(),
             ClozeKind::Plain => answer.to_owned(),
         };
-        segments.push(ClozeSegment { text: label, kind });
-        cursor = body_start.saturating_add(body).saturating_add(2);
+        let end = body_start.saturating_add(body).saturating_add(2);
+        spans.push(ClozeSpan {
+            start,
+            end,
+            label_start: match kind {
+                ClozeKind::ActiveQuestion => start,
+                ClozeKind::Plain
+                | ClozeKind::ActiveAnswer
+                | ClozeKind::Inactive => body_start,
+            },
+            label_end: match kind {
+                ClozeKind::ActiveQuestion => start,
+                ClozeKind::Plain
+                | ClozeKind::ActiveAnswer
+                | ClozeKind::Inactive => {
+                    body_start.saturating_add(answer.len())
+                }
+            },
+            segment: ClozeSegment { text: label, kind },
+        });
+        cursor = end;
     }
-    segments
+    spans
 }
 
-fn push_plain(segments: &mut Vec<ClozeSegment>, text: &str) {
-    if !text.is_empty() {
-        segments.push(ClozeSegment {
-            text: text.to_owned(),
-            kind: ClozeKind::Plain,
+/// Renders a cloze field for a one-based card number and side.
+#[cfg(test)]
+#[must_use]
+pub fn cloze_segments(
+    text: &str,
+    ordinal: u16,
+    side: Side,
+) -> Vec<ClozeSegment> {
+    cloze_spans(text, ordinal, side)
+        .into_iter()
+        .map(|span| span.segment)
+        .collect()
+}
+
+fn push_plain(
+    spans: &mut Vec<ClozeSpan>,
+    text: &str,
+    start: usize,
+    end: usize,
+) {
+    let slice = text.get(start..end).unwrap_or("");
+    if !slice.is_empty() {
+        spans.push(ClozeSpan {
+            start,
+            end,
+            label_start: start,
+            label_end: end,
+            segment: ClozeSegment {
+                text: slice.to_owned(),
+                kind: ClozeKind::Plain,
+            },
         });
     }
 }

@@ -546,6 +546,21 @@ impl Root {
                     .into_any_element(),
             );
         }
+        if self.view == View::AddCard && self.add.color_picker.is_some() {
+            let anchor = self
+                .add
+                .color_picker
+                .as_ref()
+                .map_or(point(px(0.), px(0.)), |picker| picker.anchor);
+            layers.push(
+                anchored()
+                    .anchor(Corner::TopLeft)
+                    .position(anchor)
+                    .offset(point(px(0.), px(SPACE_BLOCK + SPACE_INLINE)))
+                    .child(self.render_color_picker(cx))
+                    .into_any_element(),
+            );
+        }
         if self.create_modal {
             let cancel = cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.cancel_create(window, cx);

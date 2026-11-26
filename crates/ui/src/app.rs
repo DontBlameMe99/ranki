@@ -21,6 +21,7 @@ use ranki_model::{
 
 use crate::{
     Options, SettingsSaver, ThemeChoice,
+    add_card_view::{ColorPicker, ColorTarget},
     browser_view::{BrowseState, browse_expand_paths},
     card_view::{self, MediaKind, MediaRef, RenderedCard},
     components::warm_brand,
@@ -472,6 +473,10 @@ pub struct AddState {
     pub deck_picker: bool,
     pub deck_picker_anchor: Point<Pixels>,
     pub deck_picker_dismissed_press: Option<MouseDownEvent>,
+    pub color_hex: Entity<TextField>,
+    pub color_picker: Option<ColorPicker>,
+    pub color_picker_dismissed_press: Option<MouseDownEvent>,
+    pub color_picker_dismissed_target: Option<ColorTarget>,
     pub occlusion: OcclusionState,
 }
 
@@ -696,6 +701,7 @@ impl Root {
             field.set_edit_hook(create_hook);
             field
         });
+        let color_hex = cx.new(|cx| make_field(cx, "#rrggbb"));
         let deck_filter = cx.new(|cx| make_field(cx, "Search decks"));
         let media_filter = cx.new(|cx| make_field(cx, "Filter images"));
         let rename_field = cx.new(|cx| make_field(cx, "New name"));
@@ -771,6 +777,10 @@ impl Root {
                 deck_picker: false,
                 deck_picker_anchor: point(px(0.), px(0.)),
                 deck_picker_dismissed_press: None,
+                color_hex,
+                color_picker: None,
+                color_picker_dismissed_press: None,
+                color_picker_dismissed_target: None,
                 occlusion: OcclusionState::default(),
             },
             toast: None,
@@ -984,6 +994,18 @@ impl Root {
             root.add.deck_picker_anchor =
                 point(px(root.nav_width + theme::PAGE_X + 12.), px(172.));
             window.focus(root.add.deck_filter.read(cx).focus_handle());
+        }
+        if env::var("RANKI_UI_DEV_COLOR_PICKER").is_ok_and(|value| value == "1")
+            && let Some(field) = root.add.fields.first().cloned()
+        {
+            root.view = View::AddCard;
+            root.toggle_color_picker(
+                ColorTarget::Text,
+                field,
+                point(px(root.nav_width + theme::PAGE_X + 280.), px(362.)),
+                window,
+                cx,
+            );
         }
         if let Ok(seed) = env::var("RANKI_UI_DEV_OCCLUSION") {
             root.seed_occlusion(&seed, cx);
@@ -1225,6 +1247,7 @@ impl Root {
         self.view = View::Decks;
         self.previous_view = View::Decks;
         self.add.deck_picker = false;
+        self.add.color_picker = None;
         self.reload(cx);
     }
 
@@ -1573,6 +1596,48 @@ impl Root {
             window.focus(&self.focus);
         }
         cx.notify();
+    }
+
+    pub(crate) fn toggle_color_picker(
+        &mut self,
+        target: ColorTarget,
+        field: Entity<TextField>,
+        anchor: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let open = self
+            .add
+            .color_picker
+            .as_ref()
+            .is_some_and(|picker| picker.target == target);
+        if open {
+            self.close_color_picker(window, cx);
+            return;
+        }
+        self.add.deck_picker = false;
+        self.add.color_hex.update(cx, TextField::clear);
+        self.add.color_picker = Some(ColorPicker {
+            target,
+            field,
+            anchor,
+        });
+        self.add.color_picker_dismissed_press = None;
+        self.add.color_picker_dismissed_target = None;
+        let hex = self.add.color_hex.read(cx).focus_handle().clone();
+        window.focus(&hex);
+        cx.notify();
+    }
+
+    pub(crate) fn close_color_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.add.color_picker.take().is_some() {
+            window.focus(&self.focus);
+            cx.notify();
+        }
     }
 
     /// Copies a chosen image into the media directory for the occlusion editor.
@@ -2450,6 +2515,7 @@ impl Root {
         self.add.model_index = model_index;
         self.add.deck_id = Some(row.card.deck_id);
         self.add.deck_picker = false;
+        self.add.color_picker = None;
         self.add.errors.clear();
         self.add.tag_chips.clone_from(&row.note.tags);
         self.add
@@ -2725,9 +2791,12 @@ impl Root {
             UiAction::EndSession => {
                 if self.view == View::Review {
                     self.end_session(cx);
-                } else if self.view == View::AddCard && self.add.deck_picker {
+                } else if self.view == View::AddCard
+                    && (self.add.deck_picker || self.add.color_picker.is_some())
+                {
                     self.add.deck_picker = false;
                     window.focus(&self.focus);
+                    self.close_color_picker(window, cx);
                     cx.notify();
                 } else if self.confirmation.is_some()
                     || self.help_open
@@ -2771,6 +2840,7 @@ impl Root {
                         self.add.deck_id = Some(deck.id);
                     }
                     self.add.deck_picker = false;
+                    self.add.color_picker = None;
                     self.previous_view = self.view;
                 }
                 self.view = next_view(self.view, View::AddCard);
@@ -2815,6 +2885,7 @@ impl Root {
             }
             UiAction::CancelDialog => {
                 self.confirmation = None;
+                self.close_color_picker(window, cx);
                 if self.create_modal {
                     self.cancel_create(window, cx);
                 } else {
@@ -2894,8 +2965,12 @@ impl Render for Root {
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
                 let menu = this.deck_menu_dismissed_press.take().is_some()
                     || this.card_menu_dismissed_press.take().is_some();
-                let picker =
+                let deck =
                     this.add.deck_picker_dismissed_press.take().is_some();
+                let color =
+                    this.add.color_picker_dismissed_press.take().is_some();
+                let _ = this.add.color_picker_dismissed_target.take();
+                let picker = deck || color;
                 if menu || picker {
                     cx.notify();
                 }
@@ -2915,6 +2990,10 @@ impl Render for Root {
                         || this.card_menu_dismissed_press.take().is_some();
                     let picker =
                         this.add.deck_picker_dismissed_press.take().is_some();
+                    let color =
+                        this.add.color_picker_dismissed_press.take().is_some();
+                    let _ = this.add.color_picker_dismissed_target.take();
+                    let picker = picker || color;
                     if menu || picker {
                         cx.notify();
                     }
