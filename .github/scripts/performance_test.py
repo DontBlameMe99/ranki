@@ -93,6 +93,35 @@ class GateTest(unittest.TestCase):
         head = report([("core/fsrs", 100.0, 10.1)])
         self.assertFalse(compare(head, ceiling=ceiling, floor=floor_for(ceiling))["failed"])
 
+    def test_noisy_workloads_ignore_ceiling_noise(self):
+        ceiling = report([
+            ("core/fsrs/schedule", 10.0, 0.0005),
+            ("format/export-apkg", 500.0, 10.0),
+            ("gui/frame/idle", 100.0, 0.14),
+            ("mcp/roundtrip/list-decks", 100.0, 0.45),
+            ("process/cli/decks", 500.0, 1.87),
+        ])
+        head = copy.deepcopy(ceiling)
+        for item in head["results"]:
+            item["median_ms"] *= 3.0
+            item["p95_ms"] *= 3.0
+            item["worst_median_ms"] = item["median_ms"]
+            item["worst_p95_ms"] = item["p95_ms"]
+        result = compare(head, ceiling=ceiling, floor=floor_for(ceiling))
+        self.assertFalse(result["failed"])
+        self.assertTrue(all(row["status"] == "warn" for row in result["rows"]))
+
+    def test_noisy_workloads_still_fail_over_budget(self):
+        ceiling = report([("core/fsrs/schedule", 10.0, 0.0005)])
+        head = copy.deepcopy(ceiling)
+        head["results"][0]["median_ms"] = 11.0
+        head["results"][0]["p95_ms"] = 11.1
+        head["results"][0]["worst_median_ms"] = 11.0
+        head["results"][0]["worst_p95_ms"] = 11.1
+        result = compare(head, ceiling=ceiling, floor=floor_for(ceiling))
+        self.assertTrue(result["failed"])
+        self.assertTrue(any(item["kind"] == "budget" for item in result["rows"][0]["findings"]))
+
     def test_raised_budget_fails(self):
         ceiling = report([("storage/search", 100.0, 10.0)])
         head = report([("storage/search", 200.0, 9.0)])
@@ -137,7 +166,7 @@ class GateTest(unittest.TestCase):
         self.assertTrue(any(item["kind"] == "sampling" for item in result["rows"][0]["findings"]))
 
     def test_ceiling_directory_uses_recorded_commit(self):
-        ceiling = report([("gui/frame/idle", 100.0, 10.0)])
+        ceiling = report([("storage/search/common", 100.0, 10.0)])
         floor = floor_for(ceiling)
         head = copy.deepcopy(ceiling)
         for key in ("median_ms", "worst_median_ms", "p95_ms", "worst_p95_ms"):
@@ -180,8 +209,8 @@ class GateTest(unittest.TestCase):
         )
 
     def test_no_ceiling_uses_base_as_reference(self):
-        base = report([("process/cli/decks", 100.0, 10.0)])
-        head = report([("process/cli/decks", 100.0, 11.0)])
+        base = report([("process/cli/search", 100.0, 10.0)])
+        head = report([("process/cli/search", 100.0, 11.0)])
         result = compare(head, base=base)
         self.assertTrue(result["failed"])
         self.assertIn("no ceiling", markdown(result))
