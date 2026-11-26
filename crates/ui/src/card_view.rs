@@ -9,11 +9,11 @@ use std::{
 
 use futures::FutureExt;
 use gpui::{
-    AnyElement, App, AppContext, Asset, AssetLogger, Div, Entity,
+    AnyElement, App, AppContext, Asset, AssetLogger, Div, Entity, FontStyle,
     ImageAssetLoader, ImageCache, ImageCacheError, ImageCacheItem,
     InteractiveElement, IntoElement, ParentElement, PathBuilder, RenderImage,
-    Resource, Rgba, SharedString, Styled, StyledImage, Window, canvas, div,
-    hash, img, point, px, relative,
+    Resource, Rgba, SharedString, Styled, StyledImage, StyledText, Window,
+    canvas, div, hash, img, point, px, relative,
 };
 use ranki_model::{Note, NoteModel, image_occlusion::ShapeKind};
 
@@ -24,8 +24,9 @@ mod markup;
 #[cfg(test)]
 pub use markup::cloze_text;
 pub use markup::{
-    ClozeSegment, MaskOverlay, MediaKind, MediaRef, answer_only_media,
-    cloze_segments, media_refs, occlusion_overlays, strip_tags,
+    ClozeSegment, MaskOverlay, MathKind, MediaKind, MediaRef,
+    answer_only_media, cloze_segments, math_segments, media_refs,
+    occlusion_overlays, strip_tags,
 };
 use markup::{is_empty_html, normalize_newlines};
 
@@ -389,14 +390,61 @@ pub fn rendered_text(card: &RenderedCard, color: Rgba, size_px: f32) -> Div {
         .gap(px(SPACE_GROUP))
         .text_size(px(size_px))
         .text_color(color);
-    for line in card.text.lines() {
+    for line in display_lines(&card.text) {
+        let mut content = String::new();
+        let mut highlights = Vec::new();
+        for run in line {
+            let start = content.len();
+            content.push_str(&run.text);
+            if run.math {
+                highlights
+                    .push((start..content.len(), FontStyle::Italic.into()));
+            }
+        }
         block = block.child(
             div()
-                .font_family(crate::theme::font_for_text(line))
-                .child(line.to_owned()),
+                .font_family(crate::theme::font_for_text(&content))
+                .child(StyledText::new(content).with_highlights(highlights)),
         );
     }
     block
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DisplayRun {
+    text: String,
+    math: bool,
+}
+
+/// Groups translated text into lines, keeping math ranges for italics.
+fn display_lines(text: &str) -> Vec<Vec<DisplayRun>> {
+    let mut lines: Vec<Vec<DisplayRun>> = vec![Vec::new()];
+    for segment in math_segments(text) {
+        let math = segment.kind != MathKind::Text;
+        for (index, part) in segment.text.split('\n').enumerate() {
+            if index > 0 {
+                lines.push(Vec::new());
+            }
+            if part.is_empty() {
+                continue;
+            }
+            if let Some(line) = lines.last_mut()
+                && line.last().is_some_and(|run| run.math == math)
+                && let Some(run) = line.last_mut()
+            {
+                run.text.push_str(part);
+            } else if let Some(line) = lines.last_mut() {
+                line.push(DisplayRun {
+                    text: part.to_owned(),
+                    math,
+                });
+            }
+        }
+    }
+    while lines.last().is_some_and(Vec::is_empty) {
+        lines.pop();
+    }
+    lines
 }
 
 /// GPUI overlays for parsed image-occlusion masks.
@@ -758,8 +806,10 @@ pub fn preview_rendered(
 /// Picks the last non-empty line of a rendered card for a compact preview.
 #[must_use]
 pub fn preview_text(rendered: &RenderedCard) -> String {
-    rendered
-        .text
+    math_segments(&rendered.text)
+        .into_iter()
+        .map(|segment| segment.text)
+        .collect::<String>()
         .lines()
         .rev()
         .find(|line| !line.trim().is_empty())
@@ -1169,5 +1219,30 @@ mod tests {
         );
         let _ = super::rendered_text(&card, crate::theme::MOCHA.text, 84.0);
         let _ = crate::theme::MOCHA;
+    }
+
+    #[test]
+    fn math_runs_stay_inline_with_surrounding_text() {
+        let lines = super::display_lines("Find \\(x^2\\) today");
+        assert_eq!(lines.len(), 1);
+        let runs = lines.first().map_or(&[][..], |line| line.as_slice());
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].text, "Find ");
+        assert!(!runs[0].math);
+        assert_eq!(runs[1].text, "x²");
+        assert!(runs[1].math);
+        assert_eq!(runs[2].text, " today");
+        assert!(!runs[2].math);
+    }
+
+    #[test]
+    fn compact_preview_hides_math_delimiters() {
+        let model = model(&["Front"], "{{Front}}", "{{Front}}");
+        let rendered = render_card(
+            &model,
+            &note(&["Area \\(\\pi r^2\\)"]),
+            CardRequest::question(0),
+        );
+        assert_eq!(super::preview_text(&rendered), "Area πr²");
     }
 }
