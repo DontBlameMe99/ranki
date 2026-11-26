@@ -313,6 +313,7 @@ impl Root {
             .flex_1()
             .min_w(px(0.))
             .id("browse-table")
+            .debug_selector(|| "browse-table".to_owned())
             .flex()
             .flex_col()
             .rounded(px(20.))
@@ -422,7 +423,9 @@ impl Root {
                 .child(table)
                 .child(self.render_browse_detail(selected, style)),
         );
-        gpui::image_cache(self.images.clone()).child(content)
+        gpui::image_cache(self.images.clone())
+            .size_full()
+            .child(content)
     }
     fn render_browse_empty(
         &self,
@@ -485,6 +488,7 @@ impl Root {
         let mut detail = div()
             .w(px(BROWSE_PREVIEW_WIDTH))
             .id("browse-detail")
+            .debug_selector(|| "browse-detail".to_owned())
             .flex()
             .flex_col()
             .gap(px(SPACE_BLOCK))

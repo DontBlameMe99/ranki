@@ -3727,6 +3727,108 @@ mod tests {
         }
     }
 
+    fn browser_test_row(front: String) -> crate::browser_view::BrowserRow {
+        let card = Card {
+            id: 1,
+            note_id: 1,
+            deck_id: 1,
+            ordinal: 0,
+            modified: 0,
+            usn: 0,
+            card_type: CardType::New,
+            queue: CardQueue::New,
+            due: 0,
+            interval: 0,
+            factor: 0,
+            reps: 0,
+            lapses: 0,
+            left: 0,
+            original_due: 0,
+            original_deck_id: 0,
+            flags: 0,
+            data: String::new(),
+        };
+        let note = Note {
+            id: 1,
+            guid: String::new(),
+            model_id: 0,
+            modified: 0,
+            usn: 0,
+            tags: Vec::new(),
+            fields: vec![front, String::from("Answer!")],
+            sort_field: String::new(),
+            checksum: 0,
+            flags: 0,
+            data: String::new(),
+        };
+        let decks = [Deck {
+            id: 1,
+            name: String::from("Default"),
+            description: String::new(),
+        }];
+        crate::browser_view::browser_row(
+            &card,
+            &note,
+            &decks,
+            &ranki_model::stock_models(),
+        )
+        .expect("browser row")
+    }
+
+    #[gpui::test]
+    fn browse_panels_fill_the_window_for_any_card(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(ModalStore),
+                    options: Options::default(),
+                    save_settings: std::sync::Arc::new(|_| Ok(())),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(1280.), px(800.)));
+
+        let mut panel_heights = |front: &str| {
+            cx.update_entity(&root, |root, cx| {
+                root.view = View::Browse;
+                root.browse.rows = vec![browser_test_row(front.to_owned())];
+                root.browse.selected = Some(1);
+                cx.notify();
+            });
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(px(1280.), px(800.)),
+                |_, _| root.clone(),
+            );
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            (
+                cx.debug_bounds("browse-table").expect("table").size.height,
+                cx.debug_bounds("browse-detail")
+                    .expect("detail")
+                    .size
+                    .height,
+            )
+        };
+
+        let short = panel_heights("Question?");
+        let long = panel_heights(&"word ".repeat(300));
+        assert_eq!(short, long);
+        assert!(
+            short.0 > px(600.),
+            "table should fill the window: {short:?}"
+        );
+        assert!(
+            short.1 > px(600.),
+            "preview should fill the window: {short:?}"
+        );
+    }
+
     #[gpui::test]
     fn create_deck_modal_closes_only_on_outside_click(
         cx: &mut gpui::TestAppContext,
