@@ -5,6 +5,8 @@ use std::env;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -20,6 +22,7 @@ use ranki_model::ReviewDecision;
 use ranki_model::Store;
 use ranki_model::StoreError;
 use ranki_storage::Collection;
+use ranki_storage::ReopeningCollection;
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
 use serde_json::Value;
@@ -1657,4 +1660,72 @@ fn apply_review_reports_stale_and_missing_cards() {
         "{error:?}"
     );
     assert_eq!(store.review_history().expect("history"), [] as [RevLog; 0]);
+}
+
+#[test]
+fn reopening_store_leaves_the_collection_free_for_anki() {
+    let (_directory, path) = fixture();
+    {
+        let connection = Connection::open(&path).expect("wal setup");
+        connection
+            .pragma_update(None, "journal_mode", "wal")
+            .expect("wal mode");
+    }
+
+    let anki_open = || -> rusqlite::Result<()> {
+        let connection = Connection::open(&path)?;
+        connection.busy_timeout(Duration::ZERO)?;
+        connection.pragma_update(None, "locking_mode", "exclusive")?;
+        connection.pragma_update(None, "journal_mode", "wal")?;
+        Ok(())
+    };
+
+    let held = Collection::open(&path).expect("held collection");
+    let _ = held.decks().expect("held decks");
+    assert!(
+        anki_open().is_err(),
+        "a held WAL connection must block Anki's exclusive open"
+    );
+    drop(held);
+
+    let mut store = ReopeningCollection::new(&path);
+    let _ = store.decks().expect("reopening decks");
+    anki_open().expect("Anki opens while the store is idle");
+
+    let before = store.collection_modified().expect("before write");
+    let deck = store.create_deck("After Anki").expect("create deck");
+    assert_eq!(deck.name, "After Anki");
+    assert!(store.collection_modified().expect("after write") >= before);
+}
+
+#[test]
+fn reopening_store_sees_external_wal_commits() {
+    let (_directory, path) = fixture();
+    let anki = Connection::open(&path).expect("external connection");
+    anki.pragma_update(None, "journal_mode", "wal")
+        .expect("wal mode");
+
+    let store = ReopeningCollection::new(&path);
+    let before = store.collection_modified().expect("before commit");
+    let changed = before.saturating_add(10);
+    anki.execute("UPDATE col SET mod = ?1 WHERE id = 1", [changed])
+        .expect("external commit");
+
+    assert_eq!(store.collection_modified().expect("after commit"), changed);
+}
+
+#[test]
+fn polling_fails_fast_while_anki_holds_the_collection() {
+    let (_directory, path) = fixture();
+    let anki = Connection::open(&path).expect("external connection");
+    anki.busy_timeout(Duration::ZERO).expect("busy timeout");
+    anki.pragma_update(None, "locking_mode", "exclusive")
+        .expect("exclusive mode");
+    anki.pragma_update(None, "journal_mode", "wal")
+        .expect("wal mode");
+
+    let store = ReopeningCollection::new(&path);
+    let started = Instant::now();
+    assert!(store.collection_modified().is_err());
+    assert!(started.elapsed() < Duration::from_secs(1));
 }
