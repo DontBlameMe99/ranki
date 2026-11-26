@@ -385,7 +385,7 @@ impl ReferenceMatcher {
         })
     }
 }
-fn percent_encode(value: &str) -> String {
+pub fn percent_encode(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.as_bytes() {
         let byte = *byte;

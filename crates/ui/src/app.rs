@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     env,
+    path::Path,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -1761,6 +1762,89 @@ impl Root {
         }
     }
 
+    fn export_file_name(deck_name: &str) -> String {
+        let safe: String = deck_name
+            .trim()
+            .replace("::", " - ")
+            .chars()
+            .map(|character| {
+                if character.is_alphanumeric()
+                    || matches!(character, ' ' | '-' | '_' | '.')
+                {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let stem = safe.trim_matches(|character| {
+            matches!(character, '.' | ' ' | '-' | '_')
+        });
+        if stem.is_empty() {
+            "deck.apkg".to_owned()
+        } else {
+            format!("{stem}.apkg")
+        }
+    }
+
+    /// Exports a deck and its subdecks to a path chosen in a save dialog.
+    pub(crate) fn export_deck(&mut self, deck: &Deck, cx: &mut Context<Self>) {
+        let collection = self.options.collection.clone();
+        let media_dir = self.options.media_dir.clone();
+        let deck_id = deck.id;
+        let deck_name = deck.name.clone();
+        let suggested = Self::export_file_name(&deck.name);
+        let directory = collection
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let receiver = cx.prompt_for_new_path(directory, Some(&suggested));
+        cx.spawn(async move |this, cx| {
+            let chosen = match receiver.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) => return,
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |root, cx| {
+                        root.show_toast(
+                            ToastKind::Error,
+                            format!("Could not choose export path: {error}"),
+                            cx,
+                        );
+                    });
+                    return;
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |root, cx| {
+                        root.show_toast(
+                            ToastKind::Error,
+                            format!("Could not choose export path: {error}"),
+                            cx,
+                        );
+                    });
+                    return;
+                }
+            };
+            let result = ranki_format::export_deck_apkg(
+                &collection,
+                &media_dir,
+                &chosen,
+                deck_id,
+            );
+            let _ = this.update(cx, |root, cx| match result {
+                Ok(()) => root.show_toast(
+                    ToastKind::Success,
+                    format!("Exported {deck_name} to {}", chosen.display()),
+                    cx,
+                ),
+                Err(error) => root.show_toast(
+                    ToastKind::Error,
+                    format!("Could not export {deck_name}: {error}"),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
     /// Copies a chosen image into the media directory for the occlusion editor.
     pub(crate) fn upload_occlusion_image(&mut self, cx: &mut Context<Self>) {
         let media_dir = self.options.media_dir.clone();
