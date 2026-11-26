@@ -7,8 +7,9 @@ use gpui::{
 };
 
 use crate::theme::{
-    Palette, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED, Style,
-    accent_hover, accent_press, alpha, blend, keycap_ink,
+    BUTTON_HEIGHT, BUTTON_PADDING_X, BUTTON_RADIUS, BUTTON_TEXT_SIZE, Palette,
+    SPACE_GROUP, SPACE_INLINE, SPACE_RELATED, Style, accent_hover,
+    accent_press, alpha, blend, keycap_ink,
 };
 
 pub type ClickHandler =
@@ -158,11 +159,11 @@ pub fn secondary_button(
             .items_center()
             .justify_center()
             .gap(px(SPACE_GROUP))
-            .h(px(44.))
-            .px(px(SPACE_BLOCK))
-            .rounded(px(12.))
+            .h(px(BUTTON_HEIGHT))
+            .px(px(BUTTON_PADDING_X))
+            .rounded(px(BUTTON_RADIUS))
             .text_color(colors.text)
-            .text_size(px(14.))
+            .text_size(px(BUTTON_TEXT_SIZE))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .cursor_pointer(),
     )
@@ -186,12 +187,12 @@ pub fn small_button(
                 .flex()
                 .items_center()
                 .justify_center()
-                .h(px(30.))
-                .px(px(SPACE_RELATED))
-                .rounded(px(9.))
+                .h(px(BUTTON_HEIGHT))
+                .px(px(BUTTON_PADDING_X))
+                .rounded(px(BUTTON_RADIUS))
                 .bg(style.colors.mauve)
                 .text_color(style.ink())
-                .text_size(px(13.))
+                .text_size(px(BUTTON_TEXT_SIZE))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .cursor_pointer(),
         )

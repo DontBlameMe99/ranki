@@ -473,6 +473,13 @@ pub const SPACE_BLOCK: f32 = 16.0;
 pub const SPACE_SECTION: f32 = 24.0;
 pub const SPACE_GUTTER: f32 = 32.0;
 
+/// Shared geometry for action buttons. Height, radius, and padding stay on the
+/// four-pixel grid; only color and label distinguish primary from secondary.
+pub const BUTTON_HEIGHT: f32 = 44.0;
+pub const BUTTON_RADIUS: f32 = 12.0;
+pub const BUTTON_PADDING_X: f32 = SPACE_BLOCK;
+pub const BUTTON_TEXT_SIZE: f32 = 14.0;
+
 pub const NAV_WIDTH: f32 = 232.0;
 pub const TOPBAR_HEIGHT: f32 = 72.0;
 pub const FOOTER_HEIGHT: f32 = 64.0;
@@ -531,11 +538,12 @@ mod tests {
     use gpui::rgb;
 
     use super::{
-        ADD_GAP, LATTE, MOCHA, MOTION_PROGRESS_MS, MOTION_QUICK_MS, PAGE_X,
-        PAGE_Y, PROGRESS_HEIGHT, PROGRESS_WIDTH, RATING_GAP, SPACE_BLOCK,
-        SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE, SPACE_RELATED, SPACE_SECTION,
-        STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS, STAGE_WIDTH, Theme,
-        accent_hover, accent_press, alpha, blend, font_candidates,
+        ADD_GAP, BUTTON_HEIGHT, BUTTON_PADDING_X, BUTTON_RADIUS,
+        BUTTON_TEXT_SIZE, LATTE, MOCHA, MOTION_PROGRESS_MS, MOTION_QUICK_MS,
+        PAGE_X, PAGE_Y, PROGRESS_HEIGHT, PROGRESS_WIDTH, RATING_GAP,
+        SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE, SPACE_RELATED,
+        SPACE_SECTION, STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS, STAGE_WIDTH,
+        Theme, accent_hover, accent_press, alpha, blend, font_candidates,
         gtk_animations_disabled, interval_label, kde_animations_disabled,
         keycap_ink, palette, parse_flag_bool, placeholder_color, rating_fill,
         rating_label, reduced_motion, resolve_theme, xdg_config_dir,
@@ -630,6 +638,17 @@ mod tests {
         );
         for spacing in [PAGE_X, PAGE_Y, STAGE_PADDING, RATING_GAP, ADD_GAP] {
             assert!(steps.contains(&spacing), "{spacing} is off the scale");
+        }
+    }
+
+    #[test]
+    fn button_geometry_is_shared_and_on_the_four_pixel_grid() {
+        assert_eq!(BUTTON_HEIGHT, 44.0);
+        assert_eq!(BUTTON_RADIUS, 12.0);
+        assert_eq!(BUTTON_PADDING_X, SPACE_BLOCK);
+        assert_eq!(BUTTON_TEXT_SIZE, 14.0);
+        for value in [BUTTON_HEIGHT, BUTTON_RADIUS, BUTTON_PADDING_X] {
+            assert_eq!(value % 4.0, 0.0);
         }
     }
 

@@ -12,6 +12,7 @@ use crate::{
         ClickHandler, Interaction, brand_mark, icon, keycap, secondary_button,
     },
     theme::{
+        BUTTON_HEIGHT, BUTTON_PADDING_X, BUTTON_RADIUS, BUTTON_TEXT_SIZE,
         NAV_WIDTH, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED,
         SPACE_SECTION, Style, alpha,
     },
@@ -503,7 +504,7 @@ impl Root {
                                 div()
                                     .flex()
                                     .justify_end()
-                                    .gap(px(10.))
+                                    .gap(px(SPACE_GROUP))
                                     .child(secondary_button(
                                         "Cancel",
                                         colors,
@@ -671,12 +672,13 @@ fn primary(
             div()
                 .id(id)
                 .debug_selector(move || id.to_owned())
-                .h(px(40.))
-                .px(px(SPACE_BLOCK))
-                .rounded(px(12.))
+                .h(px(BUTTON_HEIGHT))
+                .px(px(BUTTON_PADDING_X))
+                .rounded(px(BUTTON_RADIUS))
                 .bg(style.colors.mauve)
+                .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(style.ink())
-                .text_size(px(14.))
+                .text_size(px(BUTTON_TEXT_SIZE))
                 .flex()
                 .items_center()
                 .cursor_pointer(),
