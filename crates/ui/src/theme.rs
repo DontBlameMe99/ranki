@@ -557,6 +557,19 @@ pub fn cjk_font_family() -> &'static str {
     })
 }
 
+/// Monospace family for code blocks and inline code.
+#[must_use]
+pub fn mono_font_family() -> &'static str {
+    static MONO_FONT: std::sync::OnceLock<&'static str> =
+        std::sync::OnceLock::new();
+    MONO_FONT.get_or_init(|| {
+        ["JetBrains Mono", "DejaVu Sans Mono", "Liberation Mono"]
+            .into_iter()
+            .find(|family| family_installed(family))
+            .unwrap_or_else(ui_font_family)
+    })
+}
+
 /// True when the text needs the CJK face. Unifont is the wrong fallback.
 #[must_use]
 pub fn contains_cjk(text: &str) -> bool {
