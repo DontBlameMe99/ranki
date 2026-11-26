@@ -20,6 +20,7 @@ use ranki_model::{Note, NoteModel, image_occlusion::ShapeKind};
 use crate::theme::{Palette, SPACE_GROUP, alpha};
 
 mod markup;
+mod math;
 
 #[cfg(test)]
 pub use markup::cloze_text;
@@ -57,7 +58,9 @@ pub struct TextRun {
     pub text: String,
     pub foreground: Option<Rgba>,
     pub background: Option<Rgba>,
-    /// Math expression already translated to display glyphs.
+    /// Math source and kind when this run is a math expression.
+    pub source: String,
+    pub kind: MathKind,
     pub math: bool,
 }
 
@@ -415,6 +418,7 @@ fn cloze_runs(styled: &[TextRun], spans: &[ClozeSpan]) -> Vec<TextRun> {
                 foreground: run.foreground,
                 background: run.background,
                 math: false,
+                ..Default::default()
             });
         }
         cursor = cursor.max(span.end);
@@ -471,6 +475,7 @@ impl<'a> RunMap<'a> {
                     foreground: run.foreground,
                     background: run.background,
                     math: false,
+                    ..Default::default()
                 });
             }
         }
@@ -501,6 +506,7 @@ impl<'a> RunMap<'a> {
                     foreground: run.foreground,
                     background: run.background,
                     math: false,
+                    ..Default::default()
                 });
             }
         }
@@ -526,7 +532,7 @@ fn normalize_runs(runs: Vec<TextRun>) -> Vec<TextRun> {
     output
 }
 
-/// Translates `MathJax` delimiters into display glyphs and keeps italic ranges.
+/// Splits math delimiters into runs that keep the raw TeX for typesetting.
 fn apply_math(runs: Vec<TextRun>) -> Vec<TextRun> {
     let mut output: Vec<TextRun> = Vec::new();
     for run in runs {
@@ -534,6 +540,8 @@ fn apply_math(runs: Vec<TextRun>) -> Vec<TextRun> {
             let math = segment.kind != MathKind::Text;
             if let Some(last) = output.last_mut()
                 && last.math == math
+                && last.source == segment.source
+                && last.kind == segment.kind
                 && last.foreground == run.foreground
                 && last.background == run.background
             {
@@ -543,6 +551,8 @@ fn apply_math(runs: Vec<TextRun>) -> Vec<TextRun> {
                     text: segment.text,
                     foreground: run.foreground,
                     background: run.background,
+                    source: segment.source,
+                    kind: segment.kind,
                     math,
                 });
             }
@@ -566,6 +576,8 @@ fn split_lines(runs: &[TextRun]) -> Vec<Vec<TextRun>> {
                     text: line.to_owned(),
                     foreground: run.foreground,
                     background: run.background,
+                    source: run.source.clone(),
+                    kind: run.kind,
                     math: run.math,
                 });
             }
@@ -585,6 +597,7 @@ fn text_lines(card: &RenderedCard) -> Vec<Vec<TextRun>> {
                     foreground: None,
                     background: None,
                     math: false,
+                    ..Default::default()
                 }]
             })
             .collect();
@@ -600,6 +613,7 @@ pub fn rendered_line(runs: &[TextRun], color: Rgba, size_px: f32) -> Div {
         .flex()
         .flex_row()
         .flex_wrap()
+        .items_center()
         .justify_center()
         .text_size(px(size_px))
         .font_family(crate::theme::font_for_text(&plain));
@@ -609,7 +623,14 @@ pub fn rendered_line(runs: &[TextRun], color: Rgba, size_px: f32) -> Div {
             part = part.bg(background).px(px(2.)).rounded(px(4.));
         }
         let text = run.text.clone();
-        let content = if run.math {
+        let content = if run.math && !run.source.is_empty() {
+            math::math_element(
+                &run.source,
+                run.kind,
+                run.foreground.unwrap_or(color),
+                size_px,
+            )
+        } else if run.math {
             StyledText::new(text.clone())
                 .with_highlights([(0..text.len(), FontStyle::Italic.into())])
                 .into_any_element()
@@ -1047,7 +1068,7 @@ pub fn preview_card(
 mod tests {
     use super::markup::{ClozeKind, cloze_segments, strip_tags, styled_text};
     use super::{
-        CardRequest, MediaKind, MediaRef, Side, TemplateNode,
+        CardRequest, MathKind, MediaKind, MediaRef, Side, TemplateNode,
         answer_only_media, cloze_text, media_refs, occlusion_overlays,
         parse_template, preview_card, render_card,
     };
@@ -1444,11 +1465,24 @@ mod tests {
         }]);
         assert_eq!(runs.len(), 3);
         assert_eq!(runs[0].text, "Find ");
-        assert!(!runs[0].math);
+        assert_eq!(runs[0].kind, MathKind::Text);
         assert_eq!(runs[1].text, "x²");
-        assert!(runs[1].math);
+        assert_eq!(runs[1].source, "x^2");
+        assert_eq!(runs[1].kind, MathKind::Inline);
         assert_eq!(runs[2].text, " today");
-        assert!(!runs[2].math);
+        assert_eq!(runs[2].kind, MathKind::Text);
+    }
+
+    #[test]
+    fn empty_math_does_not_absorb_following_text() {
+        let runs = super::apply_math(vec![super::TextRun {
+            text: String::from("\\(\\) then"),
+            ..Default::default()
+        }]);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].kind, MathKind::Inline);
+        assert_eq!(runs[1].text, " then");
+        assert_eq!(runs[1].kind, MathKind::Text);
     }
 
     #[test]

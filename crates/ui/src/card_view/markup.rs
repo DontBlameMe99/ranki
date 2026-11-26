@@ -56,11 +56,13 @@ pub enum ClozeKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MathSegment {
     pub text: String,
+    pub source: String,
     pub kind: MathKind,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MathKind {
+    #[default]
     Text,
     Inline,
     Block,
@@ -109,6 +111,7 @@ pub fn math_segments(input: &str) -> Vec<MathSegment> {
         let expression = body.get(..end).unwrap_or("");
         segments.push(MathSegment {
             text: display_math(expression),
+            source: expression.to_owned(),
             kind,
         });
         cursor = body_start.saturating_add(end).saturating_add(close.len());
@@ -121,6 +124,7 @@ fn push_plain_segment(segments: &mut Vec<MathSegment>, text: &str) {
     if !text.is_empty() {
         segments.push(MathSegment {
             text: text.to_owned(),
+            source: String::new(),
             kind: MathKind::Text,
         });
     }
@@ -584,6 +588,7 @@ fn push_text(runs: &mut Vec<TextRun>, text: &str, style: Style) {
             foreground: style.foreground,
             background: style.background,
             math: false,
+            ..Default::default()
         });
     }
 }
@@ -1112,5 +1117,14 @@ mod math_tests {
     #[test]
     fn strip_tags_removes_html_formatting_inside_math() {
         assert_eq!(strip_tags("\\(x<b>+y</b>\\)"), "\\(x+y\\)");
+    }
+
+    #[test]
+    fn math_source_is_kept_for_typesetting() {
+        let segments = math_segments("\\(\\mathbb{x} \\subseteq\\)");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].source, "\\mathbb{x} \\subseteq");
+        assert_eq!(segments[0].kind, MathKind::Inline);
+        assert_eq!(math_segments("plain text")[0].source, "");
     }
 }
