@@ -14,6 +14,10 @@ pub const DEFAULT_ENDPOINT: &str = "https://sync.ankiweb.net/";
 /// Client identifier sent in the `anki-sync` header.
 pub const DEFAULT_CLIENT_VERSION: &str = "ranki,0.1.0,1,linux";
 
+/// Client version reported in `sync/meta`. `AnkiWeb` rejects a `cv` value that
+/// does not follow Anki's `anki,<version>,<platform>` shape.
+pub const META_CLIENT_VERSION: &str = "anki,ranki-0.1.0,linux";
+
 /// Header that carries the uncompressed response length.
 pub const ORIGINAL_SIZE_HEADER: &str = "anki-original-size";
 

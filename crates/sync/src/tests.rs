@@ -75,6 +75,19 @@ fn make_collection(
     Ok(())
 }
 
+fn add_unicase_index(path: &Path) -> TestResult {
+    let connection = Connection::open(path)?;
+    connection.create_collation("unicase", |left, right| {
+        left.to_lowercase().cmp(&right.to_lowercase())
+    })?;
+    connection.execute_batch(
+        "CREATE TABLE decks (name TEXT COLLATE unicase); \
+         CREATE INDEX ix_decks_name ON decks (name);",
+    )?;
+    connection.close().map_err(|(_, error)| error)?;
+    Ok(())
+}
+
 fn write_state(path: &Path, state: &SyncState) -> TestResult {
     let parent = path.parent().unwrap_or_else(|| Path::new(""));
     if !parent.as_os_str().is_empty() {
@@ -308,6 +321,152 @@ fn sync_refuses_conflict_without_writing() -> TestResult {
         .ok_or_else(|| SyncError::State("missing meta request".to_owned()))?;
     assert_eq!(request.method, SyncMethod::Meta);
     assert_eq!(fs::read(&collection)?, before);
+    Ok(())
+}
+
+#[test]
+fn meta_request_uses_an_supported_client_version() -> TestResult {
+    let directory = TempDir::new()?;
+    let collection = directory.path().join("collection.anki2");
+    let media = directory.path().join("media");
+    let state_path = directory.path().join("sync.json");
+    make_collection(&collection, (100, 100, 1))?;
+    write_state(&state_path, &seeded_state(&fixture_key(&directory)))?;
+    let transport = MockTransport::new().with_response(
+        SyncMethod::Meta,
+        meta_response((100, 100, false, now_secs()?))?,
+    );
+    let mut client =
+        SyncClient::new(transport, &collection, &media, &state_path)?;
+
+    client.status()?;
+
+    let requests = client.transport().requests();
+    let request = requests
+        .first()
+        .ok_or_else(|| SyncError::State("missing meta request".to_owned()))?;
+    let body = decode_request(request)?;
+    let meta: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(meta["v"], wire::SYNC_VERSION);
+    assert_eq!(meta["cv"], crate::META_CLIENT_VERSION);
+    let version = meta["cv"]
+        .as_str()
+        .ok_or_else(|| SyncError::State("missing client version".to_owned()))?;
+    assert!(version.starts_with("anki,"));
+    assert!(version.split(',').count() >= 3);
+    Ok(())
+}
+
+#[test]
+fn local_cards_with_an_empty_remote_need_a_choice() -> TestResult {
+    let directory = TempDir::new()?;
+    let collection = directory.path().join("collection.anki2");
+    let media = directory.path().join("media");
+    let state_path = directory.path().join("sync.json");
+    make_collection(&collection, (100, 100, 2))?;
+    let before = fs::read(&collection)?;
+    write_state(&state_path, &seeded_state(&fixture_key(&directory)))?;
+    let transport = MockTransport::new().with_response(
+        SyncMethod::Meta,
+        meta_response((100, 100, true, now_secs()?))?,
+    );
+    let mut client =
+        SyncClient::new(transport, &collection, &media, &state_path)?;
+
+    let outcome = client.sync(None)?;
+
+    assert!(matches!(outcome, SyncOutcome::Conflict { .. }));
+    assert_eq!(client.transport().requests().len(), 1);
+    assert_eq!(fs::read(&collection)?, before);
+    assert_eq!(client.state().last_mod, None);
+    Ok(())
+}
+
+#[test]
+fn local_changes_need_a_choice_even_when_remote_is_unchanged() -> TestResult {
+    let directory = TempDir::new()?;
+    let collection = directory.path().join("collection.anki2");
+    let media = directory.path().join("media");
+    let state_path = directory.path().join("sync.json");
+    make_collection(&collection, (200, 100, 1))?;
+    let before = fs::read(&collection)?;
+    write_state(
+        &state_path,
+        &SyncState {
+            host_key: fixture_key(&directory),
+            last_mod: Some(100),
+            last_scm: Some(100),
+            ..SyncState::default()
+        },
+    )?;
+    let transport = MockTransport::new().with_response(
+        SyncMethod::Meta,
+        meta_response((100, 100, false, now_secs()?))?,
+    );
+    let mut client =
+        SyncClient::new(transport, &collection, &media, &state_path)?;
+
+    let outcome = client.sync(None)?;
+
+    assert!(matches!(outcome, SyncOutcome::Conflict { .. }));
+    assert_eq!(client.transport().requests().len(), 1);
+    assert_eq!(fs::read(&collection)?, before);
+    Ok(())
+}
+
+#[test]
+fn two_empty_collections_need_no_choice() -> TestResult {
+    let directory = TempDir::new()?;
+    let collection = directory.path().join("collection.anki2");
+    let media = directory.path().join("media");
+    let state_path = directory.path().join("sync.json");
+    make_collection(&collection, (100, 100, 0))?;
+    write_state(&state_path, &seeded_state(&fixture_key(&directory)))?;
+    let transport = MockTransport::new()
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((200, 200, true, now_secs()?))?,
+        )
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((200, 200, true, now_secs()?))?,
+        );
+    let mut client =
+        SyncClient::new(transport, &collection, &media, &state_path)?;
+
+    assert_eq!(client.sync(None)?, SyncOutcome::NoChanges);
+    assert_eq!(client.sync(None)?, SyncOutcome::NoChanges);
+    assert_eq!(client.transport().requests().len(), 2);
+    assert_eq!(client.state().last_mod, None);
+    assert_eq!(client.state().last_scm, None);
+    Ok(())
+}
+
+#[test]
+fn local_info_reads_schema18_collations() -> TestResult {
+    let directory = TempDir::new()?;
+    let collection = directory.path().join("collection.anki2");
+    let media = directory.path().join("media");
+    let state_path = directory.path().join("sync.json");
+    make_collection(&collection, (100, 100, 1))?;
+    add_unicase_index(&collection)?;
+    write_state(
+        &state_path,
+        &SyncState {
+            host_key: fixture_key(&directory),
+            last_mod: Some(100),
+            last_scm: Some(100),
+            ..SyncState::default()
+        },
+    )?;
+    let transport = MockTransport::new().with_response(
+        SyncMethod::Meta,
+        meta_response((100, 100, false, now_secs()?))?,
+    );
+    let mut client =
+        SyncClient::new(transport, &collection, &media, &state_path)?;
+
+    assert_eq!(client.sync(None)?, SyncOutcome::NoChanges);
     Ok(())
 }
 

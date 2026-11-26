@@ -644,30 +644,26 @@ mod tests {
     }
 
     #[test]
-    fn mock_upload_sends_the_collection() {
+    fn mock_upload_waits_for_a_choice_when_remote_is_empty() {
         let directory = tempfile::tempdir().unwrap();
         collection_with_cards(directory.path());
         let settings = settings(directory.path());
         seed_state(&settings);
-        let mut transport = MockTransport::new()
-            .with_response(SyncMethod::Meta, meta(true))
-            .with_response(
-                SyncMethod::Upload,
-                MockResponse::ok_bytes(b"OK".to_vec()).unwrap(),
-            );
+        let mut transport =
+            MockTransport::new().with_response(SyncMethod::Meta, meta(true));
         let outcome = sync_once(
             TransportRef(&mut transport),
             &settings,
             Some(&host_key_auth()),
         )
         .unwrap();
-        assert_eq!(outcome_text(&outcome), "uploaded");
+        assert!(matches!(outcome, ranki_sync::SyncOutcome::Conflict { .. }));
         let methods: Vec<SyncMethod> = transport
             .requests()
             .iter()
             .map(|request| request.method)
             .collect();
-        assert_eq!(methods, [SyncMethod::Meta, SyncMethod::Upload]);
+        assert_eq!(methods, [SyncMethod::Meta]);
     }
 
     #[test]

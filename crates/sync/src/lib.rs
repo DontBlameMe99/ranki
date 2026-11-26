@@ -34,8 +34,8 @@ pub use mock::{MockResponse, MockTransport, RecordedRequest};
 pub use state::{SyncState, state_path};
 pub use transport::{
     DEFAULT_CLIENT_VERSION, DEFAULT_ENDPOINT, HttpTransport,
-    ORIGINAL_SIZE_HEADER, RetryPolicy, SyncMethod, SyncResponse, SyncTransport,
-    TransportConfig,
+    META_CLIENT_VERSION, ORIGINAL_SIZE_HEADER, RetryPolicy, SyncMethod,
+    SyncResponse, SyncTransport, TransportConfig,
 };
 
 #[cfg(test)]

@@ -154,6 +154,7 @@ pub struct SyncUiState {
     pub password: Entity<TextField>,
     pub signed_in: bool,
     pub busy: bool,
+    pub conflict: Option<String>,
 }
 impl Toast {
     /// A toast outlives its text only by the timer that clears it.
@@ -780,6 +781,7 @@ impl Root {
                 password: sync_password,
                 signed_in,
                 busy: false,
+                conflict: None,
             },
             save_settings,
             images: card_view::LruImageCache::new(cx),
@@ -858,6 +860,16 @@ impl Root {
             && let Ok(width) = width.parse::<f32>()
         {
             root.nav_width = theme::nav_width(width);
+        }
+        if env::var("RANKI_UI_DEV_SYNC_CONFLICT")
+            .is_ok_and(|value| value == "1")
+        {
+            root.view = View::Settings;
+            root.sync.signed_in = true;
+            root.options.sync.enabled = true;
+            root.sync.conflict = Some(String::from(
+                "both collections changed since the last sync",
+            ));
         }
         if root.view == View::Decks
             && env::var("RANKI_UI_DEV_CREATE").is_ok_and(|value| value == "1")
@@ -2793,6 +2805,9 @@ impl Root {
                 self.set_sync_enabled(enabled, cx);
             }
             UiAction::SyncSignIn => self.sign_in(cx),
+            UiAction::SyncNow => self.sync_now(cx),
+            UiAction::SyncKeepLocal => self.resolve_sync_conflict(true, cx),
+            UiAction::SyncKeepRemote => self.resolve_sync_conflict(false, cx),
         }
         if self.confirmation.is_some() != had_dialog {
             if self.confirmation.is_some() {
@@ -2983,6 +2998,15 @@ impl Render for Root {
             }))
             .on_action(cx.listener(|this, _: &SyncSignIn, window, cx| {
                 this.dispatch(UiAction::SyncSignIn, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SyncNow, window, cx| {
+                this.dispatch(UiAction::SyncNow, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SyncKeepLocal, window, cx| {
+                this.dispatch(UiAction::SyncKeepLocal, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SyncKeepRemote, window, cx| {
+                this.dispatch(UiAction::SyncKeepRemote, window, cx);
             }))
             .when(view != View::Review, |this| this.child(self.render_nav(cx)))
             .child(div().flex_1().overflow_hidden().child(main))

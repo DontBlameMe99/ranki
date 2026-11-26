@@ -1,7 +1,7 @@
 use crate::error::{Result, SyncError};
 use crate::state::SyncState;
 use crate::transport::{
-    DEFAULT_CLIENT_VERSION, SyncMethod, SyncResponse, SyncTransport,
+    META_CLIENT_VERSION, SyncMethod, SyncResponse, SyncTransport,
     normalize_endpoint,
 };
 use crate::wire::{self, MAX_COLLECTION_BYTES, SYNC_VERSION};
@@ -194,7 +194,7 @@ impl<T: SyncTransport> SyncClient<T> {
         self.require_host_key()?;
         let request = MetaRequest {
             v: SYNC_VERSION,
-            cv: DEFAULT_CLIENT_VERSION,
+            cv: META_CLIENT_VERSION,
         };
         let body = wire::frame_json(&request)?;
         let response = self.send(SyncMethod::Meta, &body)?;
@@ -333,7 +333,7 @@ impl<T: SyncTransport> SyncClient<T> {
         };
         if !schema_matches {
             return Ok(conflict(
-                "schema changed; choose full_upload or full_download",
+                "schema changed; choose whether to keep the local or AnkiWeb collection",
             ));
         }
         let local_changed = local.mod_time != last;
@@ -350,8 +350,9 @@ impl<T: SyncTransport> SyncClient<T> {
             return Ok(SyncOutcome::NoChanges);
         }
         if local_changed {
-            self.full_upload()?;
-            return Ok(SyncOutcome::Uploaded);
+            return Ok(conflict(
+                "local collection changed since the last sync",
+            ));
         }
         if status.mod_time < local.mod_time {
             return Ok(conflict(
@@ -368,16 +369,16 @@ impl<T: SyncTransport> SyncClient<T> {
         local: LocalInfo,
     ) -> Result<SyncOutcome> {
         match (status.empty, local.cards) {
-            (true, 1..) => {
-                self.full_upload()?;
-                Ok(SyncOutcome::Uploaded)
+            (_, 0) if status.empty => {
+                self.record_success()?;
+                Ok(SyncOutcome::NoChanges)
             }
             (false, 0) => {
                 self.full_download()?;
                 Ok(SyncOutcome::Downloaded)
             }
             _ => Ok(conflict(
-                "no last sync stamp; choose full_upload or full_download",
+                "choose whether to keep the local or AnkiWeb collection",
             )),
         }
     }
@@ -463,6 +464,7 @@ impl<T: SyncTransport> SyncClient<T> {
 
     fn prepare_collection(&self) -> Result<(LocalInfo, Vec<u8>)> {
         let mut connection = Connection::open(&self.collection)?;
+        register_collations(&connection)?;
         {
             let transaction = connection.transaction()?;
             prepare_transaction(&transaction)?;
@@ -623,7 +625,15 @@ fn read_local_info(path: &Path) -> Result<LocalInfo> {
     }
     let connection =
         Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    register_collations(&connection)?;
     local_info(&connection)
+}
+
+fn register_collations(connection: &Connection) -> Result<()> {
+    connection.create_collation("unicase", |left, right| {
+        left.to_lowercase().cmp(&right.to_lowercase())
+    })?;
+    Ok(())
 }
 
 fn local_info(connection: &Connection) -> Result<LocalInfo> {
@@ -662,6 +672,7 @@ fn table_exists(connection: &Connection, name: &str) -> Result<bool> {
 fn validate_download(path: &Path) -> Result<LocalInfo> {
     let connection =
         Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    register_collations(&connection)?;
     let check: String =
         connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     if !check.eq_ignore_ascii_case("ok") {
