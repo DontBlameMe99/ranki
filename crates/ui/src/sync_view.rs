@@ -27,18 +27,8 @@ pub fn read_state(collection: &Path) -> Option<SyncState> {
     SyncState::load(&state_path(collection)).ok()
 }
 
-#[expect(
-    clippy::fn_params_excessive_bools,
-    reason = "busy and signed in describe separate states"
-)]
-fn sync_status(busy: bool, signed_in: bool) -> Option<&'static str> {
-    if busy {
-        Some("Syncing with AnkiWeb")
-    } else if signed_in {
-        Some("Signed in")
-    } else {
-        None
-    }
+fn sync_status(busy: bool) -> Option<&'static str> {
+    busy.then_some("Syncing with AnkiWeb")
 }
 
 /// Exchanges the password for a host key, then runs one sync immediately.
@@ -371,11 +361,11 @@ impl Root {
         let colors = self.colors();
         let enabled = self.options.sync.enabled;
         let signed_in = self.sync.signed_in;
-        let status = sync_status(self.sync.busy, signed_in);
+        let status = sync_status(self.sync.busy);
         let note = if !signed_in {
             "Optional. Sign in only if you want to sync with AnkiWeb."
         } else if enabled {
-            "AnkiWeb sync is on. Passwords are used once and never stored."
+            "You are currently using AnkiWeb"
         } else {
             "Sync is off. Sign out and sign in again to resume."
         };
@@ -711,10 +701,9 @@ mod tests {
     }
 
     #[test]
-    fn signed_in_status_shows_no_account() {
-        assert_eq!(sync_status(false, true), Some("Signed in"));
-        assert_eq!(sync_status(true, true), Some("Syncing with AnkiWeb"));
-        assert_eq!(sync_status(false, false), None);
+    fn idle_status_is_hidden() {
+        assert_eq!(sync_status(false), None);
+        assert_eq!(sync_status(true), Some("Syncing with AnkiWeb"));
     }
 
     #[test]
