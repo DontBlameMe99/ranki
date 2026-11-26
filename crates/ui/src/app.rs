@@ -583,6 +583,7 @@ pub struct Root {
     pub(crate) collection_start: i64,
     pub(crate) decks_scroll: SmoothScroll,
     pub(crate) sync: SyncUiState,
+    pub(crate) sync_run: Arc<crate::sync_view::SyncRun>,
     pub(crate) save_settings: SettingsSaver,
     pub(crate) images: Entity<card_view::LruImageCache>,
     pub(crate) font_family: &'static str,
@@ -783,6 +784,7 @@ impl Root {
                 busy: false,
                 conflict: None,
             },
+            sync_run: Arc::new(crate::sync_view::run_sync),
             save_settings,
             images: card_view::LruImageCache::new(cx),
             last_change_check: Instant::now(),
@@ -2143,6 +2145,9 @@ impl Root {
         self.review.last_tick = None;
         self.ensure_current(cx);
         cx.notify();
+        if self.session_complete() {
+            self.sync_after_session(cx);
+        }
     }
 
     /// Fraction of the session that is finished, clamped for both ends of the

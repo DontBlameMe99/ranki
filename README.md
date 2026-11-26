@@ -120,9 +120,9 @@ Run `ranki COMMAND --help` for the full argument list.
 AnkiWeb sync is optional. In the review window, open Settings and sign in with
 your AnkiWeb username and password. Use **Sign out** in the same panel to stop
 syncing. Ranki stores only the resulting host key in `ranki-sync.json` beside
-the collection, with mode `0600`. The password is discarded after login. Sync
-runs at the next launch and the sidebar shows the age of the last successful
-sync.
+the collection, with mode `0600`. The password is discarded after login. Ranki
+syncs after each completed study session, at launch, and at exit. The sidebar
+shows the age of the last successful sync.
 
 Command-line sync accepts a host key or a one-time login without putting a
 password in the process arguments:

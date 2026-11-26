@@ -1089,6 +1089,89 @@ mod tests {
     }
 
     #[test]
+    fn auto_sync_uploads_at_shutdown_after_a_command_changes_the_collection() {
+        let directory = tempfile::tempdir().unwrap();
+        let collection = directory.path().join("collection.anki2");
+        let media = directory.path().join("collection.media");
+        assert!(crate::open_or_create(&collection).is_ok());
+        let state_path = super::sync::state_path(&collection);
+        fs::write(
+            &state_path,
+            serde_json::json!({
+                "version": 1,
+                "endpoint": ranki_sync::DEFAULT_ENDPOINT,
+                "host_key": "stored-hkey",
+                "last_mod": null,
+                "last_scm": null,
+                "last_usn": 0,
+                "last_media_usn": 0,
+                "last_success": null,
+                "failures": 0,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut seed = ranki_sync::SyncClient::new(
+            MockTransport::new().with_response(
+                SyncMethod::Upload,
+                MockResponse::ok_bytes(b"OK".to_vec()).unwrap(),
+            ),
+            &collection,
+            &media,
+            &state_path,
+        )
+        .unwrap();
+        seed.full_upload().unwrap();
+        let state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        let mod_time = state["last_mod"].as_i64().unwrap();
+        let scm = state["last_scm"].as_i64().unwrap();
+        let meta = MockResponse::ok_json(&serde_json::json!({
+            "mod": mod_time,
+            "scm": scm,
+            "usn": 1,
+            "ts": now_secs().unwrap(),
+            "empty": false,
+            "cont": true,
+        }))
+        .unwrap();
+        let mut transport = MockTransport::new()
+            .with_response(SyncMethod::Meta, meta.clone())
+            .with_response(SyncMethod::Meta, meta)
+            .with_response(
+                SyncMethod::Upload,
+                MockResponse::ok_bytes(b"OK".to_vec()).unwrap(),
+            );
+        let mut config = ranki_model::Config::default();
+        config.sync.enabled = true;
+        config.scheduler.auto_optimize = false;
+        let cli = parse(&[
+            "ranki",
+            "--collection",
+            collection.to_str().unwrap(),
+            "add-note",
+            "--model",
+            "Basic",
+            "--deck",
+            "1",
+            "--field",
+            "Question?",
+            "--field",
+            "Answer!",
+        ]);
+        run_with_sync(cli, &mut config, &mut transport).unwrap();
+        let methods: Vec<_> = transport
+            .requests()
+            .iter()
+            .map(|request| request.method)
+            .collect();
+        assert_eq!(
+            methods,
+            vec![SyncMethod::Meta, SyncMethod::Meta, SyncMethod::Upload]
+        );
+    }
+
+    #[test]
     fn sync_disabled_commands_never_use_the_transport() {
         let directory = tempfile::tempdir().unwrap();
         let collection = directory.path().join("collection.anki2");
