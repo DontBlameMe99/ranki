@@ -3,7 +3,8 @@
 //! [`SyncClient`] implements login, metadata checks, full upload, full download,
 //! and a conservative automatic [`SyncClient::sync`]. It refuses one-way
 //! changes when both sides changed or when the local collection may be newer.
-//! Media files are never deleted or rewritten.
+//! A full download adds or replaces remote media files. Local media is never
+//! deleted.
 //!
 //! HTTP lives behind the object-safe [`SyncTransport`] trait. [`HttpTransport`]
 //! uses a blocking client, sends the `anki-sync` header fields `v`, `k`, `c`,
@@ -16,13 +17,14 @@
 //! mode `0600`. Credentials are passed to [`SyncClient::login`] or
 //! [`SyncClient::sync`] and are never written to disk or diagnostics.
 //!
-//! Wire details follow `docs/ankiweb-sync-research.md`. Delta sync, media sync,
-//! and merge behavior are intentionally out of scope. Callers must choose
+//! Wire details follow `docs/ankiweb-sync-research.md`. Delta sync and merge
+//! behavior are intentionally out of scope. Callers must choose
 //! [`SyncClient::full_upload`] or [`SyncClient::full_download`] explicitly when
 //! [`SyncOutcome::Conflict`] is returned.
 
 mod client;
 mod error;
+mod media;
 mod mock;
 mod state;
 mod transport;

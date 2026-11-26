@@ -13,6 +13,8 @@ tempfile = "3.27.0"
 ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
 zstd = "0.13.5"
 rusqlite = { version = "0.43.0", features = ["bundled", "collation"] }
+sha1 = { workspace = true }
+zip = { workspace = true }
 
 [lints]
 workspace = true

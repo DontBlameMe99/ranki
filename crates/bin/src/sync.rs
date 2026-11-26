@@ -116,6 +116,24 @@ impl<T: SyncTransport> SyncTransport for LazyTransport<T> {
         self.transport().download(body)
     }
 
+    fn media_begin(&mut self, body: &[u8]) -> ranki_sync::Result<SyncResponse> {
+        self.transport().media_begin(body)
+    }
+
+    fn media_changes(
+        &mut self,
+        body: &[u8],
+    ) -> ranki_sync::Result<SyncResponse> {
+        self.transport().media_changes(body)
+    }
+
+    fn media_download(
+        &mut self,
+        body: &[u8],
+    ) -> ranki_sync::Result<SyncResponse> {
+        self.transport().media_download(body)
+    }
+
     fn set_endpoint(&mut self, endpoint: &str) -> ranki_sync::Result<()> {
         self.transport().set_endpoint(endpoint)
     }
@@ -234,6 +252,24 @@ impl SyncTransport for TransportRef<'_> {
 
     fn download(&mut self, body: &[u8]) -> ranki_sync::Result<SyncResponse> {
         self.0.download(body)
+    }
+
+    fn media_begin(&mut self, body: &[u8]) -> ranki_sync::Result<SyncResponse> {
+        self.0.media_begin(body)
+    }
+
+    fn media_changes(
+        &mut self,
+        body: &[u8],
+    ) -> ranki_sync::Result<SyncResponse> {
+        self.0.media_changes(body)
+    }
+
+    fn media_download(
+        &mut self,
+        body: &[u8],
+    ) -> ranki_sync::Result<SyncResponse> {
+        self.0.media_download(body)
     }
 
     fn set_endpoint(&mut self, endpoint: &str) -> ranki_sync::Result<()> {
@@ -412,6 +448,24 @@ impl SyncTransport for SharedMock {
         self.0.lock().unwrap().download(body)
     }
 
+    fn media_begin(&mut self, body: &[u8]) -> ranki_sync::Result<SyncResponse> {
+        self.0.lock().unwrap().media_begin(body)
+    }
+
+    fn media_changes(
+        &mut self,
+        body: &[u8],
+    ) -> ranki_sync::Result<SyncResponse> {
+        self.0.lock().unwrap().media_changes(body)
+    }
+
+    fn media_download(
+        &mut self,
+        body: &[u8],
+    ) -> ranki_sync::Result<SyncResponse> {
+        self.0.lock().unwrap().media_download(body)
+    }
+
     fn set_endpoint(&mut self, endpoint: &str) -> ranki_sync::Result<()> {
         self.0.lock().unwrap().set_endpoint(endpoint)
     }
@@ -498,6 +552,14 @@ mod tests {
     fn login() -> MockResponse {
         MockResponse::ok_json(&serde_json::json!({"key": "cached-hkey"}))
             .unwrap()
+    }
+
+    fn media_begin() -> MockResponse {
+        MockResponse::ok_json(&serde_json::json!({
+            "data": { "usn": 0, "sk": "cached-hkey" },
+            "err": ""
+        }))
+        .unwrap()
     }
 
     fn collection_with_cards(path: &Path) {
@@ -680,7 +742,8 @@ mod tests {
             .with_response(
                 SyncMethod::Download,
                 MockResponse::ok_bytes(bytes).unwrap(),
-            );
+            )
+            .with_response(SyncMethod::MediaBegin, media_begin());
         let outcome = sync_once(
             TransportRef(&mut transport),
             &settings,
@@ -694,7 +757,14 @@ mod tests {
             .iter()
             .map(|request| request.method)
             .collect();
-        assert_eq!(methods, [SyncMethod::Meta, SyncMethod::Download]);
+        assert_eq!(
+            methods,
+            [
+                SyncMethod::Meta,
+                SyncMethod::Download,
+                SyncMethod::MediaBegin
+            ]
+        );
     }
 
     #[test]
