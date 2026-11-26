@@ -3609,13 +3609,13 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("n", NextDeck, Some(STUDY_CONTEXT)),
         KeyBinding::new("d", OpenDecks, Some(SETTINGS_CONTEXT)),
         KeyBinding::new("a", OpenAdd, Some(SETTINGS_CONTEXT)),
-        KeyBinding::new("esc", EndSession, Some("ranki")),
+        KeyBinding::new("escape", EndSession, Some("ranki")),
         KeyBinding::new("tab", NextField, Some(FOCUS_CONTEXT)),
         KeyBinding::new("shift-tab", PreviousField, Some(FOCUS_CONTEXT)),
         KeyBinding::new("cmd-enter", SaveNote, Some("ranki")),
         KeyBinding::new("ctrl-enter", SaveNote, Some("ranki")),
         KeyBinding::new("enter", ConfirmDialog, Some("ranki_dialog")),
-        KeyBinding::new("esc", CancelDialog, Some("ranki_dialog")),
+        KeyBinding::new("escape", CancelDialog, Some("ranki_dialog")),
         KeyBinding::new("enter", SubmitDeck, Some("ranki_input")),
         KeyBinding::new("ctrl-enter", SaveNote, Some("ranki_input")),
         KeyBinding::new("cmd-enter", SaveNote, Some("ranki_input")),
@@ -3767,6 +3767,29 @@ mod tests {
             !cx.update(|_, app| root.read(app).create_modal),
             "clicking outside the modal must close it"
         );
+    }
+    #[gpui::test]
+    fn escape_closes_the_create_deck_modal(cx: &mut gpui::TestAppContext) {
+        cx.update(|app| app.bind_keys(super::key_bindings()));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(ModalStore),
+                    options: Options::default(),
+                    save_settings: std::sync::Arc::new(|_| Ok(())),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(super::CreateDeck);
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| root.read(app).create_modal));
+
+        cx.simulate_keystrokes("escape");
+
+        assert!(!cx.update(|_, app| root.read(app).create_modal));
     }
     #[gpui::test]
     fn create_deck_error_lives_by_the_input_until_the_name_changes(
@@ -4155,6 +4178,40 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn escape_closes_the_deck_picker(cx: &mut gpui::TestAppContext) {
+        cx.update(|app| app.bind_keys(super::key_bindings()));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(ModalStore),
+                    options: Options::default(),
+                    save_settings: std::sync::Arc::new(|_| Ok(())),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        cx.update_entity(&root, |root, cx| {
+            root.view = super::View::AddCard;
+            root.add.deck_picker = true;
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+            root.clone()
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("escape");
+
+        let state =
+            cx.read_entity(&root, |root, _| (root.view, root.add.deck_picker));
+        assert_eq!(state.0, super::View::AddCard);
+        assert!(!state.1);
+    }
     #[gpui::test]
     fn deck_picker_closes_when_the_form_scrolls(cx: &mut gpui::TestAppContext) {
         let (root, cx) = cx.add_window_view(|window, cx| {
@@ -5676,6 +5733,62 @@ mod tests {
         assert_eq!(state.0, View::Decks);
         assert_eq!(state.1, Some(1));
         assert!(cx.debug_bounds("deck-actions-menu").is_some());
+    }
+    #[gpui::test]
+    fn escape_closes_a_deck_actions_menu(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("collection.anki2");
+        let mut store =
+            ranki_storage::Collection::create(&path).expect("collection");
+        let _ = store
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![
+                    String::from("Question?"),
+                    String::from("Answer!"),
+                ],
+                tags: Vec::new(),
+            })
+            .expect("note");
+        let options = Options {
+            collection: path,
+            ..Options::default()
+        };
+        let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
+        cx.update(|cx| cx.bind_keys(super::key_bindings()));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            super::Root::new(
+                super::Launch {
+                    store: Box::new(store),
+                    options,
+                    save_settings,
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+            root.clone()
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.update_entity(&root, |root, cx| {
+            root.deck_menu = Some(super::DeckMenu {
+                id: 1,
+                anchor: point(px(100.), px(100.)),
+            });
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+            root.clone()
+        });
+
+        cx.simulate_keystrokes("escape");
+
+        assert!(cx.read_entity(&root, |root, _| root.deck_menu.is_none()));
     }
     #[gpui::test]
     fn clicking_the_rename_field_keeps_the_decks_view(
