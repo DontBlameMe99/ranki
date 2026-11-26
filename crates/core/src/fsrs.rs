@@ -5,9 +5,10 @@ use serde_json::{Map, Value};
 
 use crate::shared::{
     FuzzInput, ReviewContext, ReviewOutcome, StepConfig, as_f32, as_i32,
-    due_from_days, elapsed_days, f32_from_f64, finish, fuzz_interval,
+    due_from_days, elapsed_days_from, f32_from_f64, finish, fuzz_interval,
     is_schedulable, minimum_review_fuzz_interval, positive_factor,
-    preview_interval, step_outcome, unchanged, unchanged_outcome,
+    preview_interval, remaining_steps, step_delay_seconds, step_outcome,
+    unchanged, unchanged_outcome,
 };
 
 /// Anki's default FSRS-6 parameters (21 weights, positive `w20` decay).
@@ -303,21 +304,29 @@ impl FsrsScheduler {
         }
     }
 
+    fn rating_count(rating: Rating) -> usize {
+        usize::from(rating.code())
+            .saturating_sub(1)
+            .clamp(0, 3)
+            .saturating_add(1)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "shared interval computation needs the card, state, elapsed days and count"
+    )]
     fn button_intervals(
         &self,
         ctx: &ReviewContext<'_>,
         current: Option<Memory>,
-    ) -> (i32, Memory) {
-        let elapsed = elapsed_days(ctx.card, ctx.now_secs);
+        elapsed: u32,
+        needed: usize,
+    ) -> ([i32; 4], Memory) {
         let maximum = u32::try_from(self.preset.maximum_interval.max(1))
             .unwrap_or(u32::MAX);
         let previous =
             u32::try_from(ctx.card.interval.max(0)).unwrap_or(u32::MAX);
         let ratings = [Rating::Again, Rating::Hard, Rating::Good, Rating::Easy];
-        let needed = usize::from(ctx.rating.code())
-            .saturating_sub(1)
-            .clamp(0, 3)
-            .saturating_add(1);
         let mut intervals = [0_i32; 4];
         let mut memory = initial_memory(&self.params, ctx.rating);
         let mut previous_interval = 0_i32;
@@ -348,20 +357,25 @@ impl FsrsScheduler {
             });
             previous_interval = *slot;
         }
-        let graduation = intervals
-            .get(needed.saturating_sub(1))
-            .copied()
-            .unwrap_or(1)
-            .max(1);
-        (graduation, memory)
+        (intervals, memory)
     }
 
-    fn prepare(&self, ctx: &ReviewContext<'_>) -> Prepared {
-        let current = read_memory(&ctx.card.data);
-        let (graduation, memory) = self.button_intervals(ctx, current);
+    fn prepare(
+        &self,
+        ctx: &ReviewContext<'_>,
+        card_data: CardData,
+    ) -> Prepared {
+        let needed = Self::rating_count(ctx.rating);
+        let elapsed = card_data.elapsed_days(ctx.card.modified, ctx.now_secs);
+        let CardData {
+            object,
+            memory: current,
+        } = card_data;
+        let (intervals, memory) =
+            self.button_intervals(ctx, current, elapsed, needed);
         Prepared {
             data: write_memory(
-                &ctx.card.data,
+                object,
                 memory,
                 MemoryWrite {
                     desired_retention: clamp_desired_retention(
@@ -372,7 +386,11 @@ impl FsrsScheduler {
                 },
             ),
             factor: difficulty_factor(memory.difficulty),
-            graduation,
+            graduation: intervals
+                .get(needed.saturating_sub(1))
+                .copied()
+                .unwrap_or(1)
+                .max(1),
         }
     }
 
@@ -380,7 +398,8 @@ impl FsrsScheduler {
         if !is_schedulable(ctx.card) {
             return unchanged_outcome(ctx);
         }
-        let prepared = self.prepare(ctx);
+        let card_data = CardData::parse(&ctx.card.data);
+        let prepared = self.prepare(ctx, card_data);
         match ctx.card.card_type {
             CardType::New | CardType::Learning | CardType::Relearning => {
                 self.schedule_steps(ctx, prepared)
@@ -513,12 +532,118 @@ impl FsrsScheduler {
         };
         preview_interval(&self.plan(&ctx))
     }
+
+    /// Returns the four rating intervals from one shared memory pass.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the batch preview signature mirrors preview"
+    )]
+    #[must_use]
+    pub fn preview_all(
+        &self,
+        card: &Card,
+        now_secs: i64,
+        collection_start_secs: i64,
+    ) -> [i32; 4] {
+        if !is_schedulable(card) {
+            return [card.interval; 4];
+        }
+        let ratings = [Rating::Again, Rating::Hard, Rating::Good, Rating::Easy];
+        let card_data = CardData::parse(&card.data);
+        let elapsed = card_data.elapsed_days(card.modified, now_secs);
+        let ctx = ReviewContext {
+            card,
+            rating: Rating::Again,
+            now_secs,
+            collection_start_secs,
+        };
+        let (intervals, _) = self.button_intervals(
+            &ctx,
+            card_data.memory,
+            elapsed,
+            ratings.len(),
+        );
+        let mut previews = [0_i32; 4];
+        for ((preview, rating), interval) in
+            previews.iter_mut().zip(ratings).zip(intervals)
+        {
+            let ctx = ReviewContext {
+                card,
+                rating,
+                now_secs,
+                collection_start_secs,
+            };
+            *preview = self.preview_interval_for(&ctx, interval.max(1));
+        }
+        previews
+    }
+
+    fn preview_interval_for(
+        &self,
+        ctx: &ReviewContext<'_>,
+        graduation: i32,
+    ) -> i32 {
+        if ctx.card.card_type == CardType::Review
+            && (ctx.rating != Rating::Again
+                || self.preset.relearning_steps_minutes.is_empty())
+        {
+            return graduation;
+        }
+        let steps = if ctx.card.card_type == CardType::Review
+            || ctx.card.card_type == CardType::Relearning
+        {
+            &self.preset.relearning_steps_minutes
+        } else {
+            &self.preset.learning_steps_minutes
+        };
+        step_preview_interval(ctx, steps, graduation)
+    }
+}
+
+fn step_preview_interval(
+    ctx: &ReviewContext<'_>,
+    steps: &[u32],
+    graduation: i32,
+) -> i32 {
+    let total = steps.len();
+    let remaining = if ctx.card.card_type == CardType::New {
+        total
+    } else {
+        remaining_steps(ctx.card.left, total).max(1)
+    };
+    step_delay_seconds(steps, remaining, ctx.rating)
+        .map_or(graduation, |seconds| {
+            i32::try_from(seconds).unwrap_or(i32::MAX).saturating_neg()
+        })
 }
 
 #[derive(Clone, Copy)]
 struct Memory {
     stability: f32,
     difficulty: f32,
+}
+
+struct CardData {
+    object: Map<String, Value>,
+    memory: Option<Memory>,
+}
+
+impl CardData {
+    fn parse(data: &str) -> Self {
+        let object: Map<String, Value> =
+            serde_json::from_str(data).ok().unwrap_or_default();
+        let memory = read_memory(&object);
+        Self { object, memory }
+    }
+
+    fn elapsed_days(&self, modified: i64, now_secs: i64) -> u32 {
+        let last = self
+            .object
+            .get("lrt")
+            .and_then(Value::as_i64)
+            .unwrap_or(modified);
+        elapsed_days_from(last, now_secs)
+    }
 }
 
 fn weight(params: &FsrsParams, index: usize) -> f32 {
@@ -659,8 +784,7 @@ const fn finite_f32(value: f64) -> Option<f32> {
 }
 
 /// Reads the `s` and `d` fields Anki uses in `cards.data`.
-fn read_memory(data: &str) -> Option<Memory> {
-    let object: Map<String, Value> = serde_json::from_str(data).ok()?;
+fn read_memory(object: &Map<String, Value>) -> Option<Memory> {
     let stability = object.get("s")?.as_f64().and_then(finite_f32)?;
     let difficulty = object.get("d")?.as_f64().and_then(finite_f32)?;
     if stability <= 0.0 || difficulty <= 0.0 {
@@ -687,15 +811,17 @@ struct MemoryWrite {
     now_secs: i64,
 }
 
-fn write_memory(data: &str, memory: Memory, write: MemoryWrite) -> String {
+fn write_memory(
+    mut object: Map<String, Value>,
+    memory: Memory,
+    write: MemoryWrite,
+) -> String {
     let stability = rounded(memory.stability, 10_000.0);
     let difficulty = rounded(memory.difficulty, 1_000.0);
     let retention =
         rounded(clamp_desired_retention(write.desired_retention), 100.0);
     let rounded_decay =
         rounded(positive_factor(write.decay, DEFAULT_DECAY), 1_000.0);
-    let mut object: Map<String, Value> =
-        serde_json::from_str(data).ok().unwrap_or_default();
     let _ = object.insert(String::from("s"), json_number(stability, 4));
     let _ = object.insert(String::from("d"), json_number(difficulty, 3));
     let _ = object.insert(String::from("dr"), json_number(retention, 2));

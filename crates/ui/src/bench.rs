@@ -3,9 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use ranki_core::{FsrsScheduler, from_settings};
-use ranki_model::{
-    Card, Deck, DeckStats, Note, NoteModel, Rating, Settings, Store,
-};
+use ranki_model::{Card, Deck, DeckStats, Note, NoteModel, Settings, Store};
 
 use crate::{
     app::{build_deck_rows, due_total, filter_decks, leaf_deck_totals},
@@ -85,32 +83,11 @@ impl BenchApp {
         }
         let collection_start = self.collection_start;
         if let Some(card) = self.current.clone() {
-            let _ = [
-                self.scheduler.preview(
-                    &card,
-                    Rating::Again,
-                    BENCH_CLOCK,
-                    collection_start,
-                ),
-                self.scheduler.preview(
-                    &card,
-                    Rating::Hard,
-                    BENCH_CLOCK,
-                    collection_start,
-                ),
-                self.scheduler.preview(
-                    &card,
-                    Rating::Good,
-                    BENCH_CLOCK,
-                    collection_start,
-                ),
-                self.scheduler.preview(
-                    &card,
-                    Rating::Easy,
-                    BENCH_CLOCK,
-                    collection_start,
-                ),
-            ];
+            let _ = self.scheduler.preview_all(
+                &card,
+                BENCH_CLOCK,
+                collection_start,
+            );
             if let Some(note) = self.note.as_ref()
                 && let Some(model) =
                     self.models.iter().find(|model| model.id == note.model_id)

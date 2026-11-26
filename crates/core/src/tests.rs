@@ -667,3 +667,229 @@ fn revlog_last_interval_uses_the_previous_card_interval() {
     );
     assert_eq!(good.revlog.last_interval, 0);
 }
+
+fn batch_preview_cases() -> [(&'static str, Card); 11] {
+    let relearning = Card {
+        data: String::from(r#"{"s":10.0,"d":5.0,"lrt":1690000000}"#),
+        card_type: CardType::Relearning,
+        queue: CardQueue::Learning,
+        left: 1,
+        ..base_card()
+    };
+    [
+        ("review", fsrs_card()),
+        (
+            "review with lrt",
+            Card {
+                data: String::from(r#"{"s":10.0,"d":5.0,"lrt":1690000000}"#),
+                ..base_card()
+            },
+        ),
+        (
+            "review with extra fields",
+            Card {
+                data: String::from(r#"{"z":1,"s":10.0,"d":5.0,"custom":"x"}"#),
+                ..base_card()
+            },
+        ),
+        (
+            "malformed data",
+            Card {
+                data: String::from("not json"),
+                ..base_card()
+            },
+        ),
+        (
+            "lrt without memory",
+            Card {
+                data: String::from(r#"{"lrt":1690000000}"#),
+                ..base_card()
+            },
+        ),
+        (
+            "invalid memory with lrt",
+            Card {
+                data: String::from(r#"{"s":"x","d":-1,"lrt":1690000000}"#),
+                ..base_card()
+            },
+        ),
+        ("new", new_card()),
+        (
+            "learning",
+            Card {
+                card_type: CardType::Learning,
+                queue: CardQueue::Learning,
+                left: 2,
+                ..base_card()
+            },
+        ),
+        ("relearning", relearning),
+        (
+            "suspended",
+            Card {
+                queue: CardQueue::Suspended,
+                ..fsrs_card()
+            },
+        ),
+        (
+            "buried",
+            Card {
+                queue: CardQueue::Buried,
+                ..fsrs_card()
+            },
+        ),
+    ]
+}
+
+fn assert_batch_matches_singles(
+    card: &Card,
+    scheduler: &FsrsScheduler,
+    now: i64,
+) {
+    let ratings = [Rating::Again, Rating::Hard, Rating::Good, Rating::Easy];
+    let batch = scheduler.preview_all(card, now, COLLECTION_START);
+    assert_eq!(
+        batch,
+        scheduler.preview_all(card, now, COLLECTION_START),
+        "batch preview is not stable"
+    );
+    for (rating, preview) in ratings.into_iter().zip(batch) {
+        assert_eq!(
+            preview,
+            scheduler.preview(card, rating, now, COLLECTION_START),
+            "batch preview differs for {rating:?}"
+        );
+        let decision = scheduler.schedule(card, rating, now, COLLECTION_START);
+        assert_eq!(
+            decision.revlog.interval, preview,
+            "batch preview differs from scheduling for {rating:?}"
+        );
+    }
+}
+
+#[test]
+fn batch_previews_match_single_previews_and_scheduling() {
+    let schedulers = [
+        FsrsScheduler::new(fsrs_preset(false, 0.9)),
+        FsrsScheduler::new(fsrs_preset(true, 0.9)),
+        FsrsScheduler::new(FsrsPreset {
+            maximum_interval: 7,
+            learning_steps_minutes: vec![],
+            relearning_steps_minutes: vec![],
+            ..fsrs_preset(true, 0.95)
+        }),
+    ];
+    let nows = [
+        i64::MIN,
+        NOW.saturating_sub(86_400),
+        NOW.saturating_sub(1),
+        NOW,
+        NOW.saturating_add(1),
+        NOW.saturating_add(86_400),
+        NOW.saturating_add(86_401),
+        i64::MAX,
+    ];
+    for scheduler in &schedulers {
+        let cases = batch_preview_cases().into_iter().flat_map(|(_, card)| {
+            nows.into_iter().map(move |now| (card.clone(), now))
+        });
+        for (card, now) in cases {
+            assert_batch_matches_singles(&card, scheduler, now);
+        }
+    }
+}
+
+fn expected_persisted_data(
+    sorted: &'static str,
+    inserted: &'static str,
+) -> &'static str {
+    let mut object = serde_json::Map::new();
+    let _ = object.insert(String::from("b"), serde_json::Value::Null);
+    let _ = object.insert(String::from("a"), serde_json::Value::Null);
+    if serde_json::to_string(&object)
+        .unwrap_or_default()
+        .starts_with("{\"b\"")
+    {
+        inserted
+    } else {
+        sorted
+    }
+}
+
+#[test]
+fn schedule_keeps_persisted_card_data_bytes() {
+    let strict = FsrsScheduler::new(fsrs_preset(false, 0.9));
+    let fuzzed = FsrsScheduler::new(fsrs_preset(true, 0.9));
+    let cases = [
+        (
+            &strict,
+            fsrs_card(),
+            Rating::Good,
+            expected_persisted_data(
+                r#"{"d":4.996,"decay":0.154,"dr":0.9,"lrt":1700000000,"s":10.0}"#,
+                r#"{"s":10.0,"d":4.996,"dr":0.9,"decay":0.154,"lrt":1700000000}"#,
+            ),
+        ),
+        (
+            &fuzzed,
+            Card {
+                data: String::from(r#"{"z":1,"s":10.0,"d":5.0,"custom":"x"}"#),
+                ..base_card()
+            },
+            Rating::Easy,
+            expected_persisted_data(
+                r#"{"custom":"x","d":3.32,"decay":0.154,"dr":0.9,"lrt":1700000000,"s":15.5343,"z":1}"#,
+                r#"{"z":1,"s":15.5343,"d":3.32,"custom":"x","dr":0.9,"decay":0.154,"lrt":1700000000}"#,
+            ),
+        ),
+        (
+            &strict,
+            Card {
+                data: String::from("not json"),
+                ..base_card()
+            },
+            Rating::Again,
+            expected_persisted_data(
+                r#"{"d":6.413,"decay":0.154,"dr":0.9,"lrt":1700000000,"s":0.212}"#,
+                r#"{"s":0.212,"d":6.413,"dr":0.9,"decay":0.154,"lrt":1700000000}"#,
+            ),
+        ),
+        (
+            &strict,
+            Card {
+                data: String::from(r#"{"s":10.0,"d":5.0,"lrt":1690000000}"#),
+                ..base_card()
+            },
+            Rating::Good,
+            expected_persisted_data(
+                r#"{"d":4.996,"decay":0.154,"dr":0.9,"lrt":1700000000,"s":87.3073}"#,
+                r#"{"s":87.3073,"d":4.996,"lrt":1700000000,"dr":0.9,"decay":0.154}"#,
+            ),
+        ),
+        (
+            &strict,
+            new_card(),
+            Rating::Easy,
+            expected_persisted_data(
+                r#"{"d":1.0,"decay":0.154,"dr":0.9,"lrt":1700000000,"s":8.2956}"#,
+                r#"{"s":8.2956,"d":1.0,"dr":0.9,"decay":0.154,"lrt":1700000000}"#,
+            ),
+        ),
+        (
+            &strict,
+            Card {
+                data: String::from(r#"{"s":10.0,"d":5.0,"lrt":"x"}"#),
+                ..base_card()
+            },
+            Rating::Hard,
+            expected_persisted_data(
+                r#"{"d":6.672,"decay":0.154,"dr":0.9,"lrt":1700000000,"s":10.0}"#,
+                r#"{"s":10.0,"d":6.672,"lrt":1700000000,"dr":0.9,"decay":0.154}"#,
+            ),
+        ),
+    ];
+    for (scheduler, card, rating, expected) in cases {
+        let decision = scheduler.schedule(&card, rating, NOW, COLLECTION_START);
+        assert_eq!(decision.card.data, expected);
+    }
+}
