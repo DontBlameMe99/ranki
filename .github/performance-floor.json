@@ -124,14 +124,14 @@
     },
     "mcp/roundtrip/tools-list": {
       "budget_ms": 100.0,
-      "median_ms": 0.1124,
+      "median_ms": 0.182,
       "method": 1,
       "repeat": 1,
       "samples": 10,
-      "sha": "f995be80ce39f69b2395ac44c0577a8ea90d378b",
-      "updated_at": "2026-11-26T00:06:26.175434+00:00",
+      "sha": "f69b2ab2ceecff031896e71d0e65db29b195aa43",
+      "updated_at": "2026-11-26T04:05:00.000Z",
       "warmup": 3,
-      "worst_median_ms": 0.13092700000000002
+      "worst_median_ms": 0.2
     },
     "mcp/startup": {
       "budget_ms": 1000.0,
