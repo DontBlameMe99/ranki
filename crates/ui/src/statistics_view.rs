@@ -538,17 +538,13 @@ impl Root {
                     ))
                     .child(metric(
                         "Streak",
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(SPACE_INLINE))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(icon("icon-flame", 20., colors.peach))
-                            .child(format!(
+                        div().font_weight(gpui::FontWeight::SEMIBOLD).child(
+                            format!(
                                 "{} day{}",
                                 stats.streak,
                                 if stats.streak == 1 { "" } else { "s" }
-                            )),
+                            ),
+                        ),
                         colors.peach,
                     )),
             )
