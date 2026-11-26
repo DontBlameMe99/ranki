@@ -1,9 +1,9 @@
 //! Shared navigation rail, toasts, and modal overlays.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Corner, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window,
-    anchored, div, point, px,
+    AnyElement, ClickEvent, Context, Corner, CursorStyle, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, anchored, div, point, px,
 };
 
 use crate::{
@@ -13,17 +13,21 @@ use crate::{
         keycap, panel, secondary_button,
     },
     theme::{
-        NAV_WIDTH, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE, SPACE_RELATED,
-        SPACE_SECTION, Style, alpha,
+        NAV_DIVIDER_WIDTH, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE,
+        SPACE_RELATED, SPACE_SECTION, Style, alpha,
     },
 };
 
 impl Root {
-    pub(crate) fn render_nav(&mut self) -> impl IntoElement {
+    pub(crate) fn render_nav(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let active = self.view;
         let mark = brand_mark();
+        let compact = self.nav_compact();
         let add_selected = active == View::AddCard;
         let add_ink = if add_selected {
             style.ink()
@@ -50,10 +54,16 @@ impl Root {
                 .cursor_pointer(),
         )
         .on_click(self.action_click(UiAction::OpenAdd))
-        .child(icon("icon-plus", 18., add_ink))
-        .child("Add card")
-        .child(div().flex_1())
-        .child(keycap("A", colors, add_selected));
+        .child(icon("icon-plus", 18., add_ink));
+        if compact {
+            add = add.justify_center();
+        } else {
+            add = add.child("Add card").child(div().flex_1()).child(keycap(
+                "A",
+                colors,
+                add_selected,
+            ));
+        }
         if add_selected {
             add = add.bg(colors.mauve).text_color(style.ink());
         }
@@ -91,60 +101,72 @@ impl Root {
                     .apply(row.cursor_pointer())
                     .on_click(self.action_click(action));
             }
-            row.child(icon(icon_name, 18., ink))
-                .child(label.to_owned())
-                .child(div().flex_1())
-                .child(if enabled {
-                    keycap(key, colors, false).into_any_element()
-                } else {
-                    div()
-                        .text_size(px(10.))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(crate::theme::alpha(colors.subtext, 0.6))
-                        .child("SOON")
-                        .into_any_element()
-                })
+            row = row.child(icon(icon_name, 18., ink));
+            if compact {
+                row = row.justify_center();
+            } else {
+                row = row.child(label.to_owned()).child(div().flex_1()).child(
+                    if enabled {
+                        keycap(key, colors, false).into_any_element()
+                    } else {
+                        div()
+                            .text_size(px(10.))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(crate::theme::alpha(
+                                colors.subtext,
+                                0.6,
+                            ))
+                            .child("SOON")
+                            .into_any_element()
+                    },
+                );
+            }
+            row
         };
+        let mut header = div()
+            .flex()
+            .items_center()
+            .gap(px(SPACE_GROUP))
+            .px(px(SPACE_GROUP))
+            .pb(px(SPACE_BLOCK))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(32.))
+                    .h(px(32.))
+                    .flex_none()
+                    .rounded(px(10.))
+                    .text_color(style.ink())
+                    .text_size(px(mark.glyph))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .bg(colors.mauve)
+                    .child(mark.label),
+            );
+        if compact {
+            header = header.justify_center();
+        } else {
+            header = header.child(
+                div()
+                    .text_size(px(18.))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child("Ranki"),
+            );
+        }
         div()
-            .w(px(NAV_WIDTH))
+            .w(px(self.nav_width))
             .h_full()
             .flex_none()
             .flex()
             .flex_col()
+            .relative()
             .gap(px(SPACE_GROUP))
             .bg(colors.crust)
             .pt(px(SPACE_SECTION))
             .px(px(SPACE_RELATED))
             .pb(px(SPACE_SECTION))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(SPACE_GROUP))
-                    .px(px(SPACE_GROUP))
-                    .pb(px(SPACE_BLOCK))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(32.))
-                            .h(px(32.))
-                            .flex_none()
-                            .rounded(px(10.))
-                            .text_color(style.ink())
-                            .text_size(px(mark.glyph))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .bg(colors.mauve)
-                            .child(mark.label),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(18.))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("Ranki"),
-                    ),
-            )
+            .child(header)
             .child(add)
             .child(div().h(px(SPACE_RELATED)))
             .child(nav(
@@ -180,6 +202,31 @@ impl Root {
                 UiAction::OpenSettings,
                 true,
             ))
+            .child(self.render_nav_divider(cx))
+    }
+
+    /// Grab strip on the rail's edge, drawn over the last few pixels.
+    fn render_nav_divider(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors();
+        let mut bar = div()
+            .id("nav-divider")
+            .debug_selector(|| String::from("nav-divider"))
+            .absolute()
+            .top(px(0.))
+            .right(px(0.))
+            .w(px(NAV_DIVIDER_WIDTH))
+            .h_full()
+            .cursor(CursorStyle::ResizeColumn);
+        if self.nav_drag.is_some() {
+            bar = bar.bg(colors.mauve);
+        }
+        bar.hover(move |style| style.bg(alpha(colors.mauve, 0.6)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.start_nav_drag(event, cx);
+                }),
+            )
     }
 
     pub(crate) fn render_overlay(&self, cx: &Context<Self>) -> Vec<AnyElement> {
@@ -193,7 +240,7 @@ impl Root {
                 div()
                     .absolute()
                     .top(px(16.))
-                    .left(px(crate::theme::NAV_WIDTH + 32.))
+                    .left(px(self.nav_width + 32.))
                     .right(px(32.))
                     .flex()
                     .items_center()
@@ -297,7 +344,7 @@ impl Root {
                 div()
                     .absolute()
                     .bottom(px(72.))
-                    .left(px(crate::theme::NAV_WIDTH + 32.))
+                    .left(px(self.nav_width + 32.))
                     .child(crate::components::fade_in(
                         body,
                         ("toast", usize::try_from(toast.seq).unwrap_or(0)),
