@@ -17,9 +17,9 @@ use crate::{
     },
     occlusion::{self, OcclusionMask},
     theme::{
-        ADD_CONTENT_WIDTH, ADD_FORM_WIDTH, ADD_GAP, NAV_WIDTH, PAGE_X,
-        PREVIEW_WIDTH, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE,
-        SPACE_RELATED, SPACE_SECTION, Style, alpha,
+        ADD_CONTENT_WIDTH, ADD_FORM_WIDTH, ADD_GAP, PAGE_X, PREVIEW_WIDTH,
+        SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE, SPACE_RELATED,
+        SPACE_SECTION, Style, alpha,
     },
 };
 
@@ -92,8 +92,9 @@ impl Root {
             note_type_tabs(models)
         };
         let save = self.action_click(UiAction::SaveNote);
-        let content_width =
-            f32::from(window.viewport_size().width) - NAV_WIDTH - PAGE_X * 2.0;
+        let content_width = f32::from(window.viewport_size().width)
+            - self.nav_width
+            - PAGE_X * 2.0;
         let side_by_side = content_width >= 900.;
 
         let screen = div()

@@ -9,8 +9,9 @@ use std::{
 
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
-    KeyBinding, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point,
-    Render, Window, WindowAppearance, div, point, prelude::*, px,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions,
+    Pixels, Point, Render, Window, WindowAppearance, div, point, prelude::*,
+    px,
 };
 use ranki_core::{FsrsScheduler, from_settings};
 use ranki_model::{
@@ -189,6 +190,13 @@ pub enum OcclusionDrag {
         moves_down: bool,
         moved: bool,
     },
+}
+
+/// Sidebar drag in progress: where the pointer pressed and the width then.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NavDrag {
+    pub start_x: f32,
+    pub start_width: f32,
 }
 
 /// Screen distance before a right press counts as a resize instead of a click.
@@ -570,6 +578,8 @@ pub struct Root {
     pub(crate) images: Entity<card_view::LruImageCache>,
     pub(crate) font_family: &'static str,
     pub(crate) last_change_check: Instant,
+    pub(crate) nav_width: f32,
+    pub(crate) nav_drag: Option<NavDrag>,
 }
 
 /// Values the window needs before the root entity exists.
@@ -582,6 +592,43 @@ pub struct Launch {
 impl Root {
     pub(crate) const fn style(&self) -> crate::theme::Style {
         crate::theme::Style::new(self.colors(), self.theme())
+    }
+}
+
+impl Root {
+    /// True when the rail is too narrow for labels, keycaps, and the wordmark.
+    pub(crate) fn nav_compact(&self) -> bool {
+        self.nav_width < theme::NAV_COMPACT_WIDTH
+    }
+
+    /// Grabs the rail divider at the pointer.
+    pub(crate) fn start_nav_drag(
+        &mut self,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        self.nav_drag = Some(NavDrag {
+            start_x: f32::from(event.position.x),
+            start_width: self.nav_width,
+        });
+        cx.notify();
+    }
+
+    /// Follows the pointer while the divider is held.
+    pub(crate) fn drag_nav(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some(drag) = self.nav_drag else {
+            return;
+        };
+        self.nav_width =
+            theme::nav_width(drag.start_width + (x - drag.start_x));
+        cx.notify();
+    }
+
+    /// Releases the divider.
+    pub(crate) fn end_nav_drag(&mut self, cx: &mut Context<Self>) {
+        if self.nav_drag.take().is_some() {
+            cx.notify();
+        }
     }
 }
 
@@ -730,6 +777,8 @@ impl Root {
             save_settings,
             images: card_view::LruImageCache::new(cx),
             last_change_check: Instant::now(),
+            nav_width: theme::NAV_WIDTH,
+            nav_drag: None,
             font_family: theme::ui_font_family(),
         };
         root.reload(cx);
@@ -797,6 +846,11 @@ impl Root {
             if let Some(choice) = choice {
                 root.set_theme(choice, cx);
             }
+        }
+        if let Ok(width) = env::var("RANKI_UI_DEV_NAV_WIDTH")
+            && let Ok(width) = width.parse::<f32>()
+        {
+            root.nav_width = theme::nav_width(width);
         }
         if root.view == View::Decks
             && env::var("RANKI_UI_DEV_CREATE").is_ok_and(|value| value == "1")
@@ -871,7 +925,7 @@ impl Root {
             root.view = View::AddCard;
             root.add.deck_picker = true;
             root.add.deck_picker_anchor =
-                point(px(theme::NAV_WIDTH + theme::PAGE_X + 12.), px(172.));
+                point(px(root.nav_width + theme::PAGE_X + 12.), px(172.));
             window.focus(root.add.deck_filter.read(cx).focus_handle());
         }
         if let Ok(seed) = env::var("RANKI_UI_DEV_OCCLUSION") {
@@ -2797,9 +2851,17 @@ impl Render for Root {
                     cx.notify();
                 }
             }))
+            .on_mouse_move(cx.listener(
+                |this, event: &MouseMoveEvent, _, cx| {
+                    if event.dragging() {
+                        this.drag_nav(f32::from(event.position.x), cx);
+                    }
+                },
+            ))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
+                    this.end_nav_drag(cx);
                     let menu = this.deck_menu_dismissed_press.take().is_some()
                         || this.card_menu_dismissed_press.take().is_some();
                     let picker =
@@ -2808,6 +2870,10 @@ impl Render for Root {
                         cx.notify();
                     }
                 }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.end_nav_drag(cx)),
             )
             .on_action(cx.listener(|this, action: &Reveal, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
@@ -2924,7 +2990,7 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &SyncSignIn, window, cx| {
                 this.dispatch(UiAction::SyncSignIn, window, cx);
             }))
-            .when(view != View::Review, |this| this.child(self.render_nav()))
+            .when(view != View::Review, |this| this.child(self.render_nav(cx)))
             .child(div().flex_1().overflow_hidden().child(main))
             .children(self.render_overlay(cx))
     }

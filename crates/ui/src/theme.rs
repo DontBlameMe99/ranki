@@ -497,7 +497,15 @@ pub const BUTTON_RADIUS: f32 = 12.0;
 pub const BUTTON_PADDING_X: f32 = SPACE_BLOCK;
 pub const BUTTON_TEXT_SIZE: f32 = 14.0;
 
+/// Sidebar width. Dragging the rail's divider picks any width between the
+/// icon-only minimum and the maximum, which is about a fifth wider.
 pub const NAV_WIDTH: f32 = 232.0;
+pub const NAV_WIDTH_MIN: f32 = 72.0;
+pub const NAV_WIDTH_MAX: f32 = 280.0;
+/// Rails narrower than this drop labels, keycaps, and the wordmark.
+pub const NAV_COMPACT_WIDTH: f32 = 180.0;
+/// Grab strip on the rail's right edge.
+pub const NAV_DIVIDER_WIDTH: f32 = 4.0;
 pub const TOPBAR_HEIGHT: f32 = 72.0;
 pub const FOOTER_HEIGHT: f32 = 64.0;
 pub const STAGE_WIDTH: f32 = 760.0;
@@ -530,6 +538,12 @@ pub const PREVIEW_WIDTH: f32 = 380.0;
 pub const ADD_GAP: f32 = SPACE_GUTTER;
 /// Full add-card content width: form plus gap plus preview rail.
 pub const ADD_CONTENT_WIDTH: f32 = ADD_FORM_WIDTH + ADD_GAP + PREVIEW_WIDTH;
+
+/// Clamps a dragged sidebar width to the rail's allowed range.
+#[must_use]
+pub fn nav_width(width: f32) -> f32 {
+    width.clamp(NAV_WIDTH_MIN, NAV_WIDTH_MAX)
+}
 
 /// Converts an interval in days or negative seconds into an Anki-style label.
 #[must_use]
@@ -579,14 +593,15 @@ mod tests {
     use super::{
         ADD_GAP, BUTTON_HEIGHT, BUTTON_PADDING_X, BUTTON_RADIUS,
         BUTTON_TEXT_SIZE, LATTE, MOCHA, MOTION_PROGRESS_MS, MOTION_QUICK_MS,
-        PAGE_X, PAGE_Y, PROGRESS_HEIGHT, PROGRESS_WIDTH, RATING_GAP,
-        SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE, SPACE_RELATED,
-        SPACE_SECTION, STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS, STAGE_WIDTH,
-        Theme, accent_hover, accent_press, alpha, blend, contrast,
-        font_candidates, gtk_animations_disabled, interval_label,
-        kde_animations_disabled, keycap_ink, palette, parse_flag_bool,
-        placeholder_color, rating_fill, rating_label, reduced_motion,
-        resolve_theme, xdg_config_dir,
+        NAV_COMPACT_WIDTH, NAV_WIDTH, NAV_WIDTH_MAX, NAV_WIDTH_MIN, PAGE_X,
+        PAGE_Y, PROGRESS_HEIGHT, PROGRESS_WIDTH, RATING_GAP, SPACE_BLOCK,
+        SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE, SPACE_RELATED, SPACE_SECTION,
+        STAGE_HEIGHT, STAGE_PADDING, STAGE_RADIUS, STAGE_WIDTH, Theme,
+        accent_hover, accent_press, alpha, blend, contrast, font_candidates,
+        gtk_animations_disabled, interval_label, kde_animations_disabled,
+        keycap_ink, nav_width, palette, parse_flag_bool, placeholder_color,
+        rating_fill, rating_label, reduced_motion, resolve_theme,
+        xdg_config_dir,
     };
     use crate::ThemeChoice;
 
@@ -655,6 +670,20 @@ mod tests {
         assert_eq!(STAGE_RADIUS, 32.0);
         assert_eq!(PROGRESS_WIDTH, 420.0);
         assert_eq!(PROGRESS_HEIGHT, 6.0);
+    }
+
+    #[test]
+    fn nav_width_stays_between_icons_only_and_a_fifth_wider() {
+        assert_eq!(nav_width(0.0), NAV_WIDTH_MIN);
+        assert_eq!(nav_width(f32::INFINITY), NAV_WIDTH_MAX);
+        assert_eq!(nav_width(NAV_WIDTH), NAV_WIDTH);
+        const {
+            assert!(NAV_WIDTH <= NAV_WIDTH_MAX / 1.2);
+            assert!(NAV_WIDTH_MIN < NAV_COMPACT_WIDTH);
+            assert!(NAV_COMPACT_WIDTH < NAV_WIDTH);
+        }
+        assert_eq!(NAV_WIDTH_MIN % 4.0, 0.0);
+        assert_eq!(NAV_WIDTH_MAX % 4.0, 0.0);
     }
 
     #[test]

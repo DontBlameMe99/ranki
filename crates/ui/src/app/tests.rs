@@ -307,6 +307,71 @@ fn create_deck_error_lives_by_the_input_until_the_name_changes(
     cx.run_until_parked();
     assert!(cx.update(|_, app| root.read(app).create_error.is_none()));
 }
+
+#[gpui::test]
+fn dragging_the_divider_resizes_the_rail_between_icons_and_the_cap(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: std::sync::Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+    cx.draw(
+        point(px(0.), px(0.)),
+        gpui::size(px(1280.), px(800.)),
+        |_, _| root.clone(),
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let press = |cx: &mut gpui::VisualTestContext| {
+        let bar = cx.debug_bounds("nav-divider").expect("divider bounds");
+        assert_eq!(bar.size.width, px(crate::theme::NAV_DIVIDER_WIDTH));
+        bar.center()
+    };
+    let width = |cx: &mut gpui::VisualTestContext| {
+        cx.read_entity(&root, |root, _| root.nav_width)
+    };
+
+    let start = press(cx);
+    assert_eq!(width(cx), crate::theme::NAV_WIDTH);
+    let middle = crate::theme::NAV_DIVIDER_WIDTH / 2.0;
+    assert_eq!(start.x, px(crate::theme::NAV_WIDTH - middle));
+
+    mouse_drag(
+        cx,
+        start,
+        point(start.x + px(40.), start.y),
+        gpui::MouseButton::Left,
+    );
+    assert_eq!(width(cx), crate::theme::NAV_WIDTH + 40.);
+
+    let start = press(cx);
+    mouse_drag(
+        cx,
+        start,
+        point(start.x + px(400.), start.y),
+        gpui::MouseButton::Left,
+    );
+    assert_eq!(width(cx), crate::theme::NAV_WIDTH_MAX);
+    assert!(!cx.read_entity(&root, |root, _| root.nav_compact()));
+
+    let start = press(cx);
+    mouse_drag(cx, start, point(px(10.), start.y), gpui::MouseButton::Left);
+    assert_eq!(width(cx), crate::theme::NAV_WIDTH_MIN);
+    assert!(cx.read_entity(&root, |root, _| root.nav_compact()));
+    assert_eq!(press(cx).x, px(crate::theme::NAV_WIDTH_MIN - middle));
+}
+
 #[gpui::test]
 fn deck_picker_floats_above_the_form(cx: &mut gpui::TestAppContext) {
     let (root, cx) = cx.add_window_view(|window, cx| {
