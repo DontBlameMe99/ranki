@@ -179,14 +179,14 @@
     },
     "storage/due/50": {
       "budget_ms": 50.0,
-      "median_ms": 0.157551,
+      "median_ms": 0.143456,
       "method": 1,
       "repeat": 2,
       "samples": 10,
-      "sha": "8be7e7088dbc7164526a8d4fb9437b0c4e0fa816",
-      "updated_at": "2026-11-25T21:23:07.339834+00:00",
+      "sha": "23683515644201acbf9072ef133a2bcb83172216",
+      "updated_at": "2026-11-26T01:31:08.457937+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.161301
+      "worst_median_ms": 0.150948
     },
     "storage/review/write": {
       "budget_ms": 100.0,
@@ -201,25 +201,25 @@
     },
     "storage/search/common": {
       "budget_ms": 50.0,
-      "median_ms": 0.39414899999999997,
+      "median_ms": 0.31149,
       "method": 1,
       "repeat": 2,
       "samples": 10,
-      "sha": "8be7e7088dbc7164526a8d4fb9437b0c4e0fa816",
-      "updated_at": "2026-11-25T21:23:07.339834+00:00",
+      "sha": "23683515644201acbf9072ef133a2bcb83172216",
+      "updated_at": "2026-11-26T01:31:08.457937+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.402393
+      "worst_median_ms": 0.31262199999999996
     },
     "storage/search/missing": {
       "budget_ms": 20.0,
-      "median_ms": 0.276515,
+      "median_ms": 0.226622,
       "method": 1,
       "repeat": 5,
       "samples": 10,
-      "sha": "8be7e7088dbc7164526a8d4fb9437b0c4e0fa816",
-      "updated_at": "2026-11-25T21:23:07.339834+00:00",
+      "sha": "23683515644201acbf9072ef133a2bcb83172216",
+      "updated_at": "2026-11-26T01:31:08.457937+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.278812
+      "worst_median_ms": 0.234334
     },
     "storage/stats": {
       "budget_ms": 20.0,
@@ -233,7 +233,7 @@
       "worst_median_ms": 0.123931
     }
   },
-  "sha": "8c4e24d5b0662c77f6d242e6a3a5fd5dc61cf286",
+  "sha": "23683515644201acbf9072ef133a2bcb83172216",
   "version": 1,
   "workload_hash": "41c505710405ce82"
 }
