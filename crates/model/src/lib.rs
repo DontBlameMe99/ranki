@@ -14,7 +14,7 @@ pub use cloze::cloze_ordinal;
 pub use cloze::cloze_ordinals;
 pub use config::{
     Config, GeneralConfig, SchedulerConfig, Settings, SyncConfig, SyncSettings,
-    ThemeChoice, UiConfig, media_dir_for,
+    ThemeChoice, UiConfig, UiState, UiView, media_dir_for,
 };
 pub use id::next_id;
 pub use image_occlusion::parse_image_occlusion_field;

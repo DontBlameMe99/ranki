@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::Id;
 /// Which visual theme the review window should use.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
@@ -20,6 +21,43 @@ pub enum ThemeChoice {
     Light,
     #[default]
     System,
+}
+
+/// Screen the window restores on the next launch.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum UiView {
+    #[default]
+    Decks,
+    Browse,
+    Review,
+    AddCard,
+    Settings,
+    Statistics,
+}
+
+/// Window layout stored by the GUI in its own state file.
+///
+/// This is deliberately separate from `config.toml`, which may be managed by
+/// Home Manager. Every field is optional in serialized form so older files and
+/// hand-written files keep working.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiState {
+    pub view: UiView,
+    pub previous_view: UiView,
+    /// `None` lets the configured theme win.
+    pub theme: Option<ThemeChoice>,
+    /// Clamped to the rail's range when the window opens.
+    pub nav_width: Option<f32>,
+    /// Deck id, rather than a row index, so reordering cannot change the pick.
+    pub selected_deck: Option<Id>,
+    pub expanded_decks: Vec<String>,
+    pub deck_query: String,
+    pub browse_query: String,
+    pub review_all_decks: bool,
 }
 
 /// Settings after CLI flags, config, and defaults are merged.
@@ -45,6 +83,7 @@ pub struct Settings {
     pub last_optimized: u32,
     pub reviews_since: u32,
     pub sync: SyncSettings,
+    pub ui_state: UiState,
 }
 
 /// Resolved sync settings. Passwords are never part of this struct.
@@ -92,6 +131,7 @@ impl Default for Settings {
             last_optimized: 0,
             reviews_since: 0,
             sync: SyncSettings::default(),
+            ui_state: UiState::default(),
         }
     }
 }
@@ -145,6 +185,7 @@ impl Settings {
                 retries: config.sync.retries,
                 backoff_ms: config.sync.backoff_ms,
             },
+            ui_state: UiState::default(),
         }
     }
 }
@@ -618,7 +659,9 @@ where
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{Config, Settings, ThemeChoice, media_dir_for, parse};
+    use super::{
+        Config, Settings, ThemeChoice, UiState, UiView, media_dir_for, parse,
+    };
 
     #[test]
     fn defaults_are_stable() {
@@ -640,6 +683,39 @@ mod tests {
         assert_eq!(config.ui.review_batch_size, 40);
         assert!(!config.ui.show_keyboard_hints);
         assert_eq!(config.scheduler.desired_retention, 0.85);
+    }
+
+    #[test]
+    fn ui_state_round_trips() {
+        let state: UiState = toml::from_str(
+            "view = 'browse'\nprevious_view = 'settings'\n\
+             theme = 'light'\nnav_width = 140.0\nselected_deck = 42\n\
+             expanded_decks = ['Topic', 'Other']\ndeck_query = 'foo'\n\
+             browse_query = 'bar'\nreview_all_decks = true\n",
+        )
+        .expect("ui state");
+        assert_eq!(state.view, UiView::Browse);
+        assert_eq!(state.previous_view, UiView::Settings);
+        assert_eq!(state.theme, Some(ThemeChoice::Light));
+        assert_eq!(state.nav_width, Some(140.0));
+        assert_eq!(state.selected_deck, Some(42));
+        assert_eq!(state.expanded_decks, ["Topic", "Other"]);
+        assert_eq!(state.deck_query, "foo");
+        assert_eq!(state.browse_query, "bar");
+        assert!(state.review_all_decks);
+        let text = toml::to_string(&state).expect("serialize ui state");
+        assert_eq!(
+            toml::from_str::<UiState>(&text).expect("parse ui state"),
+            state
+        );
+    }
+
+    #[test]
+    fn ui_state_defaults_when_older_or_invalid() {
+        let state: UiState =
+            toml::from_str("view = 'nope'\nnav_width = 'wide'\n")
+                .unwrap_or_default();
+        assert_eq!(state, UiState::default());
     }
 
     #[test]

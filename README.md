@@ -82,6 +82,11 @@ reduce_motion = false # omitted: follow the desktop animation preference
 desired_retention = 0.9
 ```
 
+The GUI keeps window state in `ui-state.toml` next to `config.toml`: the active
+screen, sidebar width, expanded decks, selected deck, search queries, and theme
+choice. Home Manager does not manage that file, so switching generations does
+not undo the layout.
+
 ## Collections
 
 All commands accept the global `--collection PATH` and `--media-dir PATH`
