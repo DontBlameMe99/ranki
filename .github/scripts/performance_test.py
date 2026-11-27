@@ -34,7 +34,7 @@ def workload(name, budget, median):
         "warmup": 3,
         "median_ms": median,
         "p95_ms": median + 0.1,
-        "max_gap_ms": median + 0.2,
+        "max_gap_ms": 0.2,
     }
 
 
@@ -93,23 +93,93 @@ class GateTest(unittest.TestCase):
         head = report([("core/fsrs", 100.0, 10.1)])
         self.assertFalse(compare(head, ceiling=ceiling, floor=floor_for(ceiling))["failed"])
 
-    def test_noisy_workloads_ignore_ceiling_noise(self):
-        ceiling = report([
-            ("core/fsrs/schedule", 10.0, 0.0005),
-            ("format/export-apkg", 500.0, 10.0),
-            ("gui/frame/idle", 100.0, 0.14),
-            ("mcp/roundtrip/list-decks", 100.0, 0.45),
-            ("process/cli/decks", 500.0, 1.87),
-        ])
+    def test_paired_noise_does_not_fail_identical_code(self):
+        ceiling = report([("storage/collection/open", 50.0, 0.089)])
+        ceiling["results"][0].update({
+            "worst_median_ms": 0.158,
+            "p95_ms": 0.21,
+            "worst_p95_ms": 0.46,
+            "max_gap_ms": 1.131,
+            "worst_gap_ms": 1.131,
+        })
         head = copy.deepcopy(ceiling)
-        for item in head["results"]:
-            item["median_ms"] *= 3.0
-            item["p95_ms"] *= 3.0
-            item["worst_median_ms"] = item["median_ms"]
-            item["worst_p95_ms"] = item["p95_ms"]
+        head["results"][0].update({
+            "median_ms": 0.333,
+            "worst_median_ms": 0.351,
+            "p95_ms": 0.44,
+            "worst_p95_ms": 0.463,
+            "max_gap_ms": 1.231,
+            "worst_gap_ms": 1.231,
+        })
         result = compare(head, ceiling=ceiling, floor=floor_for(ceiling))
         self.assertFalse(result["failed"])
-        self.assertTrue(all(row["status"] == "warn" for row in result["rows"]))
+        self.assertEqual(result["rows"][0]["status"], "warn")
+        self.assertTrue(any(
+            item["kind"] == "noise"
+            for item in result["rows"][0]["findings"]
+        ))
+
+    def test_real_regression_fails_when_timer_gap_is_small(self):
+        ceiling = report([("storage/stats", 20.0, 0.033)])
+        ceiling["results"][0].update({
+            "max_gap_ms": 0.001,
+            "worst_gap_ms": 0.001,
+        })
+        head = copy.deepcopy(ceiling)
+        head["results"][0].update({
+            "median_ms": 0.2,
+            "worst_median_ms": 0.2,
+            "p95_ms": 0.22,
+            "worst_p95_ms": 0.22,
+        })
+        result = compare(head, ceiling=ceiling, floor=floor_for(ceiling))
+        self.assertTrue(result["failed"])
+        self.assertTrue(any(
+            item["kind"] == "ceiling"
+            for item in result["rows"][0]["findings"]
+        ))
+
+    def test_regression_still_fails_above_the_timer_gap(self):
+        ceiling = report([("storage/search/common", 50.0, 100.0)])
+        ceiling["results"][0].update({
+            "max_gap_ms": 1.06,
+            "worst_gap_ms": 1.06,
+        })
+        head = copy.deepcopy(ceiling)
+        head["results"][0].update({
+            "median_ms": 110.0,
+            "worst_median_ms": 110.0,
+            "p95_ms": 112.0,
+            "worst_p95_ms": 112.0,
+        })
+        result = compare(head, ceiling=ceiling, floor=floor_for(ceiling))
+        self.assertTrue(result["failed"])
+        self.assertTrue(any(
+            item["kind"] == "ceiling"
+            for item in result["rows"][0]["findings"]
+        ))
+
+    def test_worst_timer_gap_skips_ceiling_comparison(self):
+        ceiling = report([("storage/collection/open", 50.0, 10.0)])
+        ceiling["results"][0].update({
+            "max_gap_ms": 0.1,
+            "worst_gap_ms": 2.0,
+        })
+        head = copy.deepcopy(ceiling)
+        head["results"][0].update({
+            "median_ms": 11.0,
+            "worst_median_ms": 11.0,
+            "p95_ms": 11.1,
+            "worst_p95_ms": 11.1,
+            "max_gap_ms": 0.1,
+            "worst_gap_ms": 2.0,
+        })
+        result = compare(head, ceiling=ceiling, floor=floor_for(ceiling))
+        self.assertFalse(result["failed"])
+        self.assertTrue(any(
+            item["kind"] == "noise"
+            for item in result["rows"][0]["findings"]
+        ))
 
     def test_noisy_workloads_still_fail_over_budget(self):
         ceiling = report([("core/fsrs/schedule", 10.0, 0.0005)])
