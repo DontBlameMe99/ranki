@@ -411,6 +411,7 @@ impl Root {
                 .id("review-stage-scroll")
                 .flex_1()
                 .min_h(px(0.))
+                .track_scroll(&self.review_stage_scroll)
                 .overflow_scroll();
             let mut content = div()
                 .min_h(px(content_height))

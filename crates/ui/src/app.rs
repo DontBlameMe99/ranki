@@ -11,8 +11,8 @@ use std::{
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions,
-    Pixels, Point, Render, SharedString, Window, WindowAppearance, div, point,
-    prelude::*, px,
+    Pixels, Point, Render, ScrollHandle, SharedString, Window,
+    WindowAppearance, div, point, prelude::*, px,
 };
 use ranki_core::{FsrsScheduler, from_settings};
 use ranki_model::{
@@ -620,6 +620,7 @@ pub struct Root {
     pub(crate) collection_modified: i64,
     pub(crate) collection_start: i64,
     pub(crate) decks_scroll: SmoothScroll,
+    pub(crate) review_stage_scroll: ScrollHandle,
     pub(crate) sync: SyncUiState,
     pub(crate) sync_run: Arc<crate::sync_view::SyncRun>,
     pub(crate) save_settings: SettingsSaver,
@@ -871,6 +872,7 @@ impl Root {
             collection_modified: 0,
             collection_start: 0,
             decks_scroll: SmoothScroll::new(),
+            review_stage_scroll: ScrollHandle::new(),
             sync: SyncUiState {
                 username: sync_username,
                 password: sync_password,
@@ -2371,6 +2373,7 @@ impl Root {
         loaded: LoadedCard,
         _cx: &mut Context<Self>,
     ) {
+        self.review_stage_scroll = ScrollHandle::new();
         self.review.phase = if self.dev_reveal {
             Phase::Answer
         } else {
@@ -2389,13 +2392,14 @@ impl Root {
     }
 
     pub(crate) fn reveal(&mut self, cx: &mut Context<Self>) {
-        if self.view != View::Review {
+        if self.view != View::Review || self.review.current.is_none() {
             return;
         }
         match self.review.phase {
             Phase::Question => {
                 self.review.phase = Phase::Answer;
                 self.review.last_tick = Some(Instant::now());
+                self.review_stage_scroll.scroll_to_bottom();
                 cx.notify();
             }
             Phase::Answer => self.grade(ranki_model::Rating::Good, cx),
@@ -2406,10 +2410,16 @@ impl Root {
         if self.view != View::Review || self.review.current.is_none() {
             return;
         }
+        let revealing = self.review.phase == Phase::Question;
         self.review.phase = match self.review.phase {
             Phase::Question => Phase::Answer,
             Phase::Answer => Phase::Question,
         };
+        if revealing {
+            self.review_stage_scroll.scroll_to_bottom();
+        } else {
+            self.review_stage_scroll = ScrollHandle::new();
+        }
         self.review.last_tick = Some(Instant::now());
         cx.notify();
     }

@@ -1479,11 +1479,13 @@ fn space_after_grading_waits_for_debounce(cx: &mut gpui::TestAppContext) {
         root.view = View::Review;
         root.review.current = None;
         root.review.answered = 1;
-        root.review.last_grade_at = Some(std::time::Instant::now());
         cx.notify();
     });
     cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
         root.clone()
+    });
+    cx.update_entity(&root, |root, _| {
+        root.review.last_grade_at = Some(std::time::Instant::now());
     });
     cx.simulate_keystrokes("space");
     assert_eq!(cx.update(|_, cx| root.read(cx).view), View::Review);
@@ -2743,6 +2745,221 @@ fn space_reveals_after_clicking_a_deck_row(cx: &mut gpui::TestAppContext) {
 
     let phase = cx.read_entity(&root, |root, _| root.review.phase);
     assert_eq!(phase, Phase::Answer);
+}
+
+#[gpui::test]
+fn revealing_a_long_answer_scrolls_the_stage_to_the_bottom(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    cx.update_entity(&root, |root, cx| {
+        root.view = View::Review;
+        root.review.current = Some(Card {
+            id: 1,
+            note_id: 1,
+            deck_id: 1,
+            ordinal: 0,
+            modified: 0,
+            usn: 0,
+            card_type: CardType::New,
+            queue: CardQueue::New,
+            due: 0,
+            interval: 0,
+            factor: 0,
+            reps: 0,
+            lapses: 0,
+            left: 0,
+            original_due: 0,
+            original_deck_id: 0,
+            flags: 0,
+            data: String::new(),
+        });
+        root.review.question = Some(crate::card_view::RenderedCard {
+            text: "Question?".into(),
+            ..Default::default()
+        });
+        root.review.answer = Some(crate::card_view::RenderedCard {
+            text: "Answer line\n".repeat(60),
+            ..Default::default()
+        });
+        root.review.phase = Phase::Question;
+        cx.notify();
+    });
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let before = cx.read_entity(&root, |root, _| {
+        f32::from(root.review_stage_scroll.offset().y)
+    });
+    assert_eq!(before, 0.0, "the question starts at the top");
+
+    cx.update_entity(&root, super::Root::reveal);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let (offset, max) = cx.read_entity(&root, |root, _| {
+        let handle = &root.review_stage_scroll;
+        (
+            f32::from(handle.offset().y),
+            f32::from(handle.max_offset().height),
+        )
+    });
+    assert!(max > 0.0, "the long answer must overflow the stage");
+    assert_eq!(offset, -max, "revealing must show the end of the answer");
+}
+
+#[gpui::test]
+fn pending_reveal_scroll_does_not_survive_a_reset(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.update_entity(&root, |root, cx| {
+        root.view = View::Review;
+        root.reveal(cx);
+    });
+
+    cx.update_entity(&root, |root, cx| {
+        let card = Card {
+            id: 1,
+            note_id: 1,
+            deck_id: 1,
+            ordinal: 0,
+            modified: 0,
+            usn: 0,
+            card_type: CardType::New,
+            queue: CardQueue::New,
+            due: 0,
+            interval: 0,
+            factor: 0,
+            reps: 0,
+            lapses: 0,
+            left: 0,
+            original_due: 0,
+            original_deck_id: 0,
+            flags: 0,
+            data: String::new(),
+        };
+        root.apply_loaded(
+            &card,
+            super::LoadedCard {
+                note: None,
+                question: Some(crate::card_view::RenderedCard {
+                    text: "Question line\n".repeat(60),
+                    ..Default::default()
+                }),
+                answer: Some(crate::card_view::RenderedCard {
+                    text: "Answer".into(),
+                    ..Default::default()
+                }),
+                answer_media: Vec::new(),
+                occlusion_image: None,
+                occlusion_image_size: None,
+            },
+            cx,
+        );
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let (offset, max) = cx.read_entity(&root, |root, _| {
+        let handle = &root.review_stage_scroll;
+        (
+            f32::from(handle.offset().y),
+            f32::from(handle.max_offset().height),
+        )
+    });
+    assert!(max > 0.0, "the long question must overflow the stage");
+    assert_eq!(offset, 0.0, "the next card must start at the top");
+    cx.update_entity(&root, |root, cx| {
+        root.reveal(cx);
+        let card = Card {
+            id: 2,
+            note_id: 1,
+            deck_id: 1,
+            ordinal: 0,
+            modified: 0,
+            usn: 0,
+            card_type: CardType::New,
+            queue: CardQueue::New,
+            due: 0,
+            interval: 0,
+            factor: 0,
+            reps: 0,
+            lapses: 0,
+            left: 0,
+            original_due: 0,
+            original_deck_id: 0,
+            flags: 0,
+            data: String::new(),
+        };
+        root.apply_loaded(
+            &card,
+            super::LoadedCard {
+                note: None,
+                question: Some(crate::card_view::RenderedCard {
+                    text: "Question line\n".repeat(60),
+                    ..Default::default()
+                }),
+                answer: Some(crate::card_view::RenderedCard {
+                    text: "Answer".into(),
+                    ..Default::default()
+                }),
+                answer_media: Vec::new(),
+                occlusion_image: None,
+                occlusion_image_size: None,
+            },
+            cx,
+        );
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let offset = cx.read_entity(&root, |root, _| {
+        f32::from(root.review_stage_scroll.offset().y)
+    });
+    assert_eq!(offset, 0.0, "a loaded card must clear a pending reveal");
+    cx.update_entity(&root, |root, cx| {
+        root.reveal(cx);
+        root.toggle_reveal(cx);
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let offset = cx.read_entity(&root, |root, _| {
+        f32::from(root.review_stage_scroll.offset().y)
+    });
+    assert_eq!(offset, 0.0, "a reset before drawing must clear the reveal");
 }
 
 #[gpui::test]
