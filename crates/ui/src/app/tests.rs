@@ -17,7 +17,7 @@ use crate::Options;
 use super::{
     DeckRow, EmptyKind, MaskShape, MouseButton, NormalizedRect, OcclusionDrag,
     OcclusionMask, OcclusionState, Phase, UiAction, View, build_deck_rows,
-    collect_tags, compute_visible_deck_rows, date_label, deck_meta, due_total,
+    collect_tags, compute_visible_deck_rows, deck_meta, due_total,
     duration_label, empty_copy, empty_kind, filter_decks, focused_delta,
     forecast_bar_height, forecast_total, model_index, models_with_stock,
     next_due_deck, next_view, prepare_deck_rows, queue_counts, refreshed_card,
@@ -1821,12 +1821,6 @@ fn focused_time_is_capped_and_ignores_blur() {
         focused_delta(elapsed, true, std::time::Duration::ZERO),
         std::time::Duration::from_secs(60)
     );
-}
-
-#[test]
-fn date_label_uses_the_real_calendar() {
-    assert_eq!(date_label(0), "Thursday, 1 January");
-    assert_eq!(date_label(1_800_000_000), "Friday, 15 January");
 }
 
 #[test]

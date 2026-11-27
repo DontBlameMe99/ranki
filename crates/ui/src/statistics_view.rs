@@ -10,7 +10,7 @@ use gpui::{
 use ranki_model::{Rating, RevLog, RevLogKind};
 
 use crate::{
-    app::{Root, date_label, duration_label},
+    app::{Root, duration_label},
     components::{icon, panel},
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE,
@@ -141,15 +141,6 @@ pub fn calendar_week(day: i64, collection_start_secs: i64) -> u32 {
         })
         .map_or(1, |date| date.iso_week().week())
 }
-
-/// Calendar label for a heatmap day.
-#[must_use]
-pub fn day_label(day: i64, collection_start_secs: i64) -> String {
-    let seconds = collection_start_secs
-        .saturating_add(day.saturating_mul(SECONDS_PER_DAY));
-    date_label(u64::try_from(seconds).unwrap_or_default())
-}
-
 /// One bar in the forecast chart: past reviews or upcoming dues.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ForecastDay {
@@ -431,37 +422,16 @@ impl Root {
             columns = columns.child(column);
         }
 
-        let detail = if let Some(entry) = self
+        let hovered = self
             .heatmap_hover
-            .and_then(|day| stats.days.iter().find(|entry| entry.day == day))
-        {
-            let accuracy = entry
-                .accuracy_percent()
-                .map_or_else(|| String::from("-"), |value| format!("{value}%"));
-            div()
-                .flex()
-                .items_center()
-                .gap(px(SPACE_GROUP))
-                .child(icon("icon-chart", 14., colors.mauve))
-                .child(div().text_size(px(13.)).text_color(colors.text).child(
-                    format!(
-                        "{} · {} reviews · {} accuracy · {}",
-                        day_label(entry.day, collection_start),
-                        entry.reviews,
-                        accuracy,
-                        duration_label(Duration::from_millis(entry.millis)),
-                    ),
-                ))
-        } else {
-            div()
-                .text_size(px(13.))
-                .text_color(colors.subtext)
-                .child("Hover a day to see its reviews")
-        };
-
-        let accuracy = stats
-            .accuracy_percent()
+            .and_then(|day| stats.days.iter().find(|entry| entry.day == day));
+        let accuracy = hovered
+            .map_or_else(
+                || stats.accuracy_percent(),
+                DayReviews::accuracy_percent,
+            )
             .map_or_else(|| String::from("-"), |value| format!("{value}%"));
+        let millis = hovered.map_or(stats.millis_today, |day| day.millis);
         let metric = |label: &str, value: Div, hue: Rgba| {
             div()
                 .flex()
@@ -512,7 +482,6 @@ impl Root {
                     .child(labels)
                     .child(columns),
             )
-            .child(detail)
             .child(
                 div()
                     .flex()
@@ -530,9 +499,7 @@ impl Root {
                     .child(metric(
                         "Time spent learning",
                         div().font_weight(gpui::FontWeight::SEMIBOLD).child(
-                            duration_label(Duration::from_millis(
-                                stats.millis_today,
-                            )),
+                            duration_label(Duration::from_millis(millis)),
                         ),
                         colors.text,
                     ))
@@ -736,8 +703,8 @@ mod tests {
 
     use super::{
         ForecastDay, HEATMAP_COLUMNS, HEATMAP_DAYS, build_statistics,
-        calendar_week, day_label, day_number, forecast_days, heatmap_start,
-        weekday, weekday_index,
+        calendar_week, day_number, forecast_days, heatmap_start, weekday,
+        weekday_index,
     };
 
     const START: i64 = 1_700_000_000;
@@ -843,7 +810,6 @@ mod tests {
         assert_eq!(older.reviews, 1);
         assert_eq!(older.millis, 2000);
         assert_eq!(older.ratings, [0, 0, 0, 1]);
-        assert_eq!(day_label(older.day, START), "Wednesday, 15 November");
     }
 
     #[test]
