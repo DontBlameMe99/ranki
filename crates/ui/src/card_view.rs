@@ -632,6 +632,8 @@ fn text_lines(card: &RenderedCard) -> Vec<Vec<TextRun>> {
 pub fn rendered_line(runs: &[TextRun], color: Rgba, size_px: f32) -> Div {
     let plain = runs.iter().map(|run| run.text.as_str()).collect::<String>();
     let mut line = div()
+        .w_full()
+        .text_center()
         .flex()
         .flex_row()
         .flex_wrap()
@@ -640,7 +642,10 @@ pub fn rendered_line(runs: &[TextRun], color: Rgba, size_px: f32) -> Div {
         .text_size(px(size_px))
         .font_family(crate::theme::font_for_text(&plain));
     for run in runs {
-        let mut part = div().text_color(run.foreground.unwrap_or(color));
+        let mut part = div()
+            .debug_selector(|| "card-text-run".to_owned())
+            .min_w(px(0.))
+            .text_color(run.foreground.unwrap_or(color));
         if run.code {
             part = part.font_family(crate::theme::mono_font_family());
         }
@@ -1232,6 +1237,8 @@ mod tests {
         blocks_text, card_blocks, cloze_text, highlight_code, media_refs,
         occlusion_overlays, parse_template, preview_card, render_card,
     };
+    use gpui::{ParentElement, Styled};
+
     use ranki_model::{CardTemplate, Note, NoteKind};
 
     fn model(
@@ -2107,5 +2114,45 @@ mod tests {
                 .any(|block| matches!(block, CardBlock::Code { .. }))
         );
         assert!(blocks_text(&blocks).contains("<script>keep</script>"));
+    }
+    #[gpui::test]
+    fn long_card_text_stays_inside_its_box(cx: &mut gpui::TestAppContext) {
+        struct Probe;
+
+        impl gpui::Render for Probe {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                gpui::div()
+                    .w(gpui::px(240.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(super::rendered_line(
+                        &[super::TextRun {
+                            text: String::from(
+                                "<span style=\"background-color: i",
+                            ),
+                            ..Default::default()
+                        }],
+                        crate::theme::MOCHA.text,
+                        52.,
+                    ))
+            }
+        }
+
+        let (probe, cx) = cx.add_window_view(|_, _| Probe);
+        cx.draw(
+            gpui::point(gpui::px(0.), gpui::px(0.)),
+            gpui::size(gpui::px(240.), gpui::px(400.)),
+            |_, _| probe.clone(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let run = cx.debug_bounds("card-text-run").expect("run bounds");
+        assert!(run.right() <= gpui::px(240.), "{run:?}");
     }
 }
