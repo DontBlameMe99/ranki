@@ -17,6 +17,7 @@ latex-rust.workspace = true
 futures = "0.3"
 image = "0.25"
 serde_json.workspace = true
+unicode-segmentation.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.11", default-features = false, features = ["async-std"] }

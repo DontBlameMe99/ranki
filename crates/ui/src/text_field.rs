@@ -11,6 +11,7 @@ use gpui::{
     UTF16Selection, UnderlineStyle, Window, actions, div, fill, hsla, point,
     prelude::*, px, size,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Called after each edit so the owning view can refresh derived state.
 pub type EditHook = Arc<dyn Fn(&mut App) + Send + Sync>;
@@ -69,6 +70,7 @@ pub struct TextField {
     last_bounds: Option<Bounds<Pixels>>,
     scroll_x: f32,
     selecting: bool,
+    multi_click_index: Option<usize>,
     edit_hook: Option<EditHook>,
     secure: bool,
 }
@@ -141,35 +143,44 @@ fn byte_at_char(text: &str, index: usize) -> usize {
         .map_or(text.len(), |(offset, _)| offset)
 }
 
-fn is_word_char(character: char) -> bool {
-    character.is_alphanumeric() || character == '_'
-}
-
 /// Byte range of the word touching `offset`, if the click landed on a word.
 fn word_range_at(text: &str, offset: usize) -> Option<Range<usize>> {
     let offset = text.floor_char_boundary(offset.min(text.len()));
-    let before = text.get(..offset)?.chars().next_back();
-    let after = text.get(offset..)?.chars().next();
-    if !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char) {
+    let clusters: Vec<_> = text.grapheme_indices(true).collect();
+    if clusters.is_empty() {
         return None;
     }
+    let is_word = |piece: &str| {
+        piece.chars().next().is_some_and(|character| {
+            character.is_alphanumeric() || character == '_'
+        })
+    };
 
-    let mut start = offset;
-    for (index, character) in text.get(..offset)?.char_indices().rev() {
-        if !is_word_char(character) {
-            break;
+    let mut index = clusters
+        .iter()
+        .position(|(start, piece)| offset < start + piece.len())
+        .unwrap_or(clusters.len() - 1);
+    if !is_word(clusters[index].1) {
+        if index > 0 && is_word(clusters[index - 1].1) {
+            index -= 1;
+        } else if clusters.get(index + 1).is_some_and(|item| is_word(item.1)) {
+            index += 1;
+        } else {
+            return None;
         }
-        start = index;
     }
-    let mut end = offset;
-    for (index, character) in text.get(offset..)?.char_indices() {
-        if !is_word_char(character) {
-            break;
-        }
-        end = offset
-            .saturating_add(index)
-            .saturating_add(character.len_utf8());
+
+    let mut first = index;
+    while first > 0 && is_word(clusters[first - 1].1) {
+        first -= 1;
     }
+    let mut last = index;
+    while last + 1 < clusters.len() && is_word(clusters[last + 1].1) {
+        last += 1;
+    }
+    let (start, _) = clusters[first];
+    let (end_start, end_piece) = clusters[last];
+    let end = end_start + end_piece.len();
     (start < end).then_some(start..end)
 }
 impl TextField {
@@ -190,6 +201,7 @@ impl TextField {
             last_bounds: None,
             scroll_x: 0.0,
             selecting: false,
+            multi_click_index: None,
             edit_hook: None,
             secure: false,
         }
@@ -370,6 +382,9 @@ impl TextField {
         offset: usize,
         cx: &mut Context<Self>,
     ) {
+        let offset = self
+            .content
+            .floor_char_boundary(offset.min(self.content.len()));
         if let Some(range) = word_range_at(&self.content, offset) {
             self.selected_range = range;
             self.selection_reversed = false;
@@ -688,11 +703,14 @@ impl Render for TextField {
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
                     this.selecting = true;
+                    this.multi_click_index = None;
                     let index = this.index_for_point(event.position);
                     if event.click_count >= 3 {
                         this.select_all(cx);
+                        this.multi_click_index = Some(index);
                     } else if event.click_count == 2 {
                         this.select_word_at(index, cx);
+                        this.multi_click_index = Some(index);
                     } else if event.modifiers.shift {
                         this.select_to(index, cx);
                     } else {
@@ -704,19 +722,29 @@ impl Render for TextField {
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, _| {
                     this.selecting = false;
+                    this.multi_click_index = None;
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, _| {
                     this.selecting = false;
+                    this.multi_click_index = None;
                 }),
             )
             .on_mouse_move(cx.listener(
                 |this, event: &MouseMoveEvent, _, cx| {
                     if this.selecting {
                         let index = this.index_for_point(event.position);
-                        this.select_to(index, cx);
+                        if this
+                            .multi_click_index
+                            .is_some_and(|clicked| clicked != index)
+                        {
+                            this.multi_click_index = None;
+                        }
+                        if this.multi_click_index.is_none() {
+                            this.select_to(index, cx);
+                        }
                     }
                 },
             ))
@@ -952,6 +980,10 @@ mod tests {
         assert_eq!(word_range_at("hello world!", 11), Some(6..11));
         assert_eq!(word_range_at("a_b c", 2), Some(0..3));
         assert_eq!(word_range_at("hello 世界!", 7), Some(6..12));
+        assert_eq!(
+            word_range_at("cafe\u{301} au", 2),
+            Some(0.."cafe\u{301}".len())
+        );
         assert_eq!(word_range_at("  ", 1), None);
     }
 
@@ -976,6 +1008,11 @@ mod tests {
             click_count: 2,
             first_mouse: false,
         });
+        cx.simulate_mouse_move(
+            at,
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::none(),
+        );
         cx.simulate_mouse_up(
             at,
             gpui::MouseButton::Left,
@@ -993,6 +1030,11 @@ mod tests {
             click_count: 3,
             first_mouse: false,
         });
+        cx.simulate_mouse_move(
+            at,
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::none(),
+        );
         cx.simulate_mouse_up(
             at,
             gpui::MouseButton::Left,
@@ -1001,6 +1043,23 @@ mod tests {
         assert_eq!(
             cx.read_entity(&field, |field, _| field.selected_range.clone()),
             0..11
+        );
+    }
+
+    #[gpui::test]
+    fn selection_fallback_stays_inside_the_field(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (field, cx) =
+            cx.add_window_view(|_, cx| super::TextField::new(cx, "value"));
+        cx.update_entity(&field, |field, cx| field.set_text("hi  ", cx));
+        cx.draw(point(px(0.), px(0.)), size(px(200.), px(20.)), |_, _| {
+            field.clone()
+        });
+        cx.update_entity(&field, |field, cx| field.select_word_at(99, cx));
+        assert_eq!(
+            cx.read_entity(&field, |field, _| field.selected_range.clone()),
+            4..4
         );
     }
 
