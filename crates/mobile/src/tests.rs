@@ -25,10 +25,12 @@ use tempfile::TempDir;
 use crate::card::media_names;
 use crate::card::plain;
 use crate::card::sides;
+use crate::card::sides_text;
 use crate::platform;
 use crate::state::AppState;
 use crate::state::ReviewPhase;
 use crate::state::Screen;
+use crate::state::browse_answer;
 
 fn note(fields: &[&str], model_id: Id) -> Note {
     Note {
@@ -79,6 +81,11 @@ fn plain_strips_markup_but_keeps_line_breaks_and_entities() {
         plain("<div>One<br>Two &amp; Three</div>"),
         "One\nTwo & Three"
     );
+}
+
+#[test]
+fn plain_keeps_one_blank_line_between_paragraphs() {
+    assert_eq!(plain("One<br><br><br>Two"), "One\n\nTwo");
 }
 
 #[test]
@@ -400,8 +407,12 @@ fn adding_a_note_makes_it_browsable() {
         .expect("browse query");
 
     assert!(fixture.state.browse.rows.iter().any(|row| {
-        row.front.contains("Second question") && row.deck == "Mobile Deck"
+        row.front.contains("Second question")
+            && row.back == "Second answer"
+            && row.deck == "Mobile Deck"
+            && !row.back.contains('<')
     }));
+    assert_eq!(fixture.state.browse.total, 1);
     assert_eq!(
         fixture
             .state
@@ -593,4 +604,25 @@ fn missing_directories_have_no_path() {
 
     assert_eq!(data, None);
     assert_eq!(config, None);
+}
+
+#[test]
+fn sides_text_keeps_encoded_image_text() {
+    let model = StockModelKind::Basic.definition();
+    let note = note(
+        &["&lt;img src=&quot;example.png&quot;&gt;", "Answer"],
+        model.id,
+    );
+    let (question, _) = sides_text(&model, &note, 0);
+    assert_eq!(question, "<img src=\"example.png\">");
+}
+
+#[test]
+fn browse_answer_keeps_independent_answers() {
+    assert_eq!(browse_answer("cat", "caterpillar", false), "caterpillar");
+    assert_eq!(browse_answer("cat", "cat", false), "cat");
+    assert_eq!(
+        browse_answer("Question?", "Question?\nAnswer!", true),
+        "Answer!"
+    );
 }

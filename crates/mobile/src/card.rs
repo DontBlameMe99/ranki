@@ -19,9 +19,16 @@ use egui::{ColorImage, Context, Id, TextureHandle, TextureOptions, Ui};
 use image::{GenericImageView, Limits};
 use ranki_model::{Note, NoteModel, cloze_markers};
 
-/// Renders the question and answer text for one card ordinal.
-#[must_use]
-pub fn sides(model: &NoteModel, note: &Note, ordinal: u16) -> (String, String) {
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one flag selects full card text or list preview text"
+)]
+fn render_sides(
+    model: &NoteModel,
+    note: &Note,
+    ordinal: u16,
+    keep_images: bool,
+) -> (String, String) {
     let Some(template) = model.template_for(ordinal) else {
         let fallback = String::from("This note has no template.");
         return (fallback.clone(), fallback);
@@ -53,7 +60,26 @@ pub fn sides(model: &NoteModel, note: &Note, ordinal: u16) -> (String, String) {
         answer_markup
     };
 
-    (strip_markup(&question, true), strip_markup(&answer, true))
+    (
+        strip_markup(&question, keep_images),
+        strip_markup(&answer, keep_images),
+    )
+}
+
+/// Renders the question and answer text for one card ordinal, including images.
+#[must_use]
+pub fn sides(model: &NoteModel, note: &Note, ordinal: u16) -> (String, String) {
+    render_sides(model, note, ordinal, true)
+}
+
+/// Renders card text for list previews, without image markup.
+#[must_use]
+pub fn sides_text(
+    model: &NoteModel,
+    note: &Note,
+    ordinal: u16,
+) -> (String, String) {
+    render_sides(model, note, ordinal, false)
 }
 
 /// Draws card text and any local images referenced by it.
@@ -480,14 +506,23 @@ fn decode_entity(entity: &str) -> Option<String> {
     char::from_u32(code).map(String::from)
 }
 
+#[expect(
+    clippy::excessive_nesting,
+    reason = "newline normalization uses one pending blank flag"
+)]
 fn normalize_newlines(text: &str) -> String {
-    let mut lines = text
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.trim().is_empty());
-    let mut output = lines.next().unwrap_or("").to_owned();
-    for line in lines {
-        output.push('\n');
+    let mut output = String::new();
+    let mut pending_blank = false;
+    for line in text.lines().map(str::trim_end) {
+        if line.trim().is_empty() {
+            pending_blank = !output.is_empty();
+            continue;
+        }
+        if !output.is_empty() {
+            let breaks = if pending_blank { "\n\n" } else { "\n" };
+            output.push_str(breaks);
+        }
+        pending_blank = false;
         output.push_str(line);
     }
     output.trim().to_owned()

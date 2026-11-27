@@ -31,9 +31,12 @@ pub fn native_options() -> eframe::NativeOptions {
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id(APP_ID)
-            .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT]),
+            .with_inner_size(dev_viewport_size()),
         ..Default::default()
     };
+    if env::var_os("RANKI_MOBILE_DEV_VIEW").is_some() {
+        options.viewport = options.viewport.with_decorations(false);
+    }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         options.renderer = eframe::Renderer::Wgpu;
@@ -43,6 +46,21 @@ pub fn native_options() -> eframe::NativeOptions {
         options.renderer = eframe::Renderer::Glow;
     }
     options
+}
+
+fn dev_viewport_size() -> [f32; 2] {
+    [
+        dev_dimension("RANKI_MOBILE_DEV_WIDTH", WINDOW_WIDTH),
+        dev_dimension("RANKI_MOBILE_DEV_HEIGHT", WINDOW_HEIGHT),
+    ]
+}
+
+fn dev_dimension(name: &str, default: f32) -> f32 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value >= 240.0 && *value <= 3840.0)
+        .unwrap_or(default)
 }
 
 /// Resolves the data and configuration directories.

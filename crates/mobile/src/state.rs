@@ -23,14 +23,14 @@ use ranki_sync::{
     SyncOutcome, SyncState, SyncTransport, TransportConfig, clear_host_key,
 };
 
-use crate::card::sides;
+use crate::card::{sides, sides_text};
 use crate::error::Result;
 use ranki_core::scheduler_for_card;
 
 const BROWSE_ROW_LIMIT: usize = 200;
 
 /// Full-screen destination shown on a phone.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 pub enum Screen {
     #[default]
     Decks,
@@ -102,6 +102,7 @@ pub struct AddState {
 pub struct BrowseState {
     pub query: String,
     pub rows: Vec<BrowseRow>,
+    pub total: usize,
 }
 
 /// Synchronous `AnkiWeb` state shown in settings.
@@ -178,6 +179,7 @@ impl AppState {
             browse: BrowseState {
                 query: browse_query,
                 rows: Vec::new(),
+                total: 0,
             },
             sync: SyncUiState {
                 username: sync_username,
@@ -821,9 +823,11 @@ impl AppState {
             Err(error) => {
                 self.fail(format!("Could not search cards: {error}"));
                 self.browse.rows.clear();
+                self.browse.total = 0;
                 return;
             }
         };
+        self.browse.total = ids.len();
         let decks = self.decks.clone();
         let models = self.add.models.clone();
         let mut notes = HashMap::new();
@@ -856,7 +860,12 @@ impl AppState {
             else {
                 continue;
             };
-            let (question, answer) = sides(model, note, card.ordinal);
+            let (question, answer) = sides_text(model, note, card.ordinal);
+            let repeats_front =
+                model.template_for(card.ordinal).is_some_and(|template| {
+                    template.answer_format.contains("{{FrontSide}}")
+                });
+            let back = browse_answer(&question, &answer, repeats_front);
             let deck = decks
                 .iter()
                 .find(|row| row.id == Some(card.deck_id))
@@ -867,7 +876,7 @@ impl AppState {
             rows.push(BrowseRow {
                 card_id: card.id,
                 front: question,
-                back: answer,
+                back,
                 deck,
                 meta: format!("{} / {}", model.name, queue_name(card.queue)),
             });
@@ -1094,6 +1103,22 @@ fn now_secs() -> i64 {
         .ok()
         .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
         .unwrap_or(0)
+}
+
+pub(crate) fn browse_answer(
+    question: &str,
+    answer: &str,
+    repeats_front: bool,
+) -> String {
+    if repeats_front {
+        answer
+            .strip_prefix(question)
+            .unwrap_or(answer)
+            .trim_start()
+            .to_owned()
+    } else {
+        answer.to_owned()
+    }
 }
 
 const fn queue_name(queue: CardQueue) -> &'static str {

@@ -69,21 +69,24 @@ not touch a real collection, make network calls, or depend on a Wayland session.
 ## Deterministic screenshots
 
 `scripts/mobile-visual-check.sh` builds the CLI and the mobile binary, seeds a
-collection under `.tmp`, starts a private headless sway session with a 390x844
+collection under `.tmp`, starts a private headless sway session with a phone-sized
 output, and captures the decks, question, answer, add, browse, and settings
-screens. It never uses the user's Wayland session or a system input tool.
+screens. It never uses the user's Wayland session or a system input tool. Set
+`MOBILE_VISUAL_WIDTH` and `MOBILE_VISUAL_HEIGHT` to capture another viewport.
 
-`AppState::new` reads two development variables for these captures:
+The app reads these development variables for the captures:
 
 | Variable | Value | Effect |
 | --- | --- | --- |
 | `RANKI_MOBILE_DEV_VIEW` | `decks`, `review`, `add`, `browse`, `settings` | Opens that screen at startup |
 | `RANKI_MOBILE_DEV_REVEAL` | `1` | Starts the review screen on the answer side |
+| `RANKI_MOBILE_DEV_WIDTH` / `RANKI_MOBILE_DEV_HEIGHT` | pixels | Sets the phone viewport size |
 
 Run it from the repository root:
 
 ```bash
 scripts/mobile-visual-check.sh
+MOBILE_VISUAL_WIDTH=360 MOBILE_VISUAL_HEIGHT=640 scripts/mobile-visual-check.sh
 ```
 
 The script prints the screenshot paths when it finishes. It removes its private
