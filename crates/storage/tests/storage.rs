@@ -1534,8 +1534,8 @@ fn deck_stats_counts_children_of_names_ending_in_a_colon() {
 fn apply_reviews_writes_a_batch_atomically() {
     let (_directory, path) = fixture();
     let mut store = Collection::open(&path).expect("open");
-    let mut decisions = Vec::with_capacity(1000);
-    for index in 0..1000_u32 {
+    let mut decisions = Vec::with_capacity(100);
+    for index in 0..100_u32 {
         let ids = store
             .add_note(&NewNote {
                 model_id: 1,

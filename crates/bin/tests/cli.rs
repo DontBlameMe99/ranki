@@ -337,3 +337,17 @@ fn deck_remove_refuses_to_delete_the_default_deck() {
     );
     assert!(app.run(&["decks"]).contains("Default"));
 }
+
+#[test]
+fn invalid_import_update_policy_is_rejected_before_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let isolated = Isolated::new(&dir, "invalid-policy");
+    let output = isolated
+        .command()
+        .args(["import", "missing.apkg", "--update-notes", "newer"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid update condition"), "{stderr}");
+}
