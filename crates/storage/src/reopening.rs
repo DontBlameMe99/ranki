@@ -88,6 +88,7 @@ impl Store for ReopeningCollection {
     read_methods! {
         decks() -> Result<Vec<Deck>, StoreError>;
         models() -> Result<Vec<NoteModel>, StoreError>;
+        tags() -> Result<Vec<String>, StoreError>;
         find_cards(query: &str) -> Result<Vec<Id>, StoreError>;
         due_cards(deck_id: Option<Id>, limit: usize, now_secs: i64)
             -> Result<Vec<Card>, StoreError>;

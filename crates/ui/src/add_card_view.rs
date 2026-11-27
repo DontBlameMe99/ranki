@@ -10,7 +10,10 @@ use gpui::{
 };
 
 use crate::{
-    app::{Root, UiAction, note_type_name, resolve_model},
+    app::{
+        AcceptTagSuggestion, DismissTagSuggestions, Root, UiAction,
+        note_type_name, resolve_model,
+    },
     card_view::{self, Side},
     components::{
         ClickHandler, Interaction, icon, keycap, removable_chip, same_press,
@@ -351,8 +354,20 @@ impl Root {
             left = left.child(validation(error, colors));
         }
         let tags_handle = tags_field.read(cx).focus_handle().clone();
+        let suggestions = if self.add.tag_suggestions_dismissed {
+            Vec::new()
+        } else {
+            self.tag_suggestions(cx)
+        };
+        let selected_suggestion = self
+            .add
+            .tag_suggestion
+            .min(suggestions.len().saturating_sub(1));
+        let key_suggestions = suggestions.len();
         let mut tags_row = div()
             .id("add-tags")
+            .debug_selector(|| "add-tags".to_owned())
+            .key_context("ranki_tag_input")
             .flex()
             .items_center()
             .flex_wrap()
@@ -362,7 +377,47 @@ impl Root {
             .py(px(SPACE_GROUP))
             .rounded(px(12.))
             .border_1()
-            .border_color(colors.surface1);
+            .border_color(colors.surface1)
+            .on_key_down(cx.listener(
+                move |this, event: &gpui::KeyDownEvent, _window, cx| {
+                    if key_suggestions == 0 {
+                        return;
+                    }
+                    let last = key_suggestions.saturating_sub(1);
+                    let key = event.keystroke.key.as_str();
+                    if key.eq_ignore_ascii_case("down") {
+                        this.add.tag_suggestions_dismissed = false;
+                        this.add.tag_suggestion =
+                            this.add.tag_suggestion.saturating_add(1).min(last);
+                        cx.notify();
+                        cx.stop_propagation();
+                    } else if key.eq_ignore_ascii_case("up") {
+                        this.add.tag_suggestions_dismissed = false;
+                        this.add.tag_suggestion =
+                            this.add.tag_suggestion.saturating_sub(1);
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .on_action(cx.listener(
+                move |this, _: &AcceptTagSuggestion, window, cx| {
+                    if key_suggestions == 0
+                        || this.add.tag_suggestions_dismissed
+                    {
+                        return;
+                    }
+                    let index =
+                        this.add.tag_suggestion.min(key_suggestions - 1);
+                    this.choose_tag_suggestion(index, window, cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &DismissTagSuggestions, _, cx| {
+                    this.add.tag_suggestions_dismissed = true;
+                    cx.notify();
+                },
+            ));
         let weak = cx.entity().downgrade();
         for tag in &tag_chips {
             let tag = tag.clone();
@@ -382,6 +437,16 @@ impl Root {
                 }),
             ));
         }
+        let suggestion_popup = if suggestions.is_empty() {
+            None
+        } else {
+            Some(Self::render_tag_suggestions(
+                suggestions,
+                selected_suggestion,
+                colors,
+                cx,
+            ))
+        };
         let tag_input = tags_field;
         let click_handle = tags_handle;
         let tags_group = div()
@@ -396,24 +461,32 @@ impl Root {
                     .child("Tags"),
             )
             .child(
-                tags_row
-                    .hover(move |style| style.bg(colors.surface0))
-                    .on_click(cx.listener(
-                        move |_, _: &ClickEvent, window, _| {
-                            window.focus(&click_handle);
-                        },
-                    ))
+                div()
+                    .relative()
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(SPACE_GROUP))
-                            .min_w(px(140.))
-                            .child(icon("icon-tag", 14., colors.mauve))
+                        tags_row
+                            .hover(move |style| style.bg(colors.surface0))
+                            .on_click(cx.listener(
+                                move |_, _: &ClickEvent, window, _| {
+                                    window.focus(&click_handle);
+                                },
+                            ))
                             .child(
-                                div().flex_1().min_w(px(80.)).child(tag_input),
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(SPACE_GROUP))
+                                    .min_w(px(140.))
+                                    .child(icon("icon-tag", 14., colors.mauve))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(80.))
+                                            .child(tag_input),
+                                    ),
                             ),
-                    ),
+                    )
+                    .children(suggestion_popup),
             );
 
         let preview = if occlusion_mode {
@@ -610,6 +683,70 @@ impl Root {
         );
 
         screen.child(div().flex().w_full().justify_center().child(column))
+    }
+
+    /// Popup list of tags already used in the collection.
+    fn render_tag_suggestions(
+        suggestions: Vec<String>,
+        selected: usize,
+        colors: crate::theme::Palette,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let mut list = div().flex().flex_col().gap(px(SPACE_INLINE));
+        for (index, tag) in suggestions.iter().enumerate() {
+            let active = index == selected;
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "add-tag-suggestion-{index}"
+                    )))
+                    .debug_selector(move || {
+                        format!("add-tag-suggestion-{index}")
+                    })
+                    .h(px(32.))
+                    .flex()
+                    .items_center()
+                    .px(px(SPACE_RELATED))
+                    .rounded(px(8.))
+                    .bg(if active {
+                        alpha(colors.mauve, 0.2)
+                    } else {
+                        colors.base
+                    })
+                    .text_color(if active { colors.mauve } else { colors.text })
+                    .text_size(px(13.))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.choose_tag_suggestion(index, window, cx);
+                        cx.stop_propagation();
+                    }))
+                    .child(tag.clone()),
+            );
+        }
+        div()
+            .id("add-tag-suggestions-popup")
+            .debug_selector(|| "add-tag-suggestions-popup".to_owned())
+            .absolute()
+            .left(px(0.))
+            .top(relative(1.0))
+            .mt(px(SPACE_INLINE))
+            .w(px(280.))
+            .occlude()
+            .on_mouse_down_out(cx.listener(
+                |this, _: &MouseDownEvent, _, cx| {
+                    this.add.tag_suggestions_dismissed = true;
+                    cx.notify();
+                },
+            ))
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_INLINE))
+            .p(px(SPACE_INLINE))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(colors.surface1)
+            .bg(colors.mantle)
+            .child(list)
     }
 
     /// Image-occlusion editor: upload control and drawing area.

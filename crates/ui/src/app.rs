@@ -41,6 +41,7 @@ pub const DEBOUNCE: Duration = Duration::from_millis(120);
 pub const FORECAST_DAYS: usize = 7;
 const TOAST_LIFETIME: Duration = Duration::from_secs(5);
 const MAX_REVIEW_TIME: Duration = Duration::from_secs(60);
+const TAG_SUGGESTION_LIMIT: usize = 6;
 
 mod actions;
 pub use actions::*;
@@ -494,6 +495,11 @@ pub struct AddState {
     pub fields: Vec<Entity<TextField>>,
     pub tags: Entity<TextField>,
     pub tag_chips: Vec<String>,
+
+    /// Tags already used in the collection, offered while typing.
+    pub known_tags: Vec<String>,
+    pub tag_suggestion: usize,
+    pub tag_suggestions_dismissed: bool,
     pub errors: BTreeMap<String, String>,
     pub media_filter: Entity<TextField>,
     pub deck_filter: Entity<TextField>,
@@ -841,6 +847,10 @@ impl Root {
                 fields: Vec::new(),
                 tags,
                 tag_chips: Vec::new(),
+
+                known_tags: Vec::new(),
+                tag_suggestion: 0,
+                tag_suggestions_dismissed: false,
                 errors: BTreeMap::new(),
                 media_filter,
                 deck_filter,
@@ -922,6 +932,12 @@ impl Root {
         if let Ok(tags) = env::var("RANKI_UI_DEV_TAGS") {
             root.add.tag_chips =
                 tags.split_whitespace().map(str::to_owned).collect();
+        }
+        if let Ok(query) = env::var("RANKI_UI_DEV_TAG_QUERY") {
+            root.view = View::AddCard;
+            root.add.tags.update(cx, |field, cx| field.seed(query, cx));
+            let focus = root.add.tags.read(cx).focus_handle().clone();
+            window.focus(&focus);
         }
         if let Ok(spec) = env::var("RANKI_UI_DEV_SCROLL")
             && let Some((delay, distance)) = spec.split_once(':')
@@ -1227,6 +1243,8 @@ impl Root {
             app.defer(move |app| {
                 let _ = weak.update(app, |root, cx| {
                     root.sync_tags(cx);
+                    root.add.tag_suggestion = 0;
+                    root.add.tag_suggestions_dismissed = false;
                     cx.notify();
                 });
             });
@@ -1241,6 +1259,42 @@ impl Root {
                 .tags
                 .update(cx, |field, cx| field.seed(remainder, cx));
         }
+    }
+
+    fn refresh_known_tags(&mut self) {
+        if let Ok(tags) = self.store.tags() {
+            self.add.known_tags = tags;
+        }
+    }
+
+    pub(crate) fn tag_suggestions(&self, cx: &Context<Self>) -> Vec<String> {
+        let query = self.add.tags.read(cx).text();
+        suggest_tags(
+            &self.add.known_tags,
+            &self.add.tag_chips,
+            &query,
+            TAG_SUGGESTION_LIMIT,
+        )
+    }
+
+    pub(crate) fn choose_tag_suggestion(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tag) = self.tag_suggestions(cx).get(index).cloned() else {
+            return;
+        };
+        if !self.add.tag_chips.contains(&tag) {
+            self.add.tag_chips.push(tag);
+        }
+        self.add.tags.update(cx, |field, cx| field.seed("", cx));
+        self.add.tag_suggestion = 0;
+        self.add.tag_suggestions_dismissed = true;
+        let focus = self.add.tags.read(cx).focus_handle().clone();
+        window.focus(&focus);
+        cx.notify();
     }
 
     fn edit_hook(cx: &mut Context<Self>) -> EditHook {
@@ -1422,6 +1476,7 @@ impl Root {
                 );
             }
         }
+        self.refresh_known_tags();
         if let Some(name) = chosen.as_ref()
             && let Some(index) = model_index(&self.models, name)
         {
@@ -2562,6 +2617,7 @@ impl Root {
                         self.refresh_stats();
                         self.refresh_browse(cx);
                         self.record_local_write();
+                        self.refresh_known_tags();
                         self.show_toast(ToastKind::Success, "Card removed", cx);
                     }
                     Err(error) => self.show_toast(
@@ -2850,6 +2906,7 @@ impl Root {
                     self.refresh_stats();
                     self.refresh_browse(cx);
                     self.record_local_write();
+                    self.refresh_known_tags();
                     self.view = View::Browse;
                     self.show_toast(ToastKind::Success, "Card updated", cx);
                 }
@@ -2882,6 +2939,7 @@ impl Root {
                     self.refresh_stats();
                     self.add.occlusion = OcclusionState::default();
                     self.record_local_write();
+                    self.refresh_known_tags();
                     self.show_toast(
                         ToastKind::Success,
                         format!("Added {count} cards"),
@@ -3891,6 +3949,28 @@ pub fn collect_tags(chips: &mut Vec<String>, text: &str) -> String {
     remainder.to_owned()
 }
 
+/// Tags that match the word being typed, excluding tags already on the note.
+#[must_use]
+pub fn suggest_tags(
+    known: &[String],
+    chips: &[String],
+    query: &str,
+    limit: usize,
+) -> Vec<String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let needle = query.to_lowercase();
+    known
+        .iter()
+        .filter(|tag| !chips.iter().any(|chip| chip == *tag))
+        .filter(|tag| tag.to_lowercase().contains(&needle))
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 /// Deck row metadata: child count for parents and total cards for every row.
 #[must_use]
@@ -4034,6 +4114,16 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", CancelDialog, Some("ranki_dialog")),
         KeyBinding::new("enter", SubmitDeck, Some("ranki_input")),
         KeyBinding::new("ctrl-enter", SaveNote, Some("ranki_input")),
+        KeyBinding::new(
+            "enter",
+            AcceptTagSuggestion,
+            Some("ranki_tag_input > ranki_input"),
+        ),
+        KeyBinding::new(
+            "escape",
+            DismissTagSuggestions,
+            Some("ranki_tag_input > ranki_input"),
+        ),
         KeyBinding::new("cmd-enter", SaveNote, Some("ranki_input")),
     ];
     bindings.extend(crate::text_field::key_bindings());

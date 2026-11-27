@@ -21,7 +21,8 @@ use super::{
     duration_label, empty_copy, empty_kind, filter_decks, focused_delta,
     forecast_bar_height, forecast_total, model_index, models_with_stock,
     next_due_deck, next_view, prepare_deck_rows, queue_counts, refreshed_card,
-    session_progress, sum_leaf_counts, validate_draft, validate_occlusion,
+    session_progress, suggest_tags, sum_leaf_counts, validate_draft,
+    validate_occlusion,
 };
 use gpui::{SharedString, point, px, size};
 
@@ -51,6 +52,13 @@ impl ranki_model::Store for ModalStore {
 
     fn models(&self) -> Result<Vec<NoteModel>, StoreError> {
         Ok(ranki_model::stock_models())
+    }
+
+    fn tags(&self) -> Result<Vec<String>, StoreError> {
+        Ok(["japan", "japanese", "verb", "noun"]
+            .iter()
+            .map(|tag| (*tag).to_owned())
+            .collect())
     }
 
     fn find_cards(&self, _: &str) -> Result<Vec<Id>, StoreError> {
@@ -2392,6 +2400,131 @@ fn tag_field_commits_words_into_chips() {
     assert_eq!(chips, ["japan", "verb"]);
     assert_eq!(collect_tags(&mut chips, " 	 "), "");
     assert_eq!(chips, ["japan", "verb"]);
+}
+
+#[test]
+fn tag_suggestions_match_the_word_being_typed() {
+    let known = ["japan", "Japanese", "verb", "noun"]
+        .iter()
+        .map(|tag| (*tag).to_owned())
+        .collect::<Vec<_>>();
+    let chips = [String::from("noun")];
+    assert_eq!(suggest_tags(&known, &chips, "ja", 6), ["japan", "Japanese"]);
+    assert_eq!(suggest_tags(&known, &chips, "VERB", 6), ["verb"]);
+    assert_eq!(suggest_tags(&known, &chips, "", 6), Vec::<String>::new());
+    assert_eq!(
+        suggest_tags(&known, &chips, "missing", 6),
+        Vec::<String>::new()
+    );
+    assert_eq!(suggest_tags(&known, &chips, "a", 1), ["japan"]);
+}
+
+#[gpui::test]
+fn tag_suggestions_open_while_typing_and_commit_a_tag(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|app| app.bind_keys(super::key_bindings()));
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: std::sync::Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    let preset = [
+        "long-existing-language-tag",
+        "another-long-existing-tag",
+        "third-long-existing-tag",
+    ];
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    cx.update_entity(&root, |root, cx| {
+        root.view = View::AddCard;
+        root.add.tag_chips =
+            preset.iter().map(|tag| (*tag).to_owned()).collect();
+        cx.notify();
+    });
+    let focus = cx.read_entity(&root, |root, cx| {
+        root.add.tags.read(cx).focus_handle().clone()
+    });
+    cx.update(|window, _| window.focus(&focus));
+    let draw = |cx: &mut gpui::VisualTestContext| {
+        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+            root.clone()
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    };
+    draw(cx);
+
+    cx.simulate_keystrokes("j a");
+    draw(cx);
+    assert!(
+        cx.debug_bounds("add-tag-suggestions-popup").is_some(),
+        "typing should open the tag popup"
+    );
+    let input = cx.debug_bounds("add-tags").expect("tag input bounds");
+    let first = cx
+        .debug_bounds("add-tag-suggestion-0")
+        .expect("first suggestion bounds");
+    assert!(first.origin.y >= input.bottom());
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        cx.read_entity(&root, |root, _| root.add.tag_suggestions_dismissed),
+        "escape dismisses the popup"
+    );
+    cx.simulate_keystrokes("backspace backspace j a");
+    cx.run_until_parked();
+    draw(cx);
+    assert!(
+        !cx.read_entity(&root, |root, _| root.add.tag_suggestions_dismissed),
+        "typing reopens the popup"
+    );
+
+    cx.simulate_keystrokes("down");
+    assert_eq!(
+        cx.read_entity(&root, |root, _| root.add.tag_suggestion),
+        1,
+        "down highlights the next suggestion"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    draw(cx);
+    let (chips, text) = cx.read_entity(&root, |root, cx| {
+        (root.add.tag_chips.clone(), root.add.tags.read(cx).text())
+    });
+    let mut expected = preset
+        .iter()
+        .map(|tag| (*tag).to_owned())
+        .collect::<Vec<_>>();
+    expected.push(String::from("japanese"));
+    assert_eq!(chips, expected);
+    assert_eq!(text, "");
+
+    cx.simulate_keystrokes("v e r");
+    draw(cx);
+    let row = cx
+        .debug_bounds("add-tag-suggestion-0")
+        .expect("verb suggestion bounds");
+    cx.simulate_click(row.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    draw(cx);
+    let (chips, text) = cx.read_entity(&root, |root, cx| {
+        (root.add.tag_chips.clone(), root.add.tags.read(cx).text())
+    });
+    expected.push(String::from("verb"));
+    assert_eq!(chips, expected);
+    assert_eq!(text, "");
+    assert!(
+        cx.read_entity(&root, |root, _| root.add.tag_suggestions_dismissed),
+        "choosing a tag closes the popup"
+    );
 }
 
 #[test]

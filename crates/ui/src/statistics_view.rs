@@ -11,7 +11,7 @@ use ranki_model::{Rating, RevLog, RevLogKind};
 
 use crate::{
     app::{Root, duration_label},
-    components::{icon, panel},
+    components::panel,
     theme::{
         PAGE_X, PAGE_Y, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE,
         SPACE_SECTION, Style, alpha, blend, queue_text,
