@@ -1266,9 +1266,9 @@ impl Root {
         if root.view == View::Review {
             match root.selected {
                 Some(index) if !saved.review_all_decks => {
-                    root.study_deck(index, cx);
+                    root.study_deck(index, window, cx);
                 }
-                _ => root.study_all(cx),
+                _ => root.study_all(window, cx),
             }
         }
         root.reset_fields(cx);
@@ -1346,11 +1346,11 @@ impl Root {
         }
         match env::var("RANKI_UI_DEV_VIEW").as_deref() {
             Ok("question") => {
-                root.study_all(cx);
+                root.study_all(window, cx);
                 root.review.phase = Phase::Question;
             }
             Ok("answer") => {
-                root.study_all(cx);
+                root.study_all(window, cx);
                 root.review.phase = Phase::Answer;
             }
             _ => {}
@@ -1370,7 +1370,7 @@ impl Root {
             && let Some(index) =
                 root.decks.iter().position(|deck| deck.id == id)
         {
-            root.study_deck(index, cx);
+            root.study_deck(index, window, cx);
         }
         if let Ok(rating) = env::var("RANKI_UI_DEV_GRADE")
             && let Some(rating) = match rating.as_str() {
@@ -2563,8 +2563,14 @@ impl Root {
         )
     }
 
-    pub(crate) fn study_deck(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn study_deck(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(deck) = self.decks.get(index) {
+            window.focus(&self.focus);
             self.selected = Some(index);
             self.review = ReviewState::default();
             let now = Self::now();
@@ -2591,7 +2597,12 @@ impl Root {
         }
     }
 
-    pub(crate) fn study_all(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn study_all(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus);
         self.review = ReviewState::default();
         self.review.scope_all = true;
         let now = Self::now();
@@ -2659,10 +2670,16 @@ impl Root {
     }
 
     /// Restarts the session the summary just ended, with the same scope.
-    pub(crate) fn study_again(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn study_again(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match self.selected {
-            Some(index) if !self.review.scope_all => self.study_deck(index, cx),
-            _ => self.study_all(cx),
+            Some(index) if !self.review.scope_all => {
+                self.study_deck(index, window, cx);
+            }
+            _ => self.study_all(window, cx),
         }
     }
 
@@ -3572,7 +3589,7 @@ impl Root {
                         || self.review.load_errors > 0
                         || self.review.load_error.is_some())
                 {
-                    self.study_again(cx);
+                    self.study_again(window, cx);
                 }
             }
             UiAction::EndSession => {
@@ -3684,7 +3701,7 @@ impl Root {
                 let next =
                     next_due_deck(&self.decks, &self.stats, self.selected);
                 if let Some(index) = next {
-                    self.study_deck(index, cx);
+                    self.study_deck(index, window, cx);
                 }
             }
             UiAction::ClearSearch => {

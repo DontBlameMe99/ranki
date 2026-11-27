@@ -1390,7 +1390,9 @@ fn repeated_hard_answers_leave_progress_unchanged(
             cx,
         )
     });
-    cx.update_entity(&root, super::Root::study_all);
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| root.study_all(window, cx));
+    });
 
     let mut grade = |rating| {
         cx.update_entity(&root, |root, cx| {
@@ -1450,7 +1452,9 @@ fn finishing_a_session_starts_one_quiet_sync(cx: &mut gpui::TestAppContext) {
         });
         root
     });
-    cx.update_entity(&root, super::Root::study_all);
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| root.study_all(window, cx));
+    });
 
     cx.update_entity(&root, |root, cx| {
         root.review.phase = Phase::Answer;
@@ -1680,7 +1684,9 @@ fn space_ends_a_caught_up_session(cx: &mut gpui::TestAppContext) {
             cx,
         )
     });
-    cx.update_entity(&root, |root, cx| root.study_deck(0, cx));
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| root.study_deck(0, window, cx));
+    });
     cx.run_until_parked();
     cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
         root.clone()
@@ -2842,7 +2848,9 @@ fn again_waits_behind_the_cards_already_due(cx: &mut gpui::TestAppContext) {
             cx,
         )
     });
-    cx.update_entity(&root, super::Root::study_all);
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| root.study_all(window, cx));
+    });
     let current = |cx: &mut gpui::TestAppContext| {
         cx.read_entity(&root, |root, _| {
             root.review.current.as_ref().map(|card| card.id)
@@ -3053,6 +3061,70 @@ fn space_reveals_after_clicking_a_deck_row(cx: &mut gpui::TestAppContext) {
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
+
+    cx.simulate_keystrokes("space");
+
+    let phase = cx.read_entity(&root, |root, _| root.review.phase);
+    assert_eq!(phase, Phase::Answer);
+}
+
+#[gpui::test]
+fn space_reveals_after_study_all_from_focused_search(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("collection.anki2");
+    let mut store =
+        ranki_storage::Collection::create(&path).expect("collection");
+    store
+        .add_note(&NewNote {
+            model_id: 1,
+            deck_id: 1,
+            fields: vec![String::from("Question?"), String::from("Answer!")],
+            tags: Vec::new(),
+        })
+        .expect("note");
+    let options = Options {
+        paths: ranki_model::DataPaths::new(dir.path()),
+        ..Options::default()
+    };
+    let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
+    cx.update(|cx| cx.bind_keys(super::key_bindings()));
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(store),
+                options,
+                save_settings,
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let search = cx.read_entity(&root, |root, cx| {
+        root.deck_search.read(cx).focus_handle().clone()
+    });
+    cx.update(|window, _| window.focus(&search));
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| root.study_all(window, cx));
+    });
+    cx.run_until_parked();
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(!cx.update(|window, _| search.is_focused(window)));
+    assert_eq!(cx.read_entity(&root, |root, _| root.view), View::Review);
+    assert!(cx.read_entity(&root, |root, _| root.review.current.is_some()));
 
     cx.simulate_keystrokes("space");
 

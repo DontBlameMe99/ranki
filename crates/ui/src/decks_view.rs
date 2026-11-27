@@ -405,8 +405,8 @@ impl Root {
                                             .cursor_pointer(),
                                     )
                                     .on_click(cx.listener(
-                                        |this, _: &ClickEvent, _, cx| {
-                                            this.study_all(cx);
+                                        |this, _: &ClickEvent, window, cx| {
+                                            this.study_all(window, cx);
                                         },
                                     ))
                                     .child(icon("icon-play", 18., style.ink()))
@@ -731,8 +731,7 @@ impl Root {
                         .on_click(cx.listener(
                             move |this, _: &ClickEvent, window, cx| {
                                 cx.stop_propagation();
-                                this.focus.focus(window);
-                                this.study_deck(target, cx);
+                                this.study_deck(target, window, cx);
                             },
                         ))
                         .child("Study"),
@@ -840,8 +839,7 @@ impl Root {
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 if let Some(index) = index {
-                    this.focus.focus(window);
-                    this.study_deck(index, cx);
+                    this.study_deck(index, window, cx);
                 }
             }))
             .bg(if is_selected {
