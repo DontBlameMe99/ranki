@@ -36,9 +36,12 @@ use std::str;
 pub use ranki_model::StoreError;
 pub use ranki_model::stock_models;
 
+pub use anki::deck_kind_config_id;
 pub use anki::decode_deck_name;
 pub use anki::encode_deck_name;
 pub use anki::normal_deck_kind;
+pub use anki::protobuf_floats;
+pub use anki::with_deck_kind_config_id;
 pub use reopening::ReopeningCollection;
 
 pub use records::models_from_tables_with_prefix;
@@ -48,6 +51,7 @@ use ranki_model::Card;
 use ranki_model::DEFAULT_DECK_ID;
 use ranki_model::Deck;
 use ranki_model::DeckStats;
+use ranki_model::DeckSteps;
 use ranki_model::DeckTotals;
 use ranki_model::Id;
 use ranki_model::NewNote;
@@ -1080,6 +1084,10 @@ impl Store for Collection {
         rows.collect::<Result<Vec<_>, _>>().map_err(backend)
     }
 
+    fn deck_steps(&self, deck_id: Id) -> Result<DeckSteps, StoreError> {
+        read_deck_steps(&self.conn, deck_id)
+    }
+
     fn collection_created(&self) -> Result<i64, StoreError> {
         Self::collection_created(self)
     }
@@ -1087,6 +1095,150 @@ impl Store for Collection {
     fn collection_modified(&self) -> Result<i64, StoreError> {
         Ok(read_stamps(&self.conn)?.modified)
     }
+}
+
+fn read_deck_steps(
+    conn: &Connection,
+    deck_id: Id,
+) -> Result<DeckSteps, StoreError> {
+    if let Some(steps) = modern_deck_steps(conn, deck_id)? {
+        return Ok(steps);
+    }
+    if let Some(steps) = legacy_deck_steps(conn, deck_id)? {
+        return Ok(steps);
+    }
+    Ok(DeckSteps::default())
+}
+
+#[expect(
+    clippy::excessive_nesting,
+    clippy::shadow_reuse,
+    reason = "deck lookup keeps Anki's metadata fallbacks together"
+)]
+fn legacy_deck_steps(
+    conn: &Connection,
+    deck_id: Id,
+) -> Result<Option<DeckSteps>, StoreError> {
+    let raw: Option<(String, String)> = conn
+        .query_row("SELECT decks, dconf FROM col WHERE id = 1", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()
+        .map_err(backend)?;
+    let Some((decks, dconf)) = raw else {
+        return Ok(None);
+    };
+    let decks: Json = serde_json::from_str(&decks)
+        .map_err(|error| invalid(error.to_string()))?;
+    let dconf: Json = serde_json::from_str(&dconf)
+        .map_err(|error| invalid(error.to_string()))?;
+    let Some(deck) = decks.get(deck_id.to_string()).or_else(|| {
+        decks.as_object().and_then(|entries| {
+            entries.values().find(|entry| {
+                entry.get("id").and_then(Json::as_i64) == Some(deck_id)
+            })
+        })
+    }) else {
+        return Ok(None);
+    };
+    let config_id = deck
+        .get("conf")
+        .and_then(Json::as_i64)
+        .filter(|id| *id > 0)
+        .unwrap_or(1);
+    let Some(config) = dconf.get(config_id.to_string()) else {
+        return Ok(None);
+    };
+    let learning = config
+        .get("new")
+        .and_then(|new| new.get("delays"))
+        .and_then(Json::as_array);
+    let relearning = config
+        .get("lapse")
+        .and_then(|lapse| lapse.get("delays"))
+        .and_then(Json::as_array);
+    if learning.is_none() && relearning.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(DeckSteps {
+        learning: steps_from_json_minutes(learning.unwrap_or(&Vec::new())),
+        relearning: steps_from_json_minutes(relearning.unwrap_or(&Vec::new())),
+    }))
+}
+
+#[expect(
+    clippy::shadow_reuse,
+    reason = "decoded blobs replace their optional query results"
+)]
+fn modern_deck_steps(
+    conn: &Connection,
+    deck_id: Id,
+) -> Result<Option<DeckSteps>, StoreError> {
+    if !records::table_exists(conn, "decks")?
+        || !records::table_exists(conn, "deck_config")?
+    {
+        return Ok(None);
+    }
+    let kind: Option<Vec<u8>> = conn
+        .query_row("SELECT kind FROM decks WHERE id = ?1", [deck_id], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(backend)?;
+    let Some(kind) = kind else {
+        return Ok(None);
+    };
+    let Some(config_id) = anki::deck_kind_config_id(&kind) else {
+        return Ok(None);
+    };
+    let config: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT config FROM deck_config WHERE id = ?1",
+            [config_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(backend)?;
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    Ok(Some(DeckSteps {
+        learning: steps_from_float_minutes(&anki::protobuf_floats(&config, 1)),
+        relearning: steps_from_float_minutes(&anki::protobuf_floats(
+            &config, 2,
+        )),
+    }))
+}
+
+fn steps_from_json_minutes(values: &[Json]) -> Vec<u32> {
+    values
+        .iter()
+        .filter_map(Json::as_f64)
+        .filter_map(minutes_to_seconds)
+        .collect()
+}
+
+fn steps_from_float_minutes(values: &[f32]) -> Vec<u32> {
+    values
+        .iter()
+        .copied()
+        .map(f64::from)
+        .filter_map(minutes_to_seconds)
+        .collect()
+}
+
+fn minutes_to_seconds(minutes: f64) -> Option<u32> {
+    let seconds = (minutes * 60.0).round();
+    if !(1.0..=f64::from(u32::MAX)).contains(&seconds) {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "seconds are checked against the u32 range"
+    )]
+    let value = seconds as u32;
+    Some(value)
 }
 
 /// Registers the case-insensitive collation used by schema-18 table indexes.

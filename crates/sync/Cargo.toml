@@ -16,5 +16,9 @@ rusqlite = { version = "0.43.0", features = ["bundled", "collation"] }
 sha1 = { workspace = true }
 zip = { workspace = true }
 
+[dev-dependencies]
+ranki-model.workspace = true
+ranki-storage.workspace = true
+
 [lints]
 workspace = true

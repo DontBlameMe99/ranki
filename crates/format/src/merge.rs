@@ -221,8 +221,8 @@ fn read_col(
         } else {
             decks
         },
-        dconf: if incoming && is_empty_object(&dconf) {
-            modern_id_map(connection, prefix, "deck_config")
+        dconf: if is_empty_object(&dconf) {
+            modern_dconf(connection, prefix)?
         } else {
             dconf
         },
@@ -275,6 +275,48 @@ fn modern_conf(connection: &Connection, prefix: &str) -> Value {
     Value::Object(conf)
 }
 
+/// Reads schema-18 deck presets into the legacy `dconf` JSON shape.
+fn modern_dconf(
+    connection: &Connection,
+    prefix: &str,
+) -> Result<Value, FormatError> {
+    let mut entries = Map::new();
+    let Ok(mut statement) = connection.prepare(&format!(
+        "SELECT id, name, config FROM {prefix}.deck_config ORDER BY id"
+    )) else {
+        return Ok(Value::Object(entries));
+    };
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })
+        .map_err(db_error("cannot read package deck presets"))?;
+    for row in rows {
+        let (id, name, config) =
+            row.map_err(db_error("cannot read package deck preset"))?;
+        let delays = |field| {
+            ranki_storage::protobuf_floats(&config, field)
+                .into_iter()
+                .map(|minutes| json!(f64::from(minutes)))
+                .collect::<Vec<_>>()
+        };
+        entries.insert(
+            id.to_string(),
+            json!({
+                "id": id,
+                "name": name,
+                "new": {"delays": delays(1)},
+                "lapse": {"delays": delays(2)},
+            }),
+        );
+    }
+    Ok(Value::Object(entries))
+}
+
 fn modern_id_map(connection: &Connection, prefix: &str, table: &str) -> Value {
     let sql = format!("SELECT id, name FROM {prefix}.{table}");
     let mut map = Map::new();
@@ -290,6 +332,19 @@ fn modern_id_map(connection: &Connection, prefix: &str, table: &str) -> Value {
         let Ok((id, name)) = row else {
             continue;
         };
+        let config_id = if table == "decks" {
+            connection
+                .query_row(
+                    &format!("SELECT kind FROM {prefix}.decks WHERE id = ?1"),
+                    [id],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .ok()
+                .and_then(|kind| ranki_storage::deck_kind_config_id(&kind))
+                .unwrap_or(1)
+        } else {
+            1
+        };
         let entry = match table {
             "notetypes" => {
                 json!({"id": id, "name": name, "did": 1, "flds": [], "tmpls": []})
@@ -297,7 +352,7 @@ fn modern_id_map(connection: &Connection, prefix: &str, table: &str) -> Value {
             "decks" => json!({
                 "id": id,
                 "name": ranki_storage::decode_deck_name(&name),
-                "conf": 1
+                "conf": config_id
             }),
             _ => json!({"id": id, "name": name}),
         };
@@ -362,7 +417,8 @@ fn write_deck_rows(
     let copy = has_table(transaction, "incoming", "decks")?;
     for (old_id, new_id) in &state.imported_decks {
         if copy {
-            let _ = copy_deck_row(transaction, *old_id, *new_id)?;
+            let _ =
+                copy_deck_row(transaction, *old_id, *new_id, &state.dconf_map)?;
         } else {
             insert_deck_row(transaction, &merged.decks, *new_id)?;
         }
@@ -417,18 +473,52 @@ fn has_table(
         .map_err(db_error(format!("cannot inspect {prefix} schema")))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "deck copy needs both ids and the preset remap"
+)]
 fn copy_deck_row(
     transaction: &Transaction<'_>,
     old_id: i64,
     new_id: i64,
+    dconf_map: &BTreeMap<i64, i64>,
 ) -> Result<usize, FormatError> {
-    transaction
+    let kind: Option<Vec<u8>> = transaction
+        .query_row(
+            "SELECT kind FROM incoming.decks WHERE id = ?1",
+            [old_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error("cannot read imported deck"))?;
+    let mut remapped_kind = None;
+    if let Some(bytes) = &kind
+        && let Some(config_id) = ranki_storage::deck_kind_config_id(bytes)
+        && let Some(new_config_id) = dconf_map.get(&config_id).copied()
+        && let Some(rewritten) =
+            ranki_storage::with_deck_kind_config_id(bytes, new_config_id)
+    {
+        remapped_kind = Some(rewritten);
+    }
+    let stored_kind = remapped_kind.clone().or(kind);
+    let inserted = transaction
         .execute(
             "INSERT OR IGNORE INTO main.decks (id, name, mtime_secs, usn, common, kind)
-             SELECT ?2, name, mtime_secs, usn, common, kind FROM incoming.decks WHERE id = ?1",
-            params![old_id, new_id],
+             SELECT ?2, name, mtime_secs, usn, common, ?3 FROM incoming.decks WHERE id = ?1",
+            params![old_id, new_id, stored_kind],
         )
-        .map_err(db_error("cannot copy imported deck"))
+        .map_err(db_error("cannot copy imported deck"))?;
+    if inserted == 0
+        && let Some(rewritten) = remapped_kind
+    {
+        transaction
+            .execute(
+                "UPDATE main.decks SET kind = ?1 WHERE id = ?2",
+                params![rewritten, new_id],
+            )
+            .map_err(db_error("cannot update imported deck preset"))?;
+    }
+    Ok(inserted)
 }
 
 fn copy_config_row(
@@ -440,9 +530,22 @@ fn copy_config_row(
         "INSERT OR IGNORE INTO main.{table} (id, name, mtime_secs, usn, config)
          SELECT ?2, name, mtime_secs, usn, config FROM incoming.{table} WHERE id = ?1"
     );
-    transaction
+    let inserted = transaction
         .execute(&sql, params![old_id, new_id])
-        .map_err(db_error(format!("cannot copy imported {table}")))
+        .map_err(db_error(format!("cannot copy imported {table}")))?;
+    if inserted == 0 && table == "deck_config" {
+        transaction
+            .execute(
+                "UPDATE main.deck_config SET config = (
+                     SELECT config FROM incoming.deck_config WHERE id = ?1
+                 )
+                 WHERE id = ?2 AND length(config) = 0
+                   AND EXISTS(SELECT 1 FROM incoming.deck_config WHERE id = ?1)",
+                params![old_id, new_id],
+            )
+            .map_err(db_error("cannot copy imported deck preset"))?;
+    }
+    Ok(inserted)
 }
 
 fn copy_notetype_fields(
@@ -631,6 +734,16 @@ fn merge_sparse_config(existing: Option<&Value>, incoming: &Value) -> Value {
     Value::Object(merged)
 }
 
+fn step_delays(config: &Value) -> (Option<Value>, Option<Value>) {
+    let delays = |section: &str| {
+        config
+            .get(section)
+            .and_then(|entry| entry.get("delays"))
+            .cloned()
+    };
+    (delays("new"), delays("lapse"))
+}
+
 #[expect(
     clippy::excessive_nesting,
     reason = "sparse schema-18 preset entries inherit destination defaults"
@@ -647,7 +760,6 @@ fn merge_dconf(
 
     for (key, mut value) in incoming_configs {
         let old_id = entry_id(&key, &value, "deck config")?;
-        let new_id = claim_id(&mut used, state, old_id)?;
         let config_name =
             value.get("name").and_then(Value::as_str).map(str::to_owned);
         let existing = configs
@@ -660,6 +772,15 @@ fn merge_dconf(
                 })
             })
             .cloned();
+        if let Some(id) = existing
+            .as_ref()
+            .filter(|entry| step_delays(entry) == step_delays(&value))
+            .and_then(|entry| entry.get("id").and_then(Value::as_i64))
+        {
+            mapping.insert(old_id, id);
+            continue;
+        }
+        let new_id = claim_id(&mut used, state, old_id)?;
         let base = existing.or_else(|| {
             configs
                 .values()
@@ -733,7 +854,15 @@ fn merge_decks(
             .cloned();
         value = merge_sparse_config(base.as_ref(), &value);
         set_id(&mut value, new_id, "deck")?;
-        if merged.is_none() {
+        if merged.is_some() {
+            if let (Some(entry), Some(conf)) = (
+                decks.get_mut(&new_id.to_string()),
+                value.get("conf").cloned(),
+            ) && let Some(object) = entry.as_object_mut()
+            {
+                let _ = object.insert("conf".to_owned(), conf);
+            }
+        } else {
             decks.insert(new_id.to_string(), value);
         }
     }

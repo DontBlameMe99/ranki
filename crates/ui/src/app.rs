@@ -16,8 +16,8 @@ use gpui::{
 };
 use ranki_core::{FsrsScheduler, from_settings};
 use ranki_model::{
-    Card, CardQueue, CardType, Deck, DeckStats, Id, NewNote, Note, NoteModel,
-    Rating, ReviewDecision, StockModelKind, Store, UiState, UiView,
+    Card, CardQueue, CardType, Deck, DeckStats, DeckSteps, Id, NewNote, Note,
+    NoteModel, Rating, ReviewDecision, StockModelKind, Store, UiState, UiView,
 };
 
 use crate::{
@@ -577,6 +577,8 @@ pub struct ReviewState {
     /// Last grade this session, cleared once it is undone or replaced.
     pub last_grade: Option<UndoEntry>,
     pub previews: [i32; 4],
+    /// Step delays from the current card's deck preset.
+    pub steps: DeckSteps,
     pub more_due: bool,
     pub load_errors: usize,
     pub load_error: Option<String>,
@@ -2871,6 +2873,8 @@ impl Root {
         self.review.occlusion_image_size = loaded.occlusion_image_size;
         self.review.last_tick = Some(Instant::now());
         self.review.last_grade_at = Some(Instant::now());
+        self.review.steps =
+            self.store.deck_steps(card.deck_id).unwrap_or_default();
         self.refresh_previews();
     }
 
@@ -2913,7 +2917,8 @@ impl Root {
         };
         let now = Self::now();
         let start = self.collection_start;
-        self.review.previews = self.scheduler.preview_all(card, now, start);
+        let scheduler = self.scheduler.with_steps(&self.review.steps);
+        self.review.previews = scheduler.preview_all(card, now, start);
     }
 
     pub(crate) fn grade(&mut self, rating: Rating, cx: &mut Context<Self>) {
@@ -2937,7 +2942,8 @@ impl Root {
         {
             return;
         }
-        let decision: ReviewDecision = self.scheduler.schedule(
+        let scheduler = self.scheduler.with_steps(&self.review.steps);
+        let decision: ReviewDecision = scheduler.schedule(
             &card,
             rating,
             Self::now(),

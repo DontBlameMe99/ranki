@@ -235,6 +235,22 @@ pub struct RevLog {
     pub kind: RevLogKind,
 }
 
+/// Learning and relearning step delays from an Anki deck preset, in seconds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeckSteps {
+    pub learning: Vec<u32>,
+    pub relearning: Vec<u32>,
+}
+
+impl Default for DeckSteps {
+    fn default() -> Self {
+        Self {
+            learning: vec![60, 600],
+            relearning: vec![600],
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deck {
     pub id: Id,
@@ -529,6 +545,19 @@ pub trait Store {
         limit: usize,
         now_secs: i64,
     ) -> Result<Vec<Card>, StoreError>;
+
+    /// Returns the learning and relearning steps configured for a deck.
+    ///
+    /// Implementations without deck presets return
+    /// [`StoreError::Unsupported`], and callers fall back to Anki's defaults.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection metadata cannot be read.
+    fn deck_steps(&self, _deck_id: Id) -> Result<DeckSteps, StoreError> {
+        Err(StoreError::Unsupported(
+            "deck steps are not supported by this store".to_owned(),
+        ))
+    }
 
     /// Loads one card by id.
     ///

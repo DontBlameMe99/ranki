@@ -4,6 +4,9 @@ use crate::{
     SyncMethod, SyncOutcome, SyncResponse, SyncState, client_version,
     meta_client_version, wire,
 };
+use ranki_model::DeckSteps;
+use ranki_model::Store;
+use ranki_storage::Collection as AnkiCollection;
 use rusqlite::{Connection, params};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
@@ -627,6 +630,63 @@ fn empty_local_collection_downloads_a_populated_remote() -> TestResult {
         connection
             .query_row("SELECT count(*) FROM cards", [], |row| row.get(0))?;
     assert_eq!(cards, 1);
+    Ok(())
+}
+
+#[test]
+fn synced_collection_keeps_deck_steps_from_ankiweb() -> TestResult {
+    let directory = TempDir::new()?;
+    let source = directory.path().join("source.anki2");
+    let collection = directory.path().join("collection.anki2");
+    let media = directory.path().join("media");
+    let state_path = directory.path().join("sync.json");
+    make_collection(&source, (900, 500, 1))?;
+    {
+        let connection = Connection::open(&source)?;
+        let decks = json!({"1": {"id": 1, "conf": 1}}).to_string();
+        let dconf = json!({
+            "1": {
+                "id": 1,
+                "new": {"delays": [5.0, 20.0]},
+                "lapse": {"delays": [3.0]},
+            }
+        })
+        .to_string();
+        connection.execute(
+            "UPDATE col SET decks = ?1, dconf = ?2 WHERE id = 1",
+            params![decks, dconf],
+        )?;
+    }
+    make_collection(&collection, (100, 100, 0))?;
+    write_state(&state_path, &seeded_state(&fixture_key(&directory)))?;
+    let transport = MockTransport::new()
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((900, 500, false, now_secs()?))?,
+        )
+        .with_response(
+            SyncMethod::Download,
+            MockResponse::ok_bytes(fs::read(&source)?)?,
+        )
+        .with_response(SyncMethod::MediaBegin, media_begin(0)?)
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((900, 500, false, now_secs()?))?,
+        );
+    let mut client =
+        SyncClient::new(transport, &collection, &media, &state_path)?;
+
+    assert_eq!(client.sync(None)?, SyncOutcome::Downloaded);
+
+    let store =
+        AnkiCollection::open(&collection).expect("open synced collection");
+    assert_eq!(
+        store.deck_steps(1).expect("steps"),
+        DeckSteps {
+            learning: vec![300, 1_200],
+            relearning: vec![180],
+        }
+    );
     Ok(())
 }
 

@@ -1007,8 +1007,10 @@ pub(crate) fn answer_card<S: Store>(
         CliError::Message(format!("card not found: {card_id}"))
     })?;
     let collection_start_secs = store.collection_created()?;
+    let deck_scheduler =
+        ranki_core::scheduler_for_card(scheduler, store, &card);
     let decision =
-        scheduler.schedule(&card, rating, now, collection_start_secs);
+        deck_scheduler.schedule(&card, rating, now, collection_start_secs);
     store.apply_review(&decision)?;
     Ok(decision)
 }

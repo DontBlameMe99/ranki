@@ -18,6 +18,7 @@ use ranki_format::export_apkg;
 use ranki_format::export_colpkg;
 use ranki_format::import_apkg;
 use ranki_format::import_colpkg;
+use ranki_model::DeckSteps;
 use ranki_model::Store;
 use ranki_storage::Collection as AnkiCollection;
 use rusqlite::Connection;
@@ -368,6 +369,45 @@ fn fresh_import_preserves_source_crt_and_due_scale() {
     assert_eq!(due.as_slice(), &[]);
     let card = store.card(100).unwrap().unwrap();
     assert_eq!(card.due, source_due);
+}
+
+#[test]
+fn import_keeps_deck_learning_steps() {
+    let fixture = Fixture::new();
+    let connection = Connection::open(&fixture.source).unwrap();
+    let dconf = json!({
+        "1": {
+            "id": 1,
+            "name": "Default",
+            "new": {"delays": [5.0, 20.0]},
+            "lapse": {"delays": [3.0, 0.5]},
+        }
+    });
+    connection
+        .execute(
+            "UPDATE col SET dconf = ?1 WHERE id = 1",
+            [dconf.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let package = fixture.package();
+    let (collection, _, _) = fixture.import(&package, "steps");
+    let store = AnkiCollection::open(&collection).unwrap();
+    let deck_id = store
+        .decks()
+        .unwrap()
+        .into_iter()
+        .find(|deck| deck.name == "Default")
+        .unwrap()
+        .id;
+    assert_eq!(
+        store.deck_steps(deck_id).unwrap(),
+        DeckSteps {
+            learning: vec![300, 1_200],
+            relearning: vec![180, 30],
+        }
+    );
 }
 
 #[test]
@@ -1831,6 +1871,79 @@ fn schema18_destination_copies_new_deck_and_note_type_rows() {
 }
 
 #[test]
+fn schema18_import_keeps_deck_steps_with_remapped_preset() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("modern.anki2");
+    write_schema18_collection(
+        &destination,
+        &[(1, "Default")],
+        &[],
+        &Seed {
+            notes: vec![],
+            cards: vec![],
+            revlog: false,
+        },
+    );
+    let mut old_config = schema18_floats(1, &[1.0, 10.0]);
+    old_config.extend(schema18_floats(2, &[10.0]));
+    let connection = Connection::open(&destination).unwrap();
+    connection
+        .execute(
+            "UPDATE deck_config SET config = ?1 WHERE id = 2",
+            [old_config],
+        )
+        .unwrap();
+    drop(connection);
+    let source = dir.path().join("schema18-source.anki2");
+    write_schema18_collection(
+        &source,
+        &[(1, "Default"), (700, "Flags")],
+        &[],
+        &schema18_seed(1, 700),
+    );
+    let mut config = schema18_floats(1, &[5.0, 20.0]);
+    config.extend(schema18_floats(2, &[3.0]));
+    let connection = Connection::open(&source).unwrap();
+    connection
+        .execute(
+            "UPDATE decks SET kind = ?1 WHERE id = 700",
+            [ranki_storage::normal_deck_kind(2)],
+        )
+        .unwrap();
+    connection
+        .execute("UPDATE deck_config SET config = ?1 WHERE id = 2", [config])
+        .unwrap();
+    drop(connection);
+    let package = schema18_package(dir.path(), &source);
+    import_into(dir.path(), &package, &destination);
+
+    let store = AnkiCollection::open(&destination).unwrap();
+    let deck_id = store
+        .decks()
+        .unwrap()
+        .into_iter()
+        .find(|deck| deck.name == "Flags")
+        .unwrap()
+        .id;
+    assert_eq!(
+        store.deck_steps(deck_id).unwrap(),
+        DeckSteps {
+            learning: vec![300, 1_200],
+            relearning: vec![180],
+        }
+    );
+}
+
+fn schema18_floats(field: u32, values: &[f32]) -> Vec<u8> {
+    let mut bytes = vec![u8::try_from((field << 3) | 2).unwrap()];
+    bytes.push(u8::try_from(values.len().checked_mul(4).unwrap()).unwrap());
+    for value in values {
+        bytes.extend(value.to_le_bytes());
+    }
+    bytes
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "fixture and assertions read better in one test"
@@ -1928,6 +2041,114 @@ fn schema18_destination_keeps_tables_in_sync_with_merged_metadata() {
             "merged"
         ),
         1
+    );
+}
+
+#[test]
+fn fresh_legacy_import_keeps_schema18_deck_steps() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("schema18-source.anki2");
+    write_schema18_collection(
+        &source,
+        &[(1, "Default"), (700, "Flags")],
+        &[],
+        &schema18_seed(1, 700),
+    );
+    let mut config = schema18_floats(1, &[5.0, 20.0]);
+    config.extend(schema18_floats(2, &[3.0]));
+    let connection = Connection::open(&source).unwrap();
+    connection
+        .execute(
+            "UPDATE decks SET kind = ?1 WHERE id = 700",
+            [ranki_storage::normal_deck_kind(2)],
+        )
+        .unwrap();
+    connection
+        .execute("UPDATE deck_config SET config = ?1 WHERE id = 2", [config])
+        .unwrap();
+    drop(connection);
+    let package = schema18_package(dir.path(), &source);
+    let collection = dir.path().join("legacy.anki2");
+    let connection = import_into(dir.path(), &package, &collection);
+    drop(connection);
+
+    let store = AnkiCollection::open(&collection).unwrap();
+    let deck_id = store
+        .decks()
+        .unwrap()
+        .into_iter()
+        .find(|deck| deck.name == "Flags")
+        .unwrap()
+        .id;
+    assert_eq!(
+        store.deck_steps(deck_id).unwrap(),
+        DeckSteps {
+            learning: vec![300, 1_200],
+            relearning: vec![180],
+        }
+    );
+}
+
+#[test]
+fn schema18_import_updates_an_existing_deck_preset() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("modern.anki2");
+    write_schema18_collection(
+        &destination,
+        &[(1, "Default"), (700, "Flags")],
+        &[],
+        &Seed {
+            notes: vec![],
+            cards: vec![],
+            revlog: false,
+        },
+    );
+    let connection = Connection::open(&destination).unwrap();
+    connection
+        .execute(
+            "UPDATE decks SET kind = ?1 WHERE id = 700",
+            [ranki_storage::normal_deck_kind(1)],
+        )
+        .unwrap();
+    drop(connection);
+
+    let source = dir.path().join("schema18-source.anki2");
+    write_schema18_collection(
+        &source,
+        &[(1, "Default"), (700, "Flags")],
+        &[],
+        &schema18_seed(1, 700),
+    );
+    let mut config = schema18_floats(1, &[5.0, 20.0]);
+    config.extend(schema18_floats(2, &[3.0]));
+    let connection = Connection::open(&source).unwrap();
+    connection
+        .execute(
+            "UPDATE decks SET kind = ?1 WHERE id = 700",
+            [ranki_storage::normal_deck_kind(2)],
+        )
+        .unwrap();
+    connection
+        .execute("UPDATE deck_config SET config = ?1 WHERE id = 2", [config])
+        .unwrap();
+    drop(connection);
+    let package = schema18_package(dir.path(), &source);
+    import_into(dir.path(), &package, &destination);
+
+    let store = AnkiCollection::open(&destination).unwrap();
+    let deck_id = store
+        .decks()
+        .unwrap()
+        .into_iter()
+        .find(|deck| deck.name == "Flags")
+        .unwrap()
+        .id;
+    assert_eq!(
+        store.deck_steps(deck_id).unwrap(),
+        DeckSteps {
+            learning: vec![300, 1_200],
+            relearning: vec![180],
+        }
     );
 }
 
