@@ -75,7 +75,7 @@ pub fn run(
             let window = app.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(900.), px(600.))),
+                    window_min_size: Some(size(px(320.), px(480.))),
                     app_id: Some("ranki".into()),
                     ..Default::default()
                 },
