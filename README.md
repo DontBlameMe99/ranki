@@ -170,7 +170,9 @@ ranki sync --full-download
 ```
 
 `ranki sync` writes the same state file, so the window and the CLI share one
-sync status. Delta sync and media sync are not implemented.
+sync status. Ordinary commands sync the collection only, so a large media
+library never delays them. `ranki sync` also refreshes media; the review
+window does that in the background.
 
 ## Automation
 

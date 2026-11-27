@@ -284,8 +284,10 @@ pub(super) enum SyncMode {
     FullDownload,
 }
 
-/// Runs one automatic sync. A missing credential is a silent no-op in the
-/// sync client, which leaves any existing state-file host key usable.
+/// Runs one automatic collection sync. Media is left to explicit `ranki sync`
+/// and the window's background refresh, so ordinary commands never wait on a
+/// large media library. A missing credential is a silent no-op in the sync
+/// client, which leaves any existing state-file host key usable.
 ///
 /// # Errors
 /// Returns sync errors for login, transport, or local file failures.
@@ -295,10 +297,7 @@ pub(super) fn sync_once<T: SyncTransport>(
     auth: Option<&SyncAuth>,
 ) -> Result<SyncOutcome, SyncError> {
     let mut client = build_client(transport, settings, auth)?;
-    let outcome =
-        client.sync(auth.and_then(|credentials| credentials.login.clone()))?;
-    refresh_media(&mut client, &outcome)?;
-    Ok(outcome)
+    client.sync(auth.and_then(|credentials| credentials.login.clone()))
 }
 
 /// Refreshes media after a collection sync that left both copies in step.
@@ -696,8 +695,7 @@ mod tests {
         let auth = load_auth(&settings, &env).unwrap();
         let mut transport = MockTransport::new()
             .with_response(SyncMethod::HostKey, login())
-            .with_response(SyncMethod::Meta, meta(true))
-            .with_response(SyncMethod::MediaBegin, media_begin());
+            .with_response(SyncMethod::Meta, meta(true));
         sync_once(TransportRef(&mut transport), &settings, Some(&auth))
             .unwrap();
         assert_eq!(transport.requests()[0].method, SyncMethod::HostKey);
@@ -745,7 +743,6 @@ mod tests {
                 SyncMethod::Download,
                 MockResponse::ok_bytes(bytes).unwrap(),
             )
-            .with_response(SyncMethod::MediaBegin, media_begin())
             .with_response(SyncMethod::Meta, meta(false));
         let outcome = sync_once(
             TransportRef(&mut transport),
@@ -762,12 +759,7 @@ mod tests {
             .collect();
         assert_eq!(
             methods,
-            [
-                SyncMethod::Meta,
-                SyncMethod::Download,
-                SyncMethod::Meta,
-                SyncMethod::MediaBegin
-            ]
+            [SyncMethod::Meta, SyncMethod::Download, SyncMethod::Meta,]
         );
     }
 
