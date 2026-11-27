@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     env,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -639,6 +639,79 @@ pub struct Root {
     pub(crate) last_change_check: Instant,
     pub(crate) nav_width: f32,
     pub(crate) nav_drag: Option<NavDrag>,
+}
+
+/// Glob patterns shown by the Anki package picker and checked after selection.
+const ANKI_PACKAGE_GLOBS: [&str; 2] = ["*.apkg", "*.colpkg"];
+
+fn is_anki_package(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("apkg")
+                || extension.eq_ignore_ascii_case("colpkg")
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn anki_package_filter() -> ashpd::desktop::file_chooser::FileFilter {
+    use ashpd::desktop::file_chooser::FileFilter;
+
+    let mut filter = FileFilter::new("Anki packages");
+    for glob in ANKI_PACKAGE_GLOBS {
+        filter = filter.glob(glob);
+    }
+    filter
+}
+
+#[cfg(target_os = "linux")]
+async fn choose_import_path(
+    _cx: &mut gpui::AsyncApp,
+) -> Result<Option<PathBuf>, String> {
+    use ashpd::desktop::file_chooser::OpenFileRequest;
+
+    let request = match OpenFileRequest::default()
+        .title("Import Anki package")
+        .accept_label("Import")
+        .modal(true)
+        .filter(anki_package_filter())
+        .send()
+        .await
+    {
+        Ok(request) => request,
+        Err(ashpd::Error::Response(_)) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let selected = match request.response() {
+        Ok(selected) => selected,
+        Err(ashpd::Error::Response(_)) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(selected
+        .uris()
+        .first()
+        .and_then(|uri| uri.to_file_path().ok()))
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn choose_import_path(
+    cx: &mut gpui::AsyncApp,
+) -> Result<Option<PathBuf>, String> {
+    let receiver = cx
+        .update(|app| {
+            app.prompt_for_paths(PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: false,
+                prompt: Some("Import Anki package".into()),
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    match receiver.await {
+        Ok(Ok(Some(paths))) => Ok(paths.into_iter().next()),
+        Ok(Ok(None)) => Ok(None),
+        Ok(Err(error)) | Err(error) => Err(error.to_string()),
+    }
 }
 
 /// Values the window needs before the root entity exists.
@@ -1304,6 +1377,9 @@ impl Root {
             root.sync.conflict = Some(String::from(
                 "both collections changed since the last sync",
             ));
+        }
+        if let Ok(path) = env::var("RANKI_UI_DEV_IMPORT") {
+            root.import_path(PathBuf::from(path), cx);
         }
         if root.view == View::Decks
             && env::var("RANKI_UI_DEV_CREATE").is_ok_and(|value| value == "1")
@@ -2078,6 +2154,67 @@ impl Root {
             window.focus(&self.focus);
             cx.notify();
         }
+    }
+
+    /// Opens a picker for `.apkg` and `.colpkg` files, then imports the choice.
+    pub(crate) fn import_deck(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let chosen = choose_import_path(cx).await;
+            let _ = this.update(cx, |root, cx| match chosen {
+                Ok(Some(path)) => root.import_path(path, cx),
+                Ok(None) => {}
+                Err(error) => root.show_toast(
+                    ToastKind::Error,
+                    format!("Could not choose package: {error}"),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
+    /// Imports one chosen package into the app collection and reloads the UI.
+    pub(crate) fn import_path(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if !is_anki_package(&path) {
+            self.show_toast(
+                ToastKind::Error,
+                format!("Not an Anki package: {}", path.display()),
+                cx,
+            );
+            return;
+        }
+        let collection = self.options.paths.collection.clone();
+        let media_dir = self.options.paths.media_dir.clone();
+        let name = path.display().to_string();
+        let import = cx.background_executor().spawn(async move {
+            ranki_format::import_apkg(&path, &collection, &media_dir)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = import.await;
+            let _ = this.update(cx, |root, cx| match result {
+                Ok(report) => {
+                    root.reload_collection(cx);
+                    root.show_toast(
+                        ToastKind::Success,
+                        format!(
+                            "Imported {} notes, {} cards, {} media from {name}",
+                            report.notes, report.cards, report.media
+                        ),
+                        cx,
+                    );
+                }
+                Err(error) => root.show_toast(
+                    ToastKind::Error,
+                    format!("Could not import {name}: {error}"),
+                    cx,
+                ),
+            });
+        })
+        .detach();
     }
 
     fn export_file_name(deck_name: &str) -> String {

@@ -3945,3 +3945,26 @@ fn scrolling_the_form_closes_the_color_picker(cx: &mut gpui::TestAppContext) {
     assert!(!open, "scrolling the form closes the color picker");
     assert!(focused, "closing the picker restores root focus");
 }
+
+#[test]
+fn import_accepts_only_anki_package_extensions() {
+    assert!(super::is_anki_package(std::path::Path::new("core.apkg")));
+    assert!(super::is_anki_package(std::path::Path::new("core.APKG")));
+    assert!(super::is_anki_package(std::path::Path::new(
+        "backup.colpkg"
+    )));
+    assert!(super::is_anki_package(std::path::Path::new(
+        "backup.COLpkg"
+    )));
+    assert!(!super::is_anki_package(std::path::Path::new("notes.txt")));
+    assert!(!super::is_anki_package(std::path::Path::new("apkg")));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn import_picker_filters_to_anki_packages() {
+    let filter = super::anki_package_filter();
+    assert_eq!(filter.label(), "Anki packages");
+    assert_eq!(filter.pattern_filters(), super::ANKI_PACKAGE_GLOBS);
+    assert_eq!(filter.mimetype_filters(), [] as [&str; 0]);
+}

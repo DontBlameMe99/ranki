@@ -147,6 +147,29 @@ impl Root {
                             Interaction::raised(colors)
                                 .apply(
                                     div()
+                                        .id("decks-import")
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(SPACE_GROUP))
+                                        .h(px(44.))
+                                        .px(px(SPACE_BLOCK))
+                                        .rounded(px(12.))
+                                        .bg(colors.surface0)
+                                        .text_color(colors.text)
+                                        .text_size(px(14.))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .cursor_pointer(),
+                                )
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    Self::import_deck(cx);
+                                }))
+                                .child(icon("icon-upload", 18., colors.text))
+                                .child("Import deck"),
+                        )
+                        .child(
+                            Interaction::raised(colors)
+                                .apply(
+                                    div()
                                         .id("decks-create")
                                         .flex()
                                         .items_center()

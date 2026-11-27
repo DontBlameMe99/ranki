@@ -4636,6 +4636,7 @@ dependencies = [
 name = "ranki-ui"
 version = "0.1.0"
 dependencies = [
+ "ashpd 0.11.1",
  "chrono",
  "futures",
  "gpui",
