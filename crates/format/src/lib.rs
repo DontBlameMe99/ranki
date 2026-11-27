@@ -21,18 +21,97 @@ use serde_json::Value;
 use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
+use std::str::FromStr;
 use tempfile::Builder;
 use tempfile::NamedTempFile;
 
-/// Counts inserted records from an `.apkg` import.
+/// When an incoming record should replace a matching target record.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ImportReport {
-    pub notes: usize,
-    pub cards: usize,
-    pub media: usize,
+pub enum UpdateCondition {
+    #[default]
+    IfNewer,
+    Always,
+    Never,
 }
 
-/// Merge an `.apkg` into an existing collection, creating one when needed.
+impl FromStr for UpdateCondition {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "if-newer" => Ok(Self::IfNewer),
+            "always" => Ok(Self::Always),
+            "never" => Ok(Self::Never),
+            _ => Err(format!(
+                "invalid update condition '{value}', expected if-newer, always, or never"
+            )),
+        }
+    }
+}
+
+/// Outcomes recorded for one kind of imported record.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImportCounts {
+    pub new: usize,
+    pub updated: usize,
+    pub duplicate: usize,
+    pub conflicting: usize,
+    pub missing: usize,
+    pub empty: usize,
+}
+
+impl ImportCounts {
+    pub(crate) fn increment(count: &mut usize) -> Result<(), FormatError> {
+        *count = count
+            .checked_add(1)
+            .ok_or_else(|| FormatError::new("too many records to import"))?;
+        Ok(())
+    }
+}
+
+/// Counts and outcomes from an `.apkg` import.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImportReport {
+    /// New and updated notes, matching the CLI's historical note count.
+    pub notes: usize,
+    /// Inserted cards.
+    pub cards: usize,
+    /// Copied media files.
+    pub media: usize,
+    pub note_outcomes: ImportCounts,
+    pub notetype_outcomes: ImportCounts,
+    pub deck_outcomes: ImportCounts,
+    pub preset_outcomes: ImportCounts,
+    pub cards_missing: usize,
+    pub revlogs: usize,
+}
+
+/// Choices controlling how a package is merged into a collection.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "import switches map directly onto CLI flags"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImportOptions {
+    pub update_notes: UpdateCondition,
+    pub update_notetypes: UpdateCondition,
+    pub merge_notetypes: bool,
+    pub with_scheduling: bool,
+    pub with_deck_configs: bool,
+}
+
+impl Default for ImportOptions {
+    fn default() -> Self {
+        Self {
+            update_notes: UpdateCondition::IfNewer,
+            update_notetypes: UpdateCondition::IfNewer,
+            merge_notetypes: false,
+            with_scheduling: true,
+            with_deck_configs: true,
+        }
+    }
+}
+/// Merge an `.apkg` with the default import options.
 ///
 /// # Errors
 ///
@@ -42,6 +121,30 @@ pub fn import_apkg(
     imported_package: &Path,
     collection: &Path,
     media_dir: &Path,
+) -> Result<ImportReport, FormatError> {
+    import_apkg_with_options(
+        imported_package,
+        collection,
+        media_dir,
+        ImportOptions::default(),
+    )
+}
+
+/// Merge an `.apkg` into an existing collection with explicit options.
+///
+/// # Errors
+///
+/// Returns an error when the package is malformed, media cannot be copied, or
+/// the destination collection cannot be opened and updated.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "paths and options are passed separately to the wrapper"
+)]
+pub fn import_apkg_with_options(
+    imported_package: &Path,
+    collection: &Path,
+    media_dir: &Path,
+    options: ImportOptions,
 ) -> Result<ImportReport, FormatError> {
     let scratch_dir = collection
         .parent()
@@ -59,8 +162,12 @@ pub fn import_apkg(
         .execute("ATTACH DATABASE ? AS incoming", params![incoming])
         .map_err(error::db_error("cannot open package collection"))?;
 
-    let result =
-        merge::merge_collection(&mut connection, &renames, media_count);
+    let result = merge::merge_collection(
+        &mut connection,
+        &renames,
+        media_count,
+        options,
+    );
     let detach = connection
         .execute_batch("DETACH DATABASE incoming")
         .map_err(error::db_error("cannot close package collection"));
