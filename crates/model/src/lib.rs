@@ -603,6 +603,17 @@ pub struct DeckStats {
     pub total_cards: usize,
 }
 
+/// One card matched by a browse search, with what the table needs to group
+/// and order it before the card and note are read.
+#[derive(Clone, Debug)]
+pub struct BrowseCard {
+    pub card_id: Id,
+    pub deck_id: Id,
+    /// Anki's sort field for the note: the first field with formatting
+    /// removed. Stores that cannot read it leave this empty.
+    pub sort_field: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("not found: {0}")]
@@ -712,6 +723,26 @@ pub trait Store {
     /// # Errors
     /// Returns [`StoreError`] if the query is invalid or the search fails.
     fn find_cards(&self, query: &str) -> Result<Vec<Id>, StoreError>;
+
+    /// Finds cards matching a search query with the deck and sort field the
+    /// browser groups and orders its table by.
+    ///
+    /// The default implementation reads every matching card, so it is slower
+    /// and cannot fill the sort field.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the query is invalid or the search fails.
+    fn browse_cards(&self, query: &str) -> Result<Vec<BrowseCard>, StoreError> {
+        let mut cards = Vec::new();
+        for id in self.find_cards(query)? {
+            cards.extend(self.card(id)?.map(|card| BrowseCard {
+                card_id: card.id,
+                deck_id: card.deck_id,
+                sort_field: String::new(),
+            }));
+        }
+        Ok(cards)
+    }
 
     /// Returns cards due in a deck, including subdecks.
     ///

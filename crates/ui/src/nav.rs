@@ -487,8 +487,7 @@ impl Root {
         }
         if self.view == View::Browse
             && let Some(menu) = self.card_menu
-            && let Some(row) =
-                self.browse.rows.iter().find(|row| row.card.id == menu.id)
+            && let Some(row) = self.browse.rows.get(&menu.id)
         {
             let card_id = menu.id;
             let front = crate::browser_view::preview_line(&row.front);

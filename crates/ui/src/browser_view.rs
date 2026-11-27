@@ -23,7 +23,9 @@ use gpui::{
     MouseDownEvent, ParentElement, Pixels, Point, ScrollWheelEvent,
     SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
-use ranki_model::{Card, CardQueue, Deck, Id, Note, NoteModel};
+use ranki_model::{
+    BrowseCard, Card, CardQueue, Deck, Id, Note, NoteModel, Store,
+};
 
 /// Rendered height of a browse table line.
 const GROUP_HEIGHT: f32 = 48.0;
@@ -41,8 +43,6 @@ pub struct BrowserRow {
     pub front_media: Vec<MediaRef>,
     pub back_media: Vec<MediaRef>,
     pub deck: SharedString,
-    /// Full deck path, including virtual parents, used to group results.
-    pub deck_path: SharedString,
     pub tags: SharedString,
     pub model: SharedString,
     /// Table-cell text prepared once with the rendered sides.
@@ -74,14 +74,24 @@ pub enum BrowseEntry {
     Card { row: usize, depth: usize },
 }
 
+/// One search match, before its card and note are read.
+#[derive(Clone, Debug)]
+pub struct BrowseHit {
+    pub card_id: Id,
+    /// Full deck path, including virtual parents, used to group results.
+    pub deck_path: SharedString,
+}
+
 /// Search state. The generation drops results from an older query.
 pub struct BrowseState {
     pub search: Entity<TextField>,
-    pub rows: Vec<BrowserRow>,
+    /// Every match, in table order.
+    pub hits: Vec<BrowseHit>,
     pub entries: Vec<BrowseEntry>,
+    /// Rendered rows, filled only for the lines the table and preview show.
+    pub rows: HashMap<Id, BrowserRow>,
     /// Deck paths opened by the user or by a search with matches.
     pub expanded: HashSet<String>,
-    pub total: usize,
     pub selected: Option<Id>,
     pub error: Option<String>,
     pub generation: u64,
@@ -127,11 +137,22 @@ pub fn browser_row(
         front_media: front_rendered.media,
         back,
         back_media: back_rendered.media,
-        deck: SharedString::from(deck.clone()),
-        deck_path: SharedString::from(deck),
+        deck: SharedString::from(deck),
         tags: SharedString::from(note.tags.join(", ")),
         model: SharedString::from(model.name.clone()),
     })
+}
+
+/// Reads one card and its note, then renders the row the table shows.
+pub fn load_browse_row(
+    store: &dyn Store,
+    decks: &[Deck],
+    models: &[NoteModel],
+    id: Id,
+) -> Option<BrowserRow> {
+    let card = store.card(id).ok().flatten()?;
+    let note = store.note(card.note_id).ok().flatten()?;
+    browser_row(&card, &note, decks, models)
 }
 
 /// Uses media names when a rendered side has no plain text, as with flag images.
@@ -188,22 +209,22 @@ pub fn due_label(card: &Card) -> String {
     }
 }
 
-/// Sorts by question text, then id, so the table order is stable.
-pub fn sort_browser_rows(rows: &mut [BrowserRow]) {
-    rows.sort_by(|left, right| {
-        left.front
-            .cmp(&right.front)
-            .then_with(|| left.card.id.cmp(&right.card.id))
+/// Sorts by the note's sort field, then id, so the table order is stable.
+pub fn sort_browse_cards(cards: &mut [BrowseCard]) {
+    cards.sort_by(|left, right| {
+        left.sort_field
+            .cmp(&right.sort_field)
+            .then_with(|| left.card_id.cmp(&right.card_id))
     });
 }
 
 /// Paths from the root down to each matching card's deck. A search opens
 /// exactly these groups, so matches are visible without extra clicks.
 #[must_use]
-pub fn browse_expand_paths(rows: &[BrowserRow]) -> HashSet<String> {
+pub fn browse_expand_paths(hits: &[BrowseHit]) -> HashSet<String> {
     let mut paths = HashSet::new();
-    for row in rows {
-        let path = row.deck_path.as_str();
+    for hit in hits {
+        let path = hit.deck_path.as_str();
         let _ = paths.insert(path.to_owned());
         for (index, _) in path.match_indices("::") {
             let _ = paths.insert(path[..index].to_owned());
@@ -216,19 +237,19 @@ pub fn browse_expand_paths(rows: &[BrowserRow]) -> HashSet<String> {
 /// cards. Cards sit only under their own deck, never under parent groups.
 #[must_use]
 pub fn build_browse_entries(
-    rows: &[BrowserRow],
+    hits: &[BrowseHit],
     expanded: &HashSet<String>,
 ) -> Vec<BrowseEntry> {
-    let mut cards_by_path: HashMap<String, Vec<usize>> = HashMap::new();
-    for (index, row) in rows.iter().enumerate() {
+    let mut cards_by_path: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (index, hit) in hits.iter().enumerate() {
         cards_by_path
-            .entry(row.deck_path.to_string())
+            .entry(hit.deck_path.as_str())
             .or_default()
             .push(index);
     }
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for (path, cards) in &cards_by_path {
-        let _ = counts.insert(path.as_str(), cards.len());
+        let _ = counts.insert(*path, cards.len());
     }
     for (path, cards) in &cards_by_path {
         for (index, _) in path.match_indices("::") {
@@ -236,7 +257,10 @@ pub fn build_browse_entries(
             *count = count.saturating_add(cards.len());
         }
     }
-    let mut paths = cards_by_path.keys().cloned().collect::<HashSet<_>>();
+    let mut paths = cards_by_path
+        .keys()
+        .map(|path| (*path).to_owned())
+        .collect::<HashSet<_>>();
     for path in cards_by_path.keys() {
         for (index, _) in path.match_indices("::") {
             let _ = paths.insert(path[..index].to_owned());
@@ -257,14 +281,17 @@ pub fn build_browse_entries(
     for siblings in children.values_mut() {
         siblings.sort();
     }
-    let mut entries = Vec::with_capacity(rows.len().saturating_mul(2));
+    let mut entries = Vec::with_capacity(hits.len().saturating_mul(2));
     let mut stack = roots
         .into_iter()
         .rev()
         .map(|path| (path, 0usize))
         .collect::<Vec<_>>();
     while let Some((path, depth)) = stack.pop() {
-        let cards = cards_by_path.get(&path).cloned().unwrap_or_default();
+        let cards = cards_by_path
+            .get(path.as_str())
+            .cloned()
+            .unwrap_or_default();
         let has_children = children.contains_key(&path);
         let open = expanded.contains(&path);
         entries.push(BrowseEntry::Group(BrowseGroup {
@@ -380,14 +407,17 @@ impl Root {
         .detach();
     }
 
-    /// Reads the current query from the store and rebuilds the table.
+    /// Reads the current query and rebuilds the deck groups and match list.
+    ///
+    /// Cards are not read here: the table renders the lines it shows.
     pub(crate) fn refresh_browse(&mut self, cx: &mut Context<Self>) {
         let query = self.browse.search.read(cx).text();
-        let ids = match self.store.find_cards(&query) {
-            Ok(ids) => ids,
+        let mut matches = match self.store.browse_cards(&query) {
+            Ok(matches) => matches,
             Err(error) => {
-                self.browse.rows.clear();
+                self.browse.hits.clear();
                 self.browse.entries.clear();
+                self.browse.rows.clear();
                 self.browse.selected = None;
                 self.browse.error =
                     Some(format!("Could not search cards: {error}"));
@@ -396,33 +426,32 @@ impl Root {
                 return;
             }
         };
-        let total = ids.len();
-        let mut rows = Vec::with_capacity(total);
-        for id in ids {
-            let Ok(Some(card)) = self.store.card(id) else {
-                continue;
-            };
-            let Ok(Some(note)) = self.store.note(card.note_id) else {
-                continue;
-            };
-            if let Some(row) =
-                browser_row(&card, &note, &self.decks, &self.models)
-            {
-                rows.push(row);
-            }
-        }
-        sort_browser_rows(&mut rows);
-        if !rows
+        sort_browse_cards(&mut matches);
+        let paths = self
+            .decks
             .iter()
-            .any(|row| self.browse.selected == Some(row.card.id))
+            .map(|deck| (deck.id, SharedString::from(deck.name.clone())))
+            .collect::<HashMap<_, _>>();
+        let hits = matches
+            .into_iter()
+            .map(|card| BrowseHit {
+                deck_path: paths.get(&card.deck_id).cloned().unwrap_or_else(
+                    || SharedString::from(format!("Deck {}", card.deck_id)),
+                ),
+                card_id: card.card_id,
+            })
+            .collect::<Vec<_>>();
+        if !hits
+            .iter()
+            .any(|hit| self.browse.selected == Some(hit.card_id))
         {
-            self.browse.selected = rows.first().map(|row| row.card.id);
+            self.browse.selected = hits.first().map(|hit| hit.card_id);
         }
         if !query.trim().is_empty() {
-            self.browse.expanded = browse_expand_paths(&rows);
+            self.browse.expanded = browse_expand_paths(&hits);
         }
-        self.browse.total = total;
-        self.browse.rows = rows;
+        self.browse.hits = hits;
+        self.browse.rows.clear();
         self.rebuild_browse_entries();
         self.browse.error = None;
         self.browse.loading = false;
@@ -432,7 +461,7 @@ impl Root {
     /// Rebuilds the visible table lines after results or expansion change.
     pub(crate) fn rebuild_browse_entries(&mut self) {
         self.browse.entries =
-            build_browse_entries(&self.browse.rows, &self.browse.expanded);
+            build_browse_entries(&self.browse.hits, &self.browse.expanded);
         let height = self
             .browse
             .entries
@@ -441,6 +470,32 @@ impl Root {
             .sum::<f32>();
         let max = (height - self.browse.viewport.unwrap_or(0.0)).max(0.0);
         self.browse_smooth.clamp(max);
+    }
+
+    /// Renders the cached row for one card, reading it when it is missing.
+    pub(crate) fn ensure_browse_row(&mut self, id: Id) -> Option<&BrowserRow> {
+        if !self.browse.rows.contains_key(&id) {
+            let row =
+                load_browse_row(&*self.store, &self.decks, &self.models, id)?;
+            let _ = self.browse.rows.insert(id, row);
+        }
+        self.browse.rows.get(&id)
+    }
+
+    /// Reads the rows for the lines the table shows and for the preview.
+    fn load_browse_rows(&mut self, visible: &BrowseWindow) {
+        let mut needed = Vec::new();
+        if let Some(id) = self.browse.selected {
+            needed.push(id);
+        }
+        for entry in &self.browse.entries[visible.first..visible.last] {
+            if let BrowseEntry::Card { row, .. } = entry {
+                needed.push(self.browse.hits[*row].card_id);
+            }
+        }
+        for id in needed {
+            let _ = self.ensure_browse_row(id);
+        }
     }
 
     pub(crate) fn toggle_browse_group(
@@ -627,6 +682,7 @@ impl Root {
             viewport,
             header,
         );
+        self.load_browse_rows(&visible);
         if visible.first > 0 {
             table = table.child(div().h(px(visible.before)).flex_none());
         }
@@ -642,7 +698,11 @@ impl Root {
             else {
                 continue;
             };
-            let row = &self.browse.rows[*index];
+            let Some(row) =
+                self.browse.rows.get(&self.browse.hits[*index].card_id)
+            else {
+                continue;
+            };
             let id = row.card.id;
             let key = row.key.clone();
             let menu_key = row.menu_key.clone();
@@ -994,11 +1054,7 @@ impl Root {
         } else {
             detail = detail.w_full().h(px(220.0)).flex_none();
         }
-        let Some(row) = self
-            .browse
-            .rows
-            .iter()
-            .find(|row| Some(row.card.id) == selected)
+        let Some(row) = selected.and_then(|id| self.browse.rows.get(&id))
         else {
             return detail.child(
                 div()
@@ -1122,15 +1178,15 @@ mod tests {
     use std::collections::HashSet;
 
     use ranki_model::{
-        Card, CardQueue, CardTemplate, CardType, DEFAULT_DECK_ID,
+        BrowseCard, Card, CardQueue, CardTemplate, CardType, DEFAULT_DECK_ID,
         DEFAULT_MODEL_ID, Deck, Id, Note, NoteModel, StockModelKind,
     };
 
     use super::{
-        BrowseColumns, BrowseEntry, BrowseGroup, CARD_HEIGHT, GROUP_HEIGHT,
-        browse_expand_paths, browse_visible_window, browser_row,
+        BrowseColumns, BrowseEntry, BrowseGroup, BrowseHit, CARD_HEIGHT,
+        GROUP_HEIGHT, browse_expand_paths, browse_visible_window, browser_row,
         build_browse_entries, due_label, preview_line, queue_label,
-        sort_browser_rows,
+        sort_browse_cards,
     };
 
     #[test]
@@ -1215,40 +1271,21 @@ mod tests {
                 description: String::new(),
             },
         ];
-        let model = model();
-        let mut rows = Vec::new();
-        for (id, deck_id, front) in [
-            (1, 2, "Bonjour"),
-            (2, 3, "Angle"),
-            (3, 2, "Merci"),
-            (4, 1, "Salut"),
-        ] {
-            let mut card = card_with_id(id, CardQueue::New, 0);
-            card.deck_id = deck_id;
-            let note = Note {
-                id,
-                guid: String::new(),
-                model_id: DEFAULT_MODEL_ID,
-                modified: 0,
-                usn: 0,
-                tags: Vec::new(),
-                fields: vec![front.to_owned(), "Answer".to_owned()],
-                sort_field: front.to_owned(),
-                checksum: 0,
-                flags: 0,
-                data: String::new(),
-            };
-            rows.push(
-                browser_row(&card, &note, &decks, std::slice::from_ref(&model))
-                    .unwrap(),
-            );
+        let mut hits = Vec::new();
+        for (card_id, deck_id) in [(1, 2), (2, 3), (3, 2), (4, 1)] {
+            let deck =
+                decks.iter().find(|deck| deck.id == deck_id).expect("deck");
+            hits.push(BrowseHit {
+                card_id,
+                deck_path: SharedString::from(deck.name.clone()),
+            });
         }
-        let expanded = browse_expand_paths(&rows);
+        let expanded = browse_expand_paths(&hits);
         assert!(expanded.contains("Languages"));
         assert!(expanded.contains("Languages::French"));
 
         for _ in 0..16 {
-            let entries = build_browse_entries(&rows, &expanded);
+            let entries = build_browse_entries(&hits, &expanded);
             let lines = entries
                 .iter()
                 .map(|entry| match entry {
@@ -1259,7 +1296,7 @@ mod tests {
                         )
                     }
                     BrowseEntry::Card { row, depth } => {
-                        format!("card:{}:{}", rows[*row].front, depth)
+                        format!("card:{}:{}", hits[*row].card_id, depth)
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1267,17 +1304,17 @@ mod tests {
                 lines,
                 [
                     "Languages:3:0",
-                    "card:Salut:1",
+                    "card:4:1",
                     "Languages::French:2:1",
-                    "card:Bonjour:2",
-                    "card:Merci:2",
+                    "card:1:2",
+                    "card:3:2",
                     "Math:1:0",
-                    "card:Angle:1",
+                    "card:2:1",
                 ]
             );
         }
 
-        let collapsed = build_browse_entries(&rows, &HashSet::new());
+        let collapsed = build_browse_entries(&hits, &HashSet::new());
         assert_eq!(collapsed.len(), 2);
         assert!(
             matches!(collapsed[0], BrowseEntry::Group(ref group) if group.path == "Languages" && !group.expanded)
@@ -1285,48 +1322,63 @@ mod tests {
     }
 
     #[test]
-    fn browser_rows_sort_by_question_then_id() {
+    fn browser_rows_show_the_question_answer_and_deck() {
         let deck = Deck {
             id: DEFAULT_DECK_ID,
             name: "Default".to_owned(),
             description: String::new(),
         };
-        let model = model();
-        let mut rows = Vec::new();
-        for (id, front) in [(3, "Zebra"), (1, "Apple"), (2, "Apple")] {
-            let note = Note {
-                id,
-                guid: String::new(),
-                model_id: DEFAULT_MODEL_ID,
-                modified: 0,
-                usn: 0,
-                tags: Vec::new(),
-                fields: vec![front.to_owned(), "Answer".to_owned()],
-                sort_field: front.to_owned(),
-                checksum: 0,
-                flags: 0,
-                data: String::new(),
-            };
-            rows.push(
-                browser_row(
-                    &card_with_id(id, CardQueue::New, 0),
-                    &note,
-                    std::slice::from_ref(&deck),
-                    std::slice::from_ref(&model),
-                )
-                .unwrap(),
-            );
-        }
-        sort_browser_rows(&mut rows);
-        let ids = rows.iter().map(|row| row.card.id).collect::<Vec<_>>();
+        let note = Note {
+            id: 1,
+            guid: String::new(),
+            model_id: DEFAULT_MODEL_ID,
+            modified: 0,
+            usn: 0,
+            tags: Vec::new(),
+            fields: vec!["Apple".to_owned(), "Answer".to_owned()],
+            sort_field: String::new(),
+            checksum: 0,
+            flags: 0,
+            data: String::new(),
+        };
+        let row = browser_row(
+            &card_with_id(1, CardQueue::New, 0),
+            &note,
+            std::slice::from_ref(&deck),
+            std::slice::from_ref(&model()),
+        )
+        .expect("browser row");
+        assert_eq!(row.front, "Apple");
+        assert_eq!(row.back, "Answer");
+        assert_eq!(row.deck, "Default");
+        assert_eq!(row.preview, "Apple");
+        assert_eq!(row.due, "Today");
+        assert_eq!(row.key.as_str(), "browse-row-1");
+        assert_eq!(row.menu_key.as_str(), "browse-menu-1");
+    }
+
+    #[test]
+    fn browse_cards_sort_by_sort_field_then_id() {
+        let mut cards = vec![
+            BrowseCard {
+                card_id: 3,
+                deck_id: DEFAULT_DECK_ID,
+                sort_field: "Zebra".to_owned(),
+            },
+            BrowseCard {
+                card_id: 1,
+                deck_id: DEFAULT_DECK_ID,
+                sort_field: "Apple".to_owned(),
+            },
+            BrowseCard {
+                card_id: 2,
+                deck_id: DEFAULT_DECK_ID,
+                sort_field: "Apple".to_owned(),
+            },
+        ];
+        sort_browse_cards(&mut cards);
+        let ids = cards.iter().map(|card| card.card_id).collect::<Vec<_>>();
         assert_eq!(ids, vec![1, 2, 3]);
-        assert_eq!(rows[0].front, "Apple");
-        assert_eq!(rows[0].back, "Answer");
-        assert_eq!(rows[0].deck, "Default");
-        assert_eq!(rows[0].preview, "Apple");
-        assert_eq!(rows[0].due, "Today");
-        assert_eq!(rows[0].key.as_str(), "browse-row-1");
-        assert_eq!(rows[0].menu_key.as_str(), "browse-menu-1");
     }
     #[test]
     fn browser_rows_prepare_tags_for_the_table() {
@@ -1391,17 +1443,16 @@ mod tests {
                 .expect("browser row"),
             );
         }
-        sort_browser_rows(&mut rows);
         let row_keys =
             rows.iter().map(|row| row.key.as_str()).collect::<Vec<_>>();
         let menu_keys = rows
             .iter()
             .map(|row| row.menu_key.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(row_keys, ["browse-row-11", "browse-row-3", "browse-row-7"]);
+        assert_eq!(row_keys, ["browse-row-7", "browse-row-3", "browse-row-11"]);
         assert_eq!(
             menu_keys,
-            ["browse-menu-11", "browse-menu-3", "browse-menu-7"]
+            ["browse-menu-7", "browse-menu-3", "browse-menu-11"]
         );
     }
 
