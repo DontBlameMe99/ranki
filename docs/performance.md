@@ -54,12 +54,11 @@ A workload fails when its best-of-three median, p95, or worst gap is more than
 between rounds, whichever is larger. It also fails when it loses a workload
 that has a ceiling, declares no budget or criterion, or raises a budget. An
 over-budget workload fails only when the ceiling is within budget on the same
-runner. Five workloads (`core/fsrs/schedule`, `format/export-apkg`,
-`gui/frame/idle`, `mcp/roundtrip/list-decks`, `process/cli/decks`) skip ceiling
-regressions because their ceilings sit far below their budgets, so round noise
-decides the result.
-Their budgets still fail the check. Warnings never fail the check. The full
-table is posted as a pull request comment.
+runner. A ceiling comparison becomes a warning when the largest timer gap seen
+by either side is larger than the allowed regression margin, since that gap
+shows the measurement cannot resolve a regression of that size. Budgets still
+fail the check. Warnings never fail the check. The full table is posted as a
+pull request comment.
 The measurement job uploads the exact floor file it planned against, and the
 audit uses that snapshot so a floor update between measurement and publish
 cannot change the rules.

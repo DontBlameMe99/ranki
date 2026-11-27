@@ -19,15 +19,6 @@ NAME = re.compile(r"^[a-z0-9][a-z0-9/_-]*$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 COMMENT_MARKER = "<!-- ranki-performance -->"
 
-# Their ceilings sit orders of magnitude below their budgets, where timer and
-# process-start noise decides each round. Budgets gate these workloads instead.
-NOISY_WORKLOADS = frozenset({
-    "core/fsrs/schedule",
-    "format/export-apkg",
-    "gui/frame/idle",
-    "mcp/roundtrip/list-decks",
-    "process/cli/decks",
-})
 
 
 class Invalid(Exception):
@@ -288,6 +279,21 @@ def regression(label, value, best, worst, own_best, own_worst):
     return None
 
 
+def timer_noise_dominates(current, reference):
+    """Return whether timer gaps are larger than the regression margin.
+
+    A watchdog gap shows the scheduler stalled while the workload ran. When
+    that stall is larger than the margin, the measurement cannot resolve a
+    regression of that size, so only the budget can judge the workload.
+    """
+    margin = max(
+        reference["worst_median_ms"] * FAIL_MARGIN,
+        reference["worst_median_ms"] - reference["median_ms"],
+        current["worst_median_ms"] - current["median_ms"],
+    )
+    return max(current["worst_gap_ms"], reference["worst_gap_ms"]) > margin
+
+
 def compare(head, base=None, ceiling=None, floor=None, ceiling_dir=None):
     validate_aggregate(head)
     floor = floor or empty_floor()
@@ -396,20 +402,21 @@ def compare(head, base=None, ceiling=None, floor=None, ceiling_dir=None):
                     "note": "no ceiling yet, compared with base",
                 })
             reference_method = ceiling_entry[1] if ceiling_entry else (base["method"] if compared_with_base and base else None)
-            if name in NOISY_WORKLOADS and ceiling_result:
-                findings.append({
-                    "kind": "noise",
-                    "failed": False,
-                    "note": "ceiling comparison skipped for a noisy workload; budget still applies",
-                })
-            elif ceiling_result and reference_method == head["method"]:
-                for finding in [
-                    regression("median", current["median_ms"], ceiling_result["median_ms"], ceiling_result["worst_median_ms"], current["median_ms"], current["worst_median_ms"]),
-                    regression("p95", current["p95_ms"], ceiling_result["p95_ms"], ceiling_result["worst_p95_ms"], current["p95_ms"], current["worst_p95_ms"]),
-                    regression("worst gap", current["max_gap_ms"], ceiling_result["max_gap_ms"], ceiling_result["worst_gap_ms"], current["max_gap_ms"], current["worst_gap_ms"]),
-                ]:
-                    if finding:
-                        findings.append(finding)
+            if ceiling_result and reference_method == head["method"]:
+                if timer_noise_dominates(current, ceiling_result):
+                    findings.append({
+                        "kind": "noise",
+                        "failed": False,
+                        "note": "timer gap exceeds the regression margin; budget still applies",
+                    })
+                else:
+                    for finding in [
+                        regression("median", current["median_ms"], ceiling_result["median_ms"], ceiling_result["worst_median_ms"], current["median_ms"], current["worst_median_ms"]),
+                        regression("p95", current["p95_ms"], ceiling_result["p95_ms"], ceiling_result["worst_p95_ms"], current["p95_ms"], current["worst_p95_ms"]),
+                        regression("worst gap", current["max_gap_ms"], ceiling_result["max_gap_ms"], ceiling_result["worst_gap_ms"], current["max_gap_ms"], current["worst_gap_ms"]),
+                    ]:
+                        if finding:
+                            findings.append(finding)
             else:
                 findings.append({
                     "kind": "baseline",
@@ -501,7 +508,7 @@ def markdown(comparison):
         "Every workload is the best of three runs with warmup and repeated samples. "
         "A workload fails when its median, p95, or worst operation gap exceeds the ceiling's "
         f"worst run by more than {FAIL_MARGIN * 100:.0f}% or either side's spread between rounds, "
-        "except for the noisy workloads, which are judged by their budgets. "
+        "but a timer gap larger than that margin makes the ceiling comparison a warning. "
         "Budgets can only be tightened. Ceilings come from the `floors` branch and are "
         "re-measured beside the paired head result.",
         "",
