@@ -8,6 +8,7 @@ pub mod config;
 mod id;
 pub mod image_occlusion;
 pub mod occlusion;
+pub mod options;
 pub mod raw;
 pub mod stock;
 pub use cloze::cloze_markers;
@@ -19,6 +20,10 @@ pub use config::{
 };
 pub use id::next_id;
 pub use image_occlusion::parse_image_occlusion_field;
+pub use options::{
+    DayLimit, DeckCommon, DeckKind, DeckOverrides, DeckPreset, EffectiveDeck,
+    LeechAction,
+};
 pub use raw::decode_hex;
 pub use raw::encode_hex;
 use std::collections::BTreeSet;
@@ -317,6 +322,10 @@ pub struct NoteModel {
     /// Raw schema-18 protobuf config kept for export round trips.
     #[serde(default)]
     pub raw_config: Option<Vec<u8>>,
+    /// Full schema-11 model JSON, kept so unknown keys and field or template
+    /// settings survive a read/write round trip.
+    #[serde(default)]
+    pub raw_json: Option<String>,
 }
 
 impl NoteModel {

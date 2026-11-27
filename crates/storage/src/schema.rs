@@ -86,63 +86,42 @@ pub const ANKI_DEFAULT_FSRS6_PARAMS_F64: [f64; 21] = [
     0.0912, 0.0658, 0.1542,
 ];
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the default collection JSON mirrors Anki's schema 11 defaults"
-)]
-pub fn default_col(now_secs: i64, now_ms: i64) -> Value {
-    let model = json!({
-        "id": DEFAULT_MODEL_ID,
-        "name": "Basic",
-        "type": 0,
-        "mod": now_secs,
-        "usn": 0,
-        "sortf": 0,
-        "did": DEFAULT_DECK_ID,
-        "latexPre": "\\documentclass[12pt]{article}\n\\special{papersize=3in,5in}\n\\usepackage[utf8]{inputenc}\n\\pagestyle{empty}\n\\setlength{\\parindent}{0in}\n\\begin{document}\n",
-        "latexPost": "\\end{document}",
-        "tmpls": [{
-            "name": "Card 1",
-            "ord": 0,
-            "qfmt": "{{Front}}",
-            "afmt": "{{FrontSide}}\n\n<hr id=answer>\n\n{{Back}}",
-            "bqfmt": "",
-            "bafmt": "",
-            "did": null,
-            "bfc": 0,
-            "id": 1_234_567_890_i64
-        }],
-        "flds": [
-            {"name": "Front", "ord": 0, "sticky": false, "rtl": false, "font": "Arial", "size": 20},
-            {"name": "Back", "ord": 1, "sticky": false, "rtl": false, "font": "Arial", "size": 20}
-        ],
-        "css": ".card {\n font-family: arial;\n font-size: 20px;\n text-align: center;\n color: black;\n background-color: white;\n}\n",
-        "req": [[0, "any", [0]]]
-    });
+/// Anki's full schema-11 collection config, including the keys added by the
+/// 2021 scheduler. `creation_offset` is passed through as `null` when a source
+/// collection does not record one.
+#[must_use]
+pub fn schema11_default_conf(creation_offset: Option<i32>) -> Value {
+    json!({
+        "activeDecks": [1],
+        "curDeck": 1,
+        "curModel": Value::Null,
+        "nextPos": 1,
+        "sortType": "noteFld",
+        "sortBackwards": false,
+        "addToCur": true,
+        "newSpread": 0,
+        "collapseTime": 1200,
+        "timeLim": 0,
+        "estTimes": true,
+        "dueCounts": true,
+        "dayLearnFirst": false,
+        "schedVer": 2,
+        "sched2021": true,
+        "creationOffset": creation_offset,
+        "fsrs": true,
+        "lastFsrsOptimize": 0_i64,
+        "loadBalancerEnabled": true,
+    })
+}
 
-    let deck = json!({
-        "id": DEFAULT_DECK_ID,
-        "name": "Default",
-        "usn": 0,
-        "mod": now_secs,
-        "conf": 1,
-        "desc": "",
-        "dyn": 0,
-        "collapsed": false,
-        "browserCollapsed": false,
-        "lrnToday": [0, 0],
-        "revToday": [0, 0],
-        "newToday": [0, 0],
-        "timeToday": [0, 0],
-        "extendNew": 0,
-        "extendRev": 0
-    });
-
-    let config = json!({
+/// Anki's default deck preset in schema-11 JSON form.
+#[must_use]
+pub fn schema11_default_deck_config(mtime: i64) -> Value {
+    json!({
         "id": 1,
         "name": "Default",
         "usn": 0,
-        "mod": now_secs,
+        "mod": mtime,
         "maxTaken": 60,
         "autoplay": true,
         "timer": 0,
@@ -192,7 +171,62 @@ pub fn default_col(now_secs: i64, now_ms: i64) -> Value {
         "sm2Retention": 0.9,
         "weightSearch": "",
         "ignoreRevlogsBeforeDate": ""
+    })
+}
+
+pub fn default_col(
+    now_secs: i64,
+    now_ms: i64,
+    creation_offset: Option<i32>,
+) -> Value {
+    let model = json!({
+        "id": DEFAULT_MODEL_ID,
+        "name": "Basic",
+        "type": 0,
+        "mod": now_secs,
+        "usn": 0,
+        "sortf": 0,
+        "did": DEFAULT_DECK_ID,
+        "latexPre": "\\documentclass[12pt]{article}\n\\special{papersize=3in,5in}\n\\usepackage[utf8]{inputenc}\n\\pagestyle{empty}\n\\setlength{\\parindent}{0in}\n\\begin{document}\n",
+        "latexPost": "\\end{document}",
+        "tmpls": [{
+            "name": "Card 1",
+            "ord": 0,
+            "qfmt": "{{Front}}",
+            "afmt": "{{FrontSide}}\n\n<hr id=answer>\n\n{{Back}}",
+            "bqfmt": "",
+            "bafmt": "",
+            "did": null,
+            "bfc": 0,
+            "id": 1_234_567_890_i64
+        }],
+        "flds": [
+            {"name": "Front", "ord": 0, "sticky": false, "rtl": false, "font": "Arial", "size": 20},
+            {"name": "Back", "ord": 1, "sticky": false, "rtl": false, "font": "Arial", "size": 20}
+        ],
+        "css": ".card {\n font-family: arial;\n font-size: 20px;\n text-align: center;\n color: black;\n background-color: white;\n}\n",
+        "req": [[0, "any", [0]]]
     });
+
+    let deck = json!({
+        "id": DEFAULT_DECK_ID,
+        "name": "Default",
+        "usn": 0,
+        "mod": now_secs,
+        "conf": 1,
+        "desc": "",
+        "dyn": 0,
+        "collapsed": false,
+        "browserCollapsed": false,
+        "lrnToday": [0, 0],
+        "revToday": [0, 0],
+        "newToday": [0, 0],
+        "timeToday": [0, 0],
+        "extendNew": 0,
+        "extendRev": 0
+    });
+
+    let config = schema11_default_deck_config(now_secs);
 
     json!({
         "id": 1_i64,
@@ -203,7 +237,7 @@ pub fn default_col(now_secs: i64, now_ms: i64) -> Value {
         "dty": 0_i64,
         "usn": 0_i64,
         "ls": now_ms,
-        "conf": json!({"nextPos": 1_i64, "estimateReps": 0_i64, "autoUpdateEnabled": true, "fsrs": true, "schedVer": 2_i64, "creationOffset": 0_i64, "lastFsrsOptimize": 0_i64, "loadBalancerEnabled": true}),
+        "conf": schema11_default_conf(creation_offset),
         "models": json!({DEFAULT_MODEL_ID.to_string(): model}),
         "decks": json!({DEFAULT_DECK_ID.to_string(): deck}),
         "dconf": json!({"1": config}),

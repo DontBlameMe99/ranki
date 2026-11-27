@@ -3,7 +3,6 @@ use std::path::Path;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use ranki_storage::ANKI_DEFAULT_FSRS6_PARAMS_F64;
 use rusqlite::Connection;
 use serde_json::Value;
 use serde_json::json;
@@ -37,7 +36,7 @@ CREATE TABLE IF NOT EXISTS notes (
     usn INTEGER NOT NULL,
     tags TEXT NOT NULL,
     flds TEXT NOT NULL,
-    sfld TEXT NOT NULL,
+    sfld INTEGER NOT NULL,
     csum INTEGER NOT NULL,
     flags INTEGER NOT NULL,
     data TEXT NOT NULL
@@ -135,10 +134,10 @@ fn insert_default_col(
              VALUES (1, ?1, 0, 0, 11, 0, 0, 0, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 creation_time,
-                encode_json(&default_conf())?,
+                encode_json(&ranki_storage::schema11_default_conf(Some(0)))?,
                 encode_json(&default_models())?,
                 encode_json(&default_decks())?,
-                encode_json(&default_dconf())?,
+                encode_json(&ranki_storage::schema11_default_deck_config(0))?,
                 encode_json(&Value::Object(serde_json::Map::new()))?,
             ],
         )
@@ -160,29 +159,6 @@ pub fn current_time() -> Result<i64, FormatError> {
 pub fn encode_json(value: &Value) -> Result<String, FormatError> {
     serde_json::to_string(value)
         .map_err(json_error("cannot encode collection JSON"))
-}
-
-fn default_conf() -> Value {
-    json!({
-        "activeDecks": [1],
-        "curDeck": 1,
-        "curModel": 1,
-        "nextPos": 1,
-        "sortBackwards": false,
-        "sortType": "noteFld",
-        "fsrs": true,
-        "schedVer": 2,
-        "creationOffset": 0,
-        "lastFsrsOptimize": 0,
-        "loadBalancerEnabled": true,
-        "collapseTime": 1200,
-        "timeLim": 0,
-        "estTimes": true,
-        "dueCounts": true,
-        "newSpread": 0,
-        "dayLearnFirst": false,
-        "addToCur": true
-    })
 }
 
 fn default_models() -> Value {
@@ -244,63 +220,34 @@ fn default_decks() -> Value {
     Value::Object(decks)
 }
 
-fn default_dconf() -> Value {
-    let config = json!({
-        "id": 1,
-        "name": "Default",
-        "mod": 0,
-        "usn": 0,
-        "maxTaken": 60,
-        "autoplay": true,
-        "timer": 0,
-        "replayq": true,
-        "new": {
-            "bury": false,
-            "delays": [1.0, 10.0],
-            "initialFactor": 2500,
-            "ints": [1, 4, 0],
-            "order": 1,
-            "perDay": 20
-        },
-        "rev": {
-            "bury": false,
-            "ease4": 1.3,
-            "hardFactor": 1.2,
-            "ivlFct": 1.0,
-            "maxIvl": 36500,
-            "perDay": 200
-        },
-        "lapse": {
-            "delays": [10.0],
-            "leechAction": 1,
-            "leechFails": 8,
-            "minInt": 1,
-            "mult": 0.0
-        },
-        "dyn": false,
-        "newMix": 0,
-        "newPerDayMinimum": 0,
-        "interdayLearningMix": 0,
-        "reviewOrder": 0,
-        "newSortOrder": 0,
-        "newGatherPriority": 0,
-        "buryInterdayLearning": false,
-        "stopTimerOnAnswer": false,
-        "secondsToShowQuestion": 0.0,
-        "secondsToShowAnswer": 0.0,
-        "questionAction": 0,
-        "answerAction": 0,
-        "waitForAudio": true,
-        "easyDaysPercentages": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-        "fsrsWeights": [],
-        "fsrsParams5": [],
-        "fsrsParams6": ANKI_DEFAULT_FSRS6_PARAMS_F64,
-        "desiredRetention": 0.9,
-        "sm2Retention": 0.9,
-        "weightSearch": "",
-        "ignoreRevlogsBeforeDate": ""
-    });
-    let mut configs = serde_json::Map::new();
-    let _ = configs.insert("1".to_owned(), config);
-    Value::Object(configs)
+#[cfg(test)]
+mod tests {
+    use super::open_or_create;
+
+    #[test]
+    fn created_collections_use_integer_sort_field_and_shared_defaults() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("collection.anki2");
+        let connection =
+            open_or_create(&path, Some(1_700_000_000)).expect("create");
+        let affinity: String = connection
+            .prepare("PRAGMA table_info(notes)")
+            .expect("prepare")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .expect("query")
+            .filter_map(Result::ok)
+            .find_map(|(name, kind)| (name == "sfld").then_some(kind))
+            .expect("sfld column");
+        assert_eq!(affinity, "INTEGER");
+        let conf: String = connection
+            .query_row("SELECT conf FROM col WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("conf");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&conf).expect("JSON");
+        assert_eq!(parsed, ranki_storage::schema11_default_conf(Some(0)));
+    }
 }

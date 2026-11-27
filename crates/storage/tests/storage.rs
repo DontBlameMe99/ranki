@@ -1373,7 +1373,7 @@ fn rename_and_remove_work_with_modern_deck_tables() {
     {
         let conn = Connection::open(&path).expect("open");
         conn.execute_batch(
-            "UPDATE col SET decks = '{}' WHERE id = 1;
+            "UPDATE col SET ver = 18, decks = '{}' WHERE id = 1;
              CREATE TABLE decks (
                  id integer primary key,
                  name text not null,

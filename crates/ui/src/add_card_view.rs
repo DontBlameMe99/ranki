@@ -1671,6 +1671,7 @@ mod tests {
             field_tags: vec![],
             template_ordinals: vec![0],
             raw_config: None,
+            raw_json: None,
         };
         assert!(
             crate::app::validate_draft(&deck, &model, &[String::from("Q")])

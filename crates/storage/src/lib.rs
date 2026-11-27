@@ -1,3 +1,7 @@
+#![expect(
+    clippy::excessive_nesting,
+    reason = "deck creation writes one hierarchy in a single transaction"
+)]
 //! Anki-compatible SQLite storage for Ranki.
 //!
 //! Collections use Anki's `collection.anki2` tables, so files written here can
@@ -18,6 +22,7 @@
 //! All values are bound as SQL parameters.
 
 mod anki;
+mod options;
 mod records;
 mod reopening;
 mod schema;
@@ -33,6 +38,8 @@ use std::path::PathBuf;
 use std::slice;
 use std::str;
 
+pub use ranki_model::DeckPreset;
+pub use ranki_model::EffectiveDeck;
 pub use ranki_model::StoreError;
 pub use ranki_model::stock_models;
 
@@ -70,6 +77,8 @@ use rusqlite::params;
 use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
 pub use schema::ANKI_DEFAULT_FSRS6_PARAMS_F64;
+pub use schema::schema11_default_conf;
+pub use schema::schema11_default_deck_config;
 use serde_json::Map;
 use serde_json::Value as Json;
 use serde_json::json;
@@ -109,7 +118,7 @@ impl Collection {
             transaction.execute(statement, []).map_err(backend)?;
         }
         let now_secs = anki::now_secs()?;
-        let col = schema::default_col(now_secs, anki::now_ms()?);
+        let col = schema::default_col(now_secs, anki::now_ms()?, Some(0));
         let text = |key: &str| -> Result<String, StoreError> {
             let value =
                 col.get(key).ok_or_else(|| invalid("missing col field"))?;
@@ -166,6 +175,46 @@ impl Collection {
     /// Returns the collection's file path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Reads all deck presets from the active storage layout.
+    ///
+    /// # Errors
+    /// Returns an error when collection metadata cannot be read.
+    pub fn presets(&self) -> Result<Vec<DeckPreset>, StoreError> {
+        options::presets(&self.conn)
+    }
+
+    /// Reads one deck preset by id.
+    ///
+    /// # Errors
+    /// Returns an error when collection metadata cannot be read.
+    pub fn preset(&self, id: Id) -> Result<Option<DeckPreset>, StoreError> {
+        Ok(self.presets()?.into_iter().find(|preset| preset.id == id))
+    }
+
+    /// Reads deck identity and overrides from the active storage layout.
+    ///
+    /// # Errors
+    /// Returns an error when collection metadata cannot be read.
+    pub fn effective_decks(&self) -> Result<Vec<EffectiveDeck>, StoreError> {
+        options::effective_decks(&self.conn)
+    }
+
+    /// Writes one preset back to the active storage layout.
+    ///
+    /// # Errors
+    /// Returns an error when the preset cannot be written.
+    pub fn write_preset(&self, preset: &DeckPreset) -> Result<(), StoreError> {
+        options::write_preset(&self.conn, preset)
+    }
+
+    /// Writes one deck back to the active storage layout.
+    ///
+    /// # Errors
+    /// Returns an error when the deck cannot be written.
+    pub fn write_deck(&self, deck: &EffectiveDeck) -> Result<(), StoreError> {
+        options::write_deck(&self.conn, deck)
     }
 
     /// Installs a stock note type and returns the stored model.
@@ -308,13 +357,11 @@ params![stamp.modified, stamp.scm, json],
     }
 
     fn model_list(&self) -> Result<Vec<NoteModel>, StoreError> {
-        let models =
-            records::models_from_json(&records::read_col_models(&self.conn)?)?;
-        if models.is_empty() && records::table_exists(&self.conn, "notetypes")?
-        {
+        let col = records::read_col(&self.conn)?;
+        if models_in_tables(&self.conn, &col)? {
             return records::models_from_tables(&self.conn);
         }
-        Ok(models)
+        records::models_from_json(&col.models)
     }
 
     /// Lists the deck and every subdeck below it in the `A::B` hierarchy.
@@ -406,59 +453,91 @@ impl Store for Collection {
             .collect())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one transaction creates the whole deck hierarchy"
+    )]
     fn create_deck(&mut self, name: &str) -> Result<Deck, StoreError> {
-        let deck_name = validate_deck_name(name)?;
+        let requested = validate_deck_name(name)?;
         let decks = self.deck_list()?;
-        if decks.iter().any(|deck| deck.name == deck_name) {
-            return Err(invalid(format!("deck already exists: {deck_name}")));
+        if decks
+            .iter()
+            .any(|deck| deck.name.eq_ignore_ascii_case(requested))
+        {
+            return Err(invalid(format!("deck already exists: {requested}")));
         }
+        let plan = deck_creation_plan(&decks, requested);
         let col = records::read_col(&self.conn)?;
         let stamp = col_stamp(&col)?;
-        let id = fresh_id(&self.conn, "notes")?;
         let modern = uses_deck_table(&self.conn, &col)?;
+        let transaction = self.conn.transaction().map_err(backend)?;
+        let mut next_id = fresh_id(&transaction, "notes")?;
+        let mut json_decks = if modern {
+            None
+        } else {
+            let value: Json = serde_json::from_str(&col.decks)
+                .map_err(|error| invalid(error.to_string()))?;
+            if !value.is_object() {
+                return Err(invalid("decks is not an object"));
+            }
+            Some(value)
+        };
+        let mut created = Vec::new();
+        for (deck_name, existing) in &plan {
+            if existing.is_some() {
+                continue;
+            }
+            let id = next_id;
+            next_id = next_id.saturating_add(1);
+            if modern {
+                transaction
+                    .execute(
+                        "INSERT INTO decks (id, name, mtime_secs, usn, common, kind) VALUES (?1, ?2, \
+                         ?3, ?4, ?5, ?6)",
+                        params![
+                            id,
+                            anki::encode_deck_name(deck_name),
+                            stamp.now_secs,
+                            stamp.usn,
+                            Vec::<u8>::new(),
+                            anki::normal_deck_kind(1),
+                        ],
+                    )
+                    .map_err(backend)?;
+            } else if let Some(object) =
+                json_decks.as_mut().and_then(Json::as_object_mut)
+            {
+                object.insert(
+                    id.to_string(),
+                    json!({"id": id, "name": deck_name, "usn": stamp.usn, "mod": stamp.now_secs, "conf": 1, "desc": "", "dyn": 0, "collapsed": false, "browserCollapsed": false, "lrnToday": [0, 0], "revToday": [0, 0], "newToday": [0, 0], "timeToday": [0, 0], "extendNew": 0, "extendRev": 0}),
+                );
+            }
+            created.push((id, deck_name.clone()));
+        }
         if modern {
-            self.conn
-                .execute(
-                    "INSERT INTO decks (id, name, mtime_secs, usn, common, kind) VALUES (?1, ?2, \
-                     ?3, ?4, ?5, ?6)",
-                    params![
-                        id,
-                        anki::encode_deck_name(deck_name),
-                        stamp.now_secs,
-                        stamp.usn,
-                        Vec::<u8>::new(),
-                        anki::normal_deck_kind(1),
-                    ],
-                )
-                .map_err(backend)?;
-            self.conn
+            transaction
                 .execute(
                     "UPDATE col SET mod = ?1, scm = ?2 WHERE id = 1",
                     params![stamp.modified, stamp.scm],
                 )
                 .map_err(backend)?;
         } else {
-            let mut value: Json = serde_json::from_str(&col.decks)
+            let decks_json = serde_json::to_string(&json_decks)
                 .map_err(|error| invalid(error.to_string()))?;
-            let object = value
-                .as_object_mut()
-                .ok_or_else(|| invalid("decks is not an object"))?;
-            object.insert(
-                id.to_string(),
-                json!({"id": id, "name": deck_name, "usn": stamp.usn, "mod": stamp.now_secs, "conf": 1, "desc": "", "dyn": 0, "collapsed": false, "browserCollapsed": false, "lrnToday": [0, 0], "revToday": [0, 0], "newToday": [0, 0], "timeToday": [0, 0], "extendNew": 0, "extendRev": 0}),
-            );
-            let decks_json = serde_json::to_string(&value)
-                .map_err(|error| invalid(error.to_string()))?;
-            self.conn
+            transaction
                 .execute(
-"UPDATE col SET mod = ?1, scm = ?2, decks = ?3 WHERE id = 1",
+                    "UPDATE col SET mod = ?1, scm = ?2, decks = ?3 WHERE id = 1",
                     params![stamp.modified, stamp.scm, decks_json],
                 )
                 .map_err(backend)?;
         }
+        transaction.commit().map_err(backend)?;
+        let (id, name) = created.pop().ok_or_else(|| {
+            StoreError::InvalidData("deck hierarchy already exists".into())
+        })?;
         Ok(Deck {
             id,
-            name: deck_name.into(),
+            name,
             description: String::new(),
         })
     }
@@ -1382,7 +1461,7 @@ fn models_in_tables(
     if !records::table_exists(conn, "notetypes")? {
         return Ok(false);
     }
-    Ok(records::models_from_json(&col.models)?.is_empty())
+    Ok(col.ver >= 18)
 }
 
 fn column_exists(
@@ -1417,12 +1496,7 @@ fn insert_model_tables(
             model.name,
             stamp.now_secs,
             stamp.usn,
-            anki::notetype_config(
-                model.kind.code(),
-                model.sort_field_index,
-                model.original_stock_kind,
-                &model.css,
-            ),
+            records::notetype_config_for(model),
         ],
     )
     .map_err(backend)?;
@@ -1431,14 +1505,16 @@ fn insert_model_tables(
         let tag = model.field_tags.get(index).copied().flatten();
         conn.execute(
             "INSERT INTO fields (ntid, ord, name, config) VALUES (?1, ?2, ?3, ?4)",
-            params![model.id, ord, name, anki::field_config(tag)],
+            params![model.id, ord, name, records::field_config_for(model, index, tag)],
         )
         .map_err(backend)?;
     }
     let stamped = column_exists(conn, "templates", "mtime_secs")?;
-    for template in &model.templates {
+    for (position, template) in model.templates.iter().enumerate() {
         let ord = i64::from(template.ord);
-        let config = anki::template_config(
+        let config = records::template_config_for(
+            model,
+            position,
             &template.question_format,
             &template.answer_format,
         );
@@ -1479,11 +1555,11 @@ fn placeholders(start: i64, count: usize) -> String {
 }
 
 fn deck_list_from(conn: &Connection) -> Result<Vec<Deck>, StoreError> {
-    let decks = records::decks_from_json(&records::read_col_decks(conn)?)?;
-    if decks.is_empty() && records::table_exists(conn, "decks")? {
+    let col = records::read_col(conn)?;
+    if uses_deck_table(conn, &col)? {
         return records::decks_from_tables(conn);
     }
-    Ok(decks)
+    records::decks_from_json(&col.decks)
 }
 
 /// Counts cards due at `now_secs` per deck id in one grouped query.
@@ -1587,6 +1663,33 @@ pub(crate) fn deck_subtree_ids(decks: &[Deck], root_name: &str) -> Vec<Id> {
         .collect()
 }
 
+/// Names of every deck needed for `name`, with the id of existing decks.
+///
+/// Existing ancestors keep their stored spelling, so `alpha::Beta` joins an
+/// existing `Alpha` instead of creating a second parent.
+fn deck_creation_plan(decks: &[Deck], name: &str) -> Vec<(String, Option<Id>)> {
+    let mut canonical = String::new();
+    let mut plan = Vec::new();
+    for part in name.split("::") {
+        let candidate = if canonical.is_empty() {
+            part.to_owned()
+        } else {
+            format!("{canonical}::{part}")
+        };
+        if let Some(existing) = decks
+            .iter()
+            .find(|deck| deck.name.eq_ignore_ascii_case(&candidate))
+        {
+            canonical.clone_from(&existing.name);
+            plan.push((canonical.clone(), Some(existing.id)));
+        } else {
+            canonical = candidate;
+            plan.push((canonical.clone(), None));
+        }
+    }
+    plan
+}
+
 fn validate_deck_name(name: &str) -> Result<&str, StoreError> {
     let trimmed = name.trim();
     if trimmed.is_empty()
@@ -1605,7 +1708,7 @@ fn uses_deck_table(
     if !records::table_exists(conn, "decks")? {
         return Ok(false);
     }
-    Ok(records::decks_from_json(&col.decks)?.is_empty())
+    Ok(col.ver >= 18)
 }
 
 /// Keeps a stamp at least one past `previous` so writes in the same
@@ -1838,13 +1941,13 @@ fn rename_plan(
             changes.push((deck.id, format!("{new_name}::{suffix}")));
         }
     }
-    let mut seen: HashSet<&str> = HashSet::with_capacity(decks.len());
+    let mut seen: HashSet<String> = HashSet::with_capacity(decks.len());
     for deck in decks {
         let name = changes
             .iter()
             .find(|(changed_id, _)| *changed_id == deck.id)
             .map_or(deck.name.as_str(), |(_, name)| name.as_str());
-        if !seen.insert(name) {
+        if !seen.insert(name.to_ascii_lowercase()) {
             return Err(invalid(format!("deck already exists: {name}")));
         }
     }
