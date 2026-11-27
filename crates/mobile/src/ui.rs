@@ -317,7 +317,6 @@ fn render_decks(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     }
     ui.add_space(12.0);
 
-    let any_due = app.decks.iter().any(|row| row.due > 0);
     let study_all = touch_button(
         RichText::new("Study all"),
         TAP_HEIGHT,
@@ -325,7 +324,7 @@ fn render_decks(app: &mut AppState, ui: &mut Ui, p: &Palette) {
         p.accent_ink,
     )
     .min_size(vec2(ui.available_width(), TAP_HEIGHT));
-    if ui.add_enabled(any_due, study_all).clicked() {
+    if ui.add(study_all).clicked() {
         let _ = app.start_review(None);
     }
     ui.add_space(16.0);
@@ -386,7 +385,7 @@ fn render_decks(app: &mut AppState, ui: &mut Ui, p: &Palette) {
                     p.text,
                 )
                 .min_size(vec2(ui.available_width(), TAP_HEIGHT));
-                if ui.add_enabled(row.due > 0, button).clicked() {
+                if ui.add(button).clicked() {
                     let _ = app.start_review(row.id);
                 }
             });

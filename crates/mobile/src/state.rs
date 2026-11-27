@@ -23,7 +23,7 @@ use ranki_sync::{
     SyncOutcome, SyncState, SyncTransport, TransportConfig, clear_host_key,
 };
 
-use crate::card::{sides, without_images};
+use crate::card::{sides, sides_text};
 use crate::error::Result;
 use ranki_core::scheduler_for_card;
 
@@ -860,15 +860,12 @@ impl AppState {
             else {
                 continue;
             };
-            let (question_markup, answer_markup) =
-                sides(model, note, card.ordinal);
-            let question = without_images(&question_markup);
-            let answer = without_images(&answer_markup);
-            let back = answer
-                .strip_prefix(question.as_str())
-                .unwrap_or(&answer)
-                .trim_start()
-                .to_owned();
+            let (question, answer) = sides_text(model, note, card.ordinal);
+            let repeats_front =
+                model.template_for(card.ordinal).is_some_and(|template| {
+                    template.answer_format.contains("{{FrontSide}}")
+                });
+            let back = browse_answer(&question, &answer, repeats_front);
             let deck = decks
                 .iter()
                 .find(|row| row.id == Some(card.deck_id))
@@ -1106,6 +1103,22 @@ fn now_secs() -> i64 {
         .ok()
         .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
         .unwrap_or(0)
+}
+
+pub(crate) fn browse_answer(
+    question: &str,
+    answer: &str,
+    repeats_front: bool,
+) -> String {
+    if repeats_front {
+        answer
+            .strip_prefix(question)
+            .unwrap_or(answer)
+            .trim_start()
+            .to_owned()
+    } else {
+        answer.to_owned()
+    }
 }
 
 const fn queue_name(queue: CardQueue) -> &'static str {

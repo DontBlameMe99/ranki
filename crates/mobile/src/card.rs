@@ -19,9 +19,16 @@ use egui::{ColorImage, Context, Id, TextureHandle, TextureOptions, Ui};
 use image::{GenericImageView, Limits};
 use ranki_model::{Note, NoteModel, cloze_markers};
 
-/// Renders the question and answer text for one card ordinal.
-#[must_use]
-pub fn sides(model: &NoteModel, note: &Note, ordinal: u16) -> (String, String) {
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one flag selects full card text or list preview text"
+)]
+fn render_sides(
+    model: &NoteModel,
+    note: &Note,
+    ordinal: u16,
+    keep_images: bool,
+) -> (String, String) {
     let Some(template) = model.template_for(ordinal) else {
         let fallback = String::from("This note has no template.");
         return (fallback.clone(), fallback);
@@ -53,7 +60,26 @@ pub fn sides(model: &NoteModel, note: &Note, ordinal: u16) -> (String, String) {
         answer_markup
     };
 
-    (strip_markup(&question, true), strip_markup(&answer, true))
+    (
+        strip_markup(&question, keep_images),
+        strip_markup(&answer, keep_images),
+    )
+}
+
+/// Renders the question and answer text for one card ordinal, including images.
+#[must_use]
+pub fn sides(model: &NoteModel, note: &Note, ordinal: u16) -> (String, String) {
+    render_sides(model, note, ordinal, true)
+}
+
+/// Renders card text for list previews, without image markup.
+#[must_use]
+pub fn sides_text(
+    model: &NoteModel,
+    note: &Note,
+    ordinal: u16,
+) -> (String, String) {
+    render_sides(model, note, ordinal, false)
 }
 
 /// Draws card text and any local images referenced by it.
@@ -75,24 +101,6 @@ pub fn render_side(ui: &mut Ui, text: &str, media_dir: &Path) {
 #[must_use]
 pub fn plain(text: &str) -> String {
     strip_markup(text, false)
-}
-
-/// Removes image tags from already rendered card text.
-#[must_use]
-pub fn without_images(text: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    let mut cursor = 0usize;
-    while let Some(rest) = text.get(cursor..) {
-        let Some(relative) = find_image_tag(rest) else {
-            break;
-        };
-        let start = cursor.saturating_add(relative);
-        output.push_str(text.get(cursor..start).unwrap_or(""));
-        let (_, end) = image_media(text, start);
-        cursor = end;
-    }
-    output.push_str(text.get(cursor..).unwrap_or(""));
-    output
 }
 
 /// Returns image and sound file names in the order they appear.
