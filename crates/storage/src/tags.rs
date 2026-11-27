@@ -92,11 +92,11 @@ fn normalize_name(name: &str) -> String {
 }
 
 fn normalize_component(component: &str) -> String {
-    let normalized: String = component.nfc().collect();
-    let mut without_invalid: String = normalized
+    let stripped: String = component
         .chars()
         .filter(|character| !invalid_char(*character))
         .collect();
+    let mut without_invalid: String = stripped.nfc().collect();
     let trimmed = without_invalid.trim();
     if trimmed.is_empty() {
         String::from("blank")
@@ -263,5 +263,6 @@ mod tests {
         assert_eq!(normalize_name("\u{fa47}"), "\u{6f22}");
         assert_eq!(normalize_name("  spaced\u{3000}out  "), "spacedout");
         assert_eq!(normalize_name("a::\u{0001}::b"), "a::blank::b");
+        assert_eq!(normalize_name("e\u{0001}\u{301}"), "é");
     }
 }

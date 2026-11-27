@@ -90,7 +90,10 @@ pub fn encode_tags(tags: &[String]) -> String {
 }
 
 pub fn decode_tags(tags: &str) -> Vec<String> {
-    tags.split_whitespace().map(ToOwned::to_owned).collect()
+    tags.split([' ', '\u{3000}'])
+        .filter(|tag| !tag.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 /// Anki strips HTML and resolves entities before computing sort fields and checksums.
@@ -119,6 +122,22 @@ pub fn checksum(field: &str) -> i32 {
 pub fn checksum_with(field: &str, normalize_text: bool) -> i32 {
     let text =
         strip_html_preserving_media_filenames_with(field, normalize_text);
+    checksum_text(&text)
+}
+
+/// Text used by the checksum algorithm stored before this change.
+#[must_use]
+pub fn legacy_field_text(field: &str) -> String {
+    decode_entities(&remove_tags(field))
+}
+
+/// Checksum of a field saved by the previous storage version.
+#[must_use]
+pub fn legacy_checksum(field: &str) -> i32 {
+    checksum_text(&legacy_field_text(field))
+}
+
+fn checksum_text(text: &str) -> i32 {
     let digest = Sha1::digest(text.as_bytes());
     let bytes = digest.get(..4).unwrap_or_default();
     let unsigned = u32::from_be_bytes([
@@ -166,11 +185,12 @@ pub fn html_to_text_line(
     let stripped = if preserve_media_filenames {
         strip_html_preserving_media_filenames(&with_sound)
     } else {
-        remove_tags(&with_sound)
+        strip_html(&with_sound)
     };
     stripped.trim().to_owned()
 }
 
+#[must_use]
 pub fn csum_value(checksum: i32) -> i64 {
     i64::from(checksum) & i64::from(u32::MAX)
 }
@@ -1168,6 +1188,7 @@ mod tests {
         assert_eq!(html_to_text_line("a&nbsp;b&#160;c", true, true), "a b c");
         assert_eq!(html_to_text_line("a\u{a0}b", true, true), "a b");
         assert_eq!(html_to_text_line("&unknown;", true, true), "&unknown;");
+        assert_eq!(html_to_text_line("A&nbsp;B [sound:x]", false, true), "A B");
     }
 
     #[test]

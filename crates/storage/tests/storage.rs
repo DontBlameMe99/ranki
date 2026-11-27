@@ -26,6 +26,7 @@ use ranki_model::Store;
 use ranki_model::StoreError;
 use ranki_storage::Collection;
 use ranki_storage::ReopeningCollection;
+use ranki_storage::legacy_checksum;
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
 use serde_json::Value;
@@ -2017,20 +2018,6 @@ fn duplicate_scope_controls_deck_model_and_invalid_deck_checks() {
         deck_id: Some(parent.id),
         ..DuplicateScope::default()
     };
-    assert!(
-        store
-            .add_note_with_options(
-                &NewNote {
-                    deck_id: parent.id,
-                    ..note(&["Child scoped", "back"], &[])
-                },
-                &AddNoteOptions {
-                    duplicate_scope: child_scope,
-                    ..AddNoteOptions::default()
-                },
-            )
-            .is_ok()
-    );
     child_scope.check_children = true;
     assert!(
         store
@@ -2045,6 +2032,21 @@ fn duplicate_scope_controls_deck_model_and_invalid_deck_checks() {
                 },
             )
             .is_err()
+    );
+    child_scope.check_children = false;
+    assert!(
+        store
+            .add_note_with_options(
+                &NewNote {
+                    deck_id: parent.id,
+                    ..note(&["Child scoped", "back"], &[])
+                },
+                &AddNoteOptions {
+                    duplicate_scope: child_scope,
+                    ..AddNoteOptions::default()
+                },
+            )
+            .is_ok()
     );
 
     store
@@ -2061,7 +2063,6 @@ fn duplicate_scope_controls_deck_model_and_invalid_deck_checks() {
         .expect("open sqlite")
         .execute("UPDATE notes SET mid = 99 WHERE id = ?1", [note_id])
         .expect("change model");
-    assert!(store.add_note(&note(&["All models", "back"], &[])).is_ok());
     let all_models = AddNoteOptions {
         duplicate_scope: DuplicateScope {
             check_all_models: true,
@@ -2077,6 +2078,7 @@ fn duplicate_scope_controls_deck_model_and_invalid_deck_checks() {
             )
             .is_err()
     );
+    assert!(store.add_note(&note(&["All models", "back"], &[])).is_ok());
 
     let missing_deck = AddNoteOptions {
         duplicate_scope: DuplicateScope {
@@ -2212,6 +2214,7 @@ fn update_note_preserves_identity_flags_data_and_card_state() {
 
     let saved = store.note(card.note_id).expect("note").expect("exists");
     assert_eq!(saved.guid, "stable");
+    assert_eq!(saved.fields, ["new", "back"]);
     assert_eq!(saved.flags, 7);
     assert_eq!(saved.data, "meta");
     assert_eq!(saved.tags, ["keep"]);
@@ -2219,6 +2222,80 @@ fn update_note_preserves_identity_flags_data_and_card_state() {
     assert_eq!(saved_card.interval, 42);
     assert_eq!(saved_card.reps, 9);
     assert_eq!(saved_card.queue, ranki_model::CardQueue::Review);
+}
+
+#[test]
+fn normalize_note_text_can_be_disabled() {
+    let (_directory, path) = fixture();
+    Connection::open(&path)
+        .expect("open sqlite")
+        .execute(
+            "UPDATE col SET conf = ?1 WHERE id = 1",
+            [json!({"normalize_note_text": false}).to_string()],
+        )
+        .expect("disable normalization");
+    let mut store = Collection::open(&path).expect("open");
+    let ids = store
+        .add_note(&note(&["e\u{301}", "back"], &[]))
+        .expect("add note");
+    let card = store.card(ids[0]).expect("card").expect("exists");
+    let saved = store.note(card.note_id).expect("note").expect("exists");
+    assert_eq!(saved.fields[0], "e\u{301}");
+}
+
+#[test]
+fn legacy_checksums_still_detect_duplicates() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let raw = "<img src=\"sound.png\">y";
+    let ids = store
+        .add_note(&note(&[raw, "back"], &[]))
+        .expect("add note");
+    let card = store.card(ids[0]).expect("card").expect("exists");
+    Connection::open(&path)
+        .expect("open sqlite")
+        .execute(
+            "UPDATE notes SET csum = ?1 WHERE id = ?2",
+            rusqlite::params![
+                ranki_storage::csum_value(legacy_checksum(raw)),
+                card.note_id
+            ],
+        )
+        .expect("write legacy checksum");
+    assert!(store.add_note(&note(&[raw, "back"], &[])).is_err());
+}
+
+#[test]
+fn reopening_store_forwards_duplicate_options() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(&["Question", "back"], &[]))
+        .expect("first note");
+    let mut reopened = ReopeningCollection::new(&path);
+    reopened
+        .add_note_with_options(
+            &note(&["Question", "back"], &[]),
+            &AddNoteOptions::allowing_duplicates(),
+        )
+        .expect("explicit duplicate through reopening store");
+}
+
+#[test]
+fn tag_decoder_uses_anki_separators() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(&["front", "back"], &["one\u{a0}two"]))
+        .expect("add note");
+    let card = store.find_cards("").expect("find")[0];
+    let saved_card = store.card(card).expect("card").expect("exists");
+    let saved = store
+        .note(saved_card.note_id)
+        .expect("note")
+        .expect("exists");
+    assert_eq!(saved.tags, ["one\u{a0}two"]);
+    assert_eq!(store.tags().expect("tags"), ["one\u{a0}two"]);
 }
 
 fn pb_floats(field: u32, values: &[f32]) -> Vec<u8> {

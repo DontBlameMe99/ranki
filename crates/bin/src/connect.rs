@@ -2,9 +2,13 @@
 
 use std::fmt;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use unicode_normalization::UnicodeNormalization;
 
 use ranki_core::FsrsScheduler;
 use ranki_model::AddNoteOptions;
@@ -34,6 +38,7 @@ use crate::answer_card;
 use crate::error::{ErrorCode, InterfaceError};
 use crate::save_card;
 const API_VERSION: u32 = 6;
+static MEDIA_STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const EMPTY_PARAMS: Value = Value::Null;
 
 #[derive(Debug)]
@@ -355,11 +360,11 @@ fn add_note(
         return Err("empty question".into());
     }
     let tags = note_tags(note)?;
-    let staged = stage_media(&media, media_dir)?;
-    let published = match publish_media(&media, &staged, media_dir) {
+    let (stage, staged) = stage_media(&media, media_dir)?;
+    let published = match publish_media(&media, &staged, &stage, media_dir) {
         Ok(published) => published,
         Err(error) => {
-            cleanup_media(&staged);
+            cleanup_stage(&stage);
             return Err(error);
         }
     };
@@ -382,11 +387,10 @@ fn add_note(
         }
     };
     if let Err(error) = finish_media(&published) {
-        let rollback = rollback_media(&published)
-            .err()
-            .map(|detail| format!("; media rollback failed: {detail}"))
-            .unwrap_or_default();
-        return Err(format!("{error}{rollback}").into());
+        return Err(format!(
+            "{error}; note was created but media cleanup failed"
+        )
+        .into());
     }
     let Some(card_id) = ids.first().copied() else {
         return Ok(Value::Null);
@@ -513,7 +517,10 @@ fn prepare_media(
             };
             let safe_filename = safe_media_filename(filename)?;
             let marker = if is_picture {
-                format!("<img src=\"{safe_filename}\">")
+                format!(
+                    "<img src=\"{}\">",
+                    escape_html_attribute(&safe_filename)
+                )
             } else {
                 format!("[sound:{safe_filename}]")
             };
@@ -553,34 +560,48 @@ fn apply_media(attachments: &[MediaAttachment], fields: &mut [String]) {
     }
 }
 
+fn create_stage_dir(media_dir: &Path) -> Result<PathBuf, RpcError> {
+    loop {
+        let sequence = MEDIA_STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = media_dir
+            .join(format!(".ranki-stage-{}-{sequence}", process::id()));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(format!(
+                    "cannot create media staging directory: {error}"
+                )
+                .into());
+            }
+        }
+    }
+}
+
 fn stage_media(
     attachments: &[MediaAttachment],
     media_dir: &Path,
-) -> Result<Vec<PathBuf>, RpcError> {
+) -> Result<(PathBuf, Vec<PathBuf>), RpcError> {
     if attachments.is_empty() {
-        return Ok(Vec::new());
+        return Ok((PathBuf::new(), Vec::new()));
     }
     fs::create_dir_all(media_dir)
         .map_err(|error| format!("cannot create media directory: {error}"))?;
+    let stage = create_stage_dir(media_dir)?;
     let mut staged = Vec::new();
-    for attachment in attachments {
-        let path = media_dir.join(format!(
-            ".ranki-{}-{}-{}",
-            process::id(),
-            staged.len(),
-            attachment.filename
-        ));
+    for (index, attachment) in attachments.iter().enumerate() {
+        let path = stage.join(index.to_string());
         if let Err(error) = fs::write(&path, &attachment.bytes) {
-            cleanup_media(&staged);
+            cleanup_stage(&stage);
             return Err(format!("cannot stage media: {error}").into());
         }
         staged.push(path);
     }
-    Ok(staged)
+    Ok((stage, staged))
 }
 
 struct PublishedMedia {
-    staged: Vec<PathBuf>,
+    stage: PathBuf,
     backups: Vec<(PathBuf, Option<PathBuf>)>,
 }
 
@@ -588,13 +609,18 @@ struct PublishedMedia {
     clippy::excessive_nesting,
     reason = "media publication backs up each existing target before replacing it"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "publication needs attachments, staged files, and both directories"
+)]
 fn publish_media(
     attachments: &[MediaAttachment],
     staged: &[PathBuf],
+    stage: &Path,
     media_dir: &Path,
 ) -> Result<PublishedMedia, RpcError> {
     let mut published = PublishedMedia {
-        staged: staged.to_vec(),
+        stage: stage.to_path_buf(),
         backups: Vec::new(),
     };
     for (index, (attachment, path)) in
@@ -609,12 +635,7 @@ fn publish_media(
             .into());
         }
         let backup = if target.exists() {
-            let backup_path = media_dir.join(format!(
-                ".ranki-backup-{}-{}-{}",
-                process::id(),
-                index,
-                attachment.filename
-            ));
+            let backup_path = stage.join(format!("backup-{index}"));
             if let Err(error) = fs::rename(&target, &backup_path) {
                 let detail =
                     rollback_media(&published).err().unwrap_or_default();
@@ -652,12 +673,8 @@ fn rollback_media(published: &PublishedMedia) -> Result<(), String> {
             errors.push(format!("restore {}: {error}", target.display()));
         }
     }
-    for path in &published.staged {
-        if path.exists()
-            && let Err(error) = fs::remove_file(path)
-        {
-            errors.push(format!("remove {}: {error}", path.display()));
-        }
+    if let Err(error) = cleanup_stage_result(&published.stage) {
+        errors.push(error);
     }
     if errors.is_empty() {
         Ok(())
@@ -667,38 +684,24 @@ fn rollback_media(published: &PublishedMedia) -> Result<(), String> {
 }
 
 fn finish_media(published: &PublishedMedia) -> Result<(), RpcError> {
-    let mut errors = Vec::new();
-    for (_, backup) in &published.backups {
-        if let Some(backup_path) = backup
-            && backup_path.exists()
-            && let Err(error) = fs::remove_file(backup_path)
-        {
-            errors.push(format!("remove {}: {error}", backup_path.display()));
-        }
-    }
-    for path in &published.staged {
-        if path.exists()
-            && let Err(error) = fs::remove_file(path)
-        {
-            errors.push(format!("remove {}: {error}", path.display()));
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("cannot finish media: {}", errors.join("; ")).into())
-    }
+    cleanup_stage_result(&published.stage).map_err(RpcError::from)
 }
 
-fn cleanup_media(staged: &[PathBuf]) {
-    for path in staged {
-        let _ = fs::remove_file(path);
+fn cleanup_stage(stage: &Path) {
+    let _ = cleanup_stage_result(stage);
+}
+
+fn cleanup_stage_result(stage: &Path) -> Result<(), String> {
+    if stage.as_os_str().is_empty() || !stage.exists() {
+        return Ok(());
     }
+    fs::remove_dir_all(stage)
+        .map_err(|error| format!("remove {}: {error}", stage.display()))
 }
 
 fn safe_media_filename(filename: &str) -> Result<String, RpcError> {
     let base = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
-    let safe: String = base
+    let stripped: String = base
         .chars()
         .filter(|character| {
             !character.is_ascii_control()
@@ -708,10 +711,23 @@ fn safe_media_filename(filename: &str) -> Result<String, RpcError> {
                 )
         })
         .collect();
+    let safe: String = stripped.nfc().collect();
     if safe.is_empty() || safe == "." || safe == ".." {
         return Err(format!("invalid media filename: {filename}").into());
     }
     Ok(safe)
+}
+
+fn escape_html_attribute(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn decode_base64(input: &str) -> Result<Vec<u8>, RpcError> {
@@ -1501,6 +1517,46 @@ mod tests {
     }
 
     #[test]
+    fn add_note_escapes_and_normalizes_media_filenames() {
+        let (dir, mut store) = fixture();
+        let mut payload = note("Default");
+        payload["picture"] = json!({
+            "filename": "a&b'.png",
+            "fields": ["Front"],
+            "data": "cGl4ZWxz",
+        });
+        let response = call_media(&dir, &mut store, json!({"note": payload}));
+        assert_eq!(response.error, None, "{response:?}");
+        let media = dir.path().join("collection.media");
+        assert_eq!(fs::read(media.join("a&b'.png")).unwrap(), b"pixels");
+        let card = store.find_cards("").expect("find")[0];
+        let saved_card = store.card(card).expect("card").expect("exists");
+        let saved = store
+            .note(saved_card.note_id)
+            .expect("note")
+            .expect("exists");
+        assert_eq!(saved.fields[0], "Question<img src=\"a&amp;b&#39;.png\">");
+
+        let mut payload = note("Default");
+        payload["fields"]["Front"] = json!("Second");
+        payload["picture"] = json!({
+            "filename": "e\u{301}.png",
+            "fields": ["Front"],
+            "data": "cGl4ZWxz",
+        });
+        let response = call_media(&dir, &mut store, json!({"note": payload}));
+        assert_eq!(response.error, None, "{response:?}");
+        assert_eq!(fs::read(media.join("é.png")).unwrap(), b"pixels");
+        let card = store.find_cards("Second").expect("find")[0];
+        let saved_card = store.card(card).expect("card").expect("exists");
+        let saved = store
+            .note(saved_card.note_id)
+            .expect("note")
+            .expect("exists");
+        assert_eq!(saved.fields[0], "Second<img src=\"é.png\">");
+    }
+
+    #[test]
     fn add_note_sanitizes_media_filenames() {
         let (dir, mut store) = fixture();
         let mut payload = note("Default");
@@ -1585,5 +1641,14 @@ mod tests {
             })
             .collect();
         assert!(staged.is_empty(), "{staged:?}");
+    }
+    #[test]
+    fn media_filename_filters_invalid_characters_before_nfc() {
+        assert_eq!(
+            super::safe_media_filename("e\u{0001}\u{301}.png")
+                .ok()
+                .as_deref(),
+            Some("é.png")
+        );
     }
 }
