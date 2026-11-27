@@ -31,6 +31,20 @@ nix build .#default      # packaged binary in ./result/bin/ranki
 ./result/bin/ranki --help
 ```
 
+The desktop UI uses GPUI and stays the default. The touch UI is a separate
+crate with no GPUI dependency:
+
+```bash
+nix develop --command cargo run -p ranki-mobile
+CC_aarch64_linux_android=gcc CRATE_CC_NO_DEFAULTS=1 \
+  nix develop --command cargo check -p ranki-mobile --target aarch64-linux-android
+CC_aarch64_apple_ios=clang CRATE_CC_NO_DEFAULTS=1 \
+  nix develop --command cargo check -p ranki-mobile --target aarch64-apple-ios
+```
+
+See `docs/mobile.md` for the mobile data directories, platform entry points,
+and visual check command.
+
 ## Home Manager
 
 Add Ranki and Home Manager as flake inputs, both following the same nixpkgs:

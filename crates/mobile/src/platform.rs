@@ -1,0 +1,170 @@
+//! App paths and native entry points for the mobile build.
+
+use std::env;
+#[cfg(not(target_os = "android"))]
+use std::ffi::OsString;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::Path;
+use std::path::PathBuf;
+
+use ranki_model::Config;
+use ranki_model::config::DataPaths;
+use ranki_model::config::Settings;
+use ranki_model::config::parse;
+use ranki_storage::Collection;
+use ranki_storage::ReopeningCollection;
+
+use crate::state::AppState;
+use crate::ui::MobileApp;
+
+#[cfg(target_os = "android")]
+use winit::platform::android::activity::AndroidApp;
+
+const APP_ID: &str = "ranki-mobile";
+const WINDOW_WIDTH: f32 = 390.0;
+const WINDOW_HEIGHT: f32 = 844.0;
+
+/// Builds the phone-sized window options for eframe.
+#[must_use]
+pub fn native_options() -> eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_app_id(APP_ID)
+            .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT]),
+        ..Default::default()
+    };
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        options.renderer = eframe::Renderer::Wgpu;
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        options.renderer = eframe::Renderer::Glow;
+    }
+    options
+}
+
+/// Resolves the data and configuration directories.
+///
+/// Explicit `RANKI_DATA_DIR` and `RANKI_CONFIG_DIR` values win. Android gets
+/// its directories from `internal_data_path` in [`run_with_android_app`], so
+/// it never needs `HOME`. Other platforms follow XDG and then `HOME`.
+#[must_use]
+pub fn initial_paths() -> (Option<PathBuf>, Option<PathBuf>) {
+    #[cfg(target_os = "android")]
+    {
+        (
+            explicit_dir("RANKI_DATA_DIR"),
+            explicit_dir("RANKI_CONFIG_DIR"),
+        )
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        (
+            explicit_dir("RANKI_DATA_DIR")
+                .or_else(|| nested_dir(env::var_os("XDG_DATA_HOME"), "ranki"))
+                .or_else(|| {
+                    nested_dir(env::var_os("HOME"), ".local/share/ranki")
+                }),
+            explicit_dir("RANKI_CONFIG_DIR")
+                .or_else(|| nested_dir(env::var_os("XDG_CONFIG_HOME"), "ranki"))
+                .or_else(|| nested_dir(env::var_os("HOME"), ".config/ranki")),
+        )
+    }
+}
+
+fn explicit_dir(name: &str) -> Option<PathBuf> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(not(target_os = "android"))]
+fn nested_dir(base: Option<OsString>, suffix: &str) -> Option<PathBuf> {
+    base.filter(|value| !value.is_empty())
+        .map(|value| PathBuf::from(value).join(suffix))
+}
+
+/// Opens the collection, loads settings, and runs the eframe event loop.
+///
+/// # Errors
+/// Returns an error when no data directory can be resolved, storage cannot be
+/// created or opened, or eframe cannot start the window.
+pub fn run() -> eframe::Result<()> {
+    run_with_options(native_options())
+}
+
+#[cfg(target_os = "android")]
+/// Starts the mobile app inside an Android native activity.
+///
+/// # Errors
+/// Returns an error when no data directory can be resolved, storage cannot be
+/// created or opened, or eframe cannot start the renderer.
+pub fn run_with_android_app(app: AndroidApp) -> eframe::Result<()> {
+    if let Some(root) = app.internal_data_path() {
+        set_android_dir("RANKI_DATA_DIR", &root.join("data"));
+        set_android_dir("RANKI_CONFIG_DIR", &root.join("config"));
+    }
+    let mut options = native_options();
+    options.android_app = Some(app);
+    run_with_options(options)
+}
+
+#[cfg(target_os = "android")]
+fn set_android_dir(name: &str, path: &Path) {
+    if env::var_os(name).is_none() {
+        // SAFETY: this runs from the native entry point before the event loop
+        // starts, so no other thread reads these variables yet.
+        unsafe { env::set_var(name, path) };
+    }
+}
+
+fn run_with_options(options: eframe::NativeOptions) -> eframe::Result<()> {
+    let app = build_app()
+        .map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
+    eframe::run_native(APP_ID, options, Box::new(move |_| Ok(Box::new(app))))
+}
+
+fn build_app() -> crate::Result<MobileApp> {
+    let (maybe_data_dir, maybe_config_dir) = initial_paths();
+    let data_dir = maybe_data_dir.ok_or_else(|| {
+        crate::MobileError::Message(String::from(
+            "cannot resolve the data directory; set RANKI_DATA_DIR or HOME",
+        ))
+    })?;
+    let config_dir = maybe_config_dir.ok_or_else(|| {
+        crate::MobileError::Message(String::from(
+            "cannot resolve the config directory; set RANKI_CONFIG_DIR or HOME",
+        ))
+    })?;
+
+    fs::create_dir_all(&data_dir)?;
+    fs::create_dir_all(&config_dir)?;
+
+    let paths = DataPaths::new(data_dir);
+    fs::create_dir_all(&paths.media_dir)?;
+    let settings = Settings::resolve(&load_config(&config_dir), paths);
+
+    let collection_path = &settings.paths.collection;
+    let collection = if collection_path.exists() {
+        Collection::open(collection_path)?
+    } else {
+        Collection::create(collection_path)?
+    };
+    drop(collection);
+
+    let store = ReopeningCollection::new(collection_path);
+    Ok(MobileApp::new(AppState::new(store, settings)?))
+}
+
+fn load_config(config_dir: &Path) -> Config {
+    match fs::read_to_string(config_dir.join("config.toml")) {
+        Ok(text) => parse(&text),
+        Err(error) if error.kind() == ErrorKind::NotFound => Config::default(),
+        Err(error) => {
+            eprintln!("ranki mobile: config: cannot read config.toml: {error}");
+            Config::default()
+        }
+    }
+}
