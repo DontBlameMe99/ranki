@@ -692,6 +692,138 @@ fn unchanged_collection_still_syncs_new_media() -> TestResult {
 }
 
 #[test]
+fn matching_media_usn_refills_an_empty_media_folder() -> TestResult {
+    let directory = TempDir::new()?;
+    let collection = directory.path().join("collection.anki2");
+    let media = directory.path().join("media");
+    let state_path = directory.path().join("sync.json");
+    make_collection(&collection, (100, 100, 1))?;
+    fs::create_dir_all(&media)?;
+    write_state(
+        &state_path,
+        &SyncState {
+            host_key: fixture_key(&directory),
+            last_mod: Some(100),
+            last_scm: Some(100),
+            last_media_usn: 1,
+            ..SyncState::default()
+        },
+    )?;
+    let transport = MockTransport::new()
+        .with_response(
+            SyncMethod::Meta,
+            meta_response_with_media((100, 100, false, now_secs()?), 1)?,
+        )
+        .with_response(SyncMethod::MediaBegin, media_begin(1)?)
+        .with_response(
+            SyncMethod::MediaChanges,
+            MockResponse::ok_json(&json!({
+                "data": [[
+                    "Afghanistan.png",
+                    1,
+                    "b297e6188e634a5e3ec2d366d8ec7cf3564af58a"
+                ]],
+                "err": ""
+            }))?,
+        )
+        .with_response(
+            SyncMethod::MediaDownload,
+            MockResponse::ok_bytes(media_zip(
+                "Afghanistan.png",
+                b"flag bytes",
+            )?)?,
+        );
+    let mut client =
+        SyncClient::new(transport, &collection, &media, &state_path)?;
+
+    assert_eq!(client.sync(None)?, SyncOutcome::NoChanges);
+    assert_eq!(fs::read(media.join("Afghanistan.png"))?, b"flag bytes");
+    let methods: Vec<SyncMethod> = client
+        .transport()
+        .requests()
+        .iter()
+        .map(|request| request.method)
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            SyncMethod::Meta,
+            SyncMethod::MediaBegin,
+            SyncMethod::MediaChanges,
+            SyncMethod::MediaDownload,
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn failed_media_refill_keeps_retrying() -> TestResult {
+    let directory = TempDir::new()?;
+    let collection = directory.path().join("collection.anki2");
+    let media = directory.path().join("media");
+    let state_path = directory.path().join("sync.json");
+    make_collection(&collection, (100, 100, 1))?;
+    write_state(
+        &state_path,
+        &SyncState {
+            host_key: fixture_key(&directory),
+            last_mod: Some(100),
+            last_scm: Some(100),
+            last_media_usn: 1,
+            ..SyncState::default()
+        },
+    )?;
+    let changes = || {
+        MockResponse::ok_json(&json!({
+            "data": [[
+                "Afghanistan.png",
+                1,
+                "b297e6188e634a5e3ec2d366d8ec7cf3564af58a"
+            ]],
+            "err": ""
+        }))
+    };
+    let transport = MockTransport::new()
+        .with_response(
+            SyncMethod::Meta,
+            meta_response_with_media((100, 100, false, now_secs()?), 1)?,
+        )
+        .with_response(SyncMethod::MediaBegin, media_begin(1)?)
+        .with_response(SyncMethod::MediaChanges, changes()?)
+        .with_failure(SyncMethod::MediaDownload, SyncError::Timeout)
+        .with_response(
+            SyncMethod::Meta,
+            meta_response_with_media((100, 100, false, now_secs()?), 1)?,
+        )
+        .with_response(SyncMethod::MediaBegin, media_begin(1)?)
+        .with_response(SyncMethod::MediaChanges, changes()?)
+        .with_response(
+            SyncMethod::MediaDownload,
+            MockResponse::ok_bytes(media_zip(
+                "Afghanistan.png",
+                b"flag bytes",
+            )?)?,
+        );
+    let mut client =
+        SyncClient::new(transport, &collection, &media, &state_path)?;
+
+    assert!(matches!(client.sync(None)?, SyncOutcome::RetryLater { .. }));
+    assert!(client.state().media_refill_needed);
+    assert!(
+        fs::read_to_string(&state_path)?
+            .contains("\"media_refill_needed\":true")
+    );
+
+    fs::create_dir_all(&media)?;
+    fs::write(media.join("partial.png"), b"partial")?;
+
+    assert_eq!(client.sync(None)?, SyncOutcome::NoChanges);
+    assert_eq!(fs::read(media.join("Afghanistan.png"))?, b"flag bytes");
+    assert!(!client.state().media_refill_needed);
+    Ok(())
+}
+
+#[test]
 fn offline_meta_failure_is_retried() -> TestResult {
     let directory = TempDir::new()?;
     let collection = directory.path().join("collection.anki2");

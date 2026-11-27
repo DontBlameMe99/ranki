@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -291,9 +291,10 @@ impl<T: SyncTransport> SyncClient<T> {
 
     /// Downloads the media referenced by the remote collection.
     ///
-    /// The full manifest is fetched whenever media changes, so files from
-    /// another account or a removed local copy are restored. Files already
-    /// present with the server's hash are left untouched.
+    /// The full manifest is fetched whenever media changes or the local folder
+    /// is empty, so files from another account or a removed local copy are
+    /// restored. Files already present with the server's hash are left
+    /// untouched.
     #[expect(
         clippy::excessive_nesting,
         reason = "media batches keep request and extraction state local"
@@ -360,16 +361,36 @@ impl<T: SyncTransport> SyncClient<T> {
             }
         }
         self.state.last_media_usn = server_usn;
+        self.state.media_refill_needed = false;
         self.state.save(&self.state_path)?;
         Ok(())
     }
 
-    /// Fetches media when the server has a newer media USN.
-    fn sync_media_if_changed(&mut self, status: &RemoteStatus) -> Result<()> {
-        if status.media_usn == self.state.last_media_usn {
+    /// Fetches media when the server has a newer media USN, a refill is
+    /// unfinished, or the local media folder has no files.
+    fn sync_media_if_needed(&mut self, status: &RemoteStatus) -> Result<()> {
+        if status.media_usn <= 0 {
             return Ok(());
         }
+        let matching = status.media_usn == self.state.last_media_usn;
+        if matching
+            && !self.state.media_refill_needed
+            && !self.media_dir_is_empty()
+        {
+            return Ok(());
+        }
+        if matching && !self.state.media_refill_needed {
+            self.state.media_refill_needed = true;
+            self.state.save(&self.state_path)?;
+        }
         self.sync_media()
+    }
+
+    fn media_dir_is_empty(&self) -> bool {
+        match fs::read_dir(&self.media_dir) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(error) => error.kind() == ErrorKind::NotFound,
+        }
     }
 
     /// Run one safe automatic sync.
@@ -434,12 +455,12 @@ impl<T: SyncTransport> SyncClient<T> {
             self.state.failures = 0;
             self.state.last_success = Some(now_secs()?);
             self.state.save(&self.state_path)?;
-            self.sync_media_if_changed(&status)?;
+            self.sync_media_if_needed(&status)?;
             return Ok(SyncOutcome::NoChanges);
         }
         if local_changed {
             self.full_upload()?;
-            self.sync_media_if_changed(&status)?;
+            self.sync_media_if_needed(&status)?;
             return Ok(SyncOutcome::Uploaded);
         }
         if status.mod_time < local.mod_time {
@@ -459,7 +480,7 @@ impl<T: SyncTransport> SyncClient<T> {
         match (status.empty, local.cards) {
             (_, 0) if status.empty => {
                 self.record_success()?;
-                self.sync_media_if_changed(status)?;
+                self.sync_media_if_needed(status)?;
                 Ok(SyncOutcome::NoChanges)
             }
             (false, 0) => {
