@@ -498,11 +498,11 @@ impl Root {
                     quick,
                 ));
             }
-            stage = stage.child(center.child(content));
             let occlusion_image = self.review.occlusion_image.as_ref();
-            if let Some(card) = question {
-                let masked =
-                    occlusion_image.as_ref().filter(|_| !card.masks.is_empty());
+            let masked = question
+                .filter(|card| !card.masks.is_empty())
+                .and(occlusion_image.as_ref());
+            let stage_media = if let Some(card) = question {
                 if let Some(image) = masked {
                     let mut media = div()
                         .flex()
@@ -532,15 +532,26 @@ impl Root {
                     ) {
                         media = media.child(rest);
                     }
-                    stage = stage.child(media);
-                } else if let Some(media) = card_view::media_column(
-                    &card.media,
-                    &self.options.paths.media_dir,
-                    colors,
-                    image_height,
-                ) {
-                    stage = stage.child(media);
+                    Some(media)
+                } else {
+                    card_view::media_column(
+                        &card.media,
+                        &self.options.paths.media_dir,
+                        colors,
+                        image_height,
+                    )
                 }
+            } else {
+                None
+            };
+            match stage_media {
+                Some(media) if masked.is_some() => {
+                    stage = stage.child(media).child(center.child(content));
+                }
+                Some(media) => {
+                    stage = stage.child(center.child(content)).child(media);
+                }
+                None => stage = stage.child(center.child(content)),
             }
             let stage = gpui::image_cache(self.images.clone()).child(stage);
             let key = current
