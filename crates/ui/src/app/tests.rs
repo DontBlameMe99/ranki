@@ -65,6 +65,13 @@ impl ranki_model::Store for ModalStore {
         Ok(Vec::new())
     }
 
+    fn browse_cards(
+        &self,
+        _: &str,
+    ) -> Result<Vec<ranki_model::BrowseCard>, StoreError> {
+        Ok(Vec::new())
+    }
+
     fn due_cards(
         &self,
         _: Option<Id>,

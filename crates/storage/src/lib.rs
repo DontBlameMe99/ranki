@@ -856,7 +856,9 @@ impl Store for Collection {
                 Ok(ranki_model::BrowseCard {
                     card_id: row.get(0)?,
                     deck_id: row.get(1)?,
-                    sort_field: row.get(2)?,
+                    // `sfld` has integer affinity, so a numeric-looking sort
+                    // field comes back as a number, not text.
+                    sort_field: records::text(row.get::<_, SqlValue>(2)?),
                 })
             })
             .map_err(backend)?;

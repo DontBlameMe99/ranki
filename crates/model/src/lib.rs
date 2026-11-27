@@ -727,22 +727,9 @@ pub trait Store {
     /// Finds cards matching a search query with the deck and sort field the
     /// browser groups and orders its table by.
     ///
-    /// The default implementation reads every matching card, so it is slower
-    /// and cannot fill the sort field.
-    ///
     /// # Errors
     /// Returns [`StoreError`] if the query is invalid or the search fails.
-    fn browse_cards(&self, query: &str) -> Result<Vec<BrowseCard>, StoreError> {
-        let mut cards = Vec::new();
-        for id in self.find_cards(query)? {
-            cards.extend(self.card(id)?.map(|card| BrowseCard {
-                card_id: card.id,
-                deck_id: card.deck_id,
-                sort_field: String::new(),
-            }));
-        }
-        Ok(cards)
-    }
+    fn browse_cards(&self, query: &str) -> Result<Vec<BrowseCard>, StoreError>;
 
     /// Returns cards due in a deck, including subdecks.
     ///

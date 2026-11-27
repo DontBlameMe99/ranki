@@ -858,7 +858,7 @@ impl Root {
         if visible.last < self.browse.entries.len() {
             table = table.child(div().h(px(visible.after)).flex_none());
         }
-        if self.browse.rows.is_empty() {
+        if self.browse.hits.is_empty() {
             table = table.child(self.render_browse_empty(
                 error.as_deref(),
                 &query,
