@@ -619,3 +619,29 @@ fn schema11_deck_write_keeps_day_amount_pair_order() {
     assert_eq!(value["2"]["newLimitToday"], json!([7, 2]));
     assert_eq!(value["2"]["md"], true);
 }
+
+#[test]
+fn field_44_wait_for_audio_round_trips_both_values() {
+    for raw in [0_u64, 1] {
+        let bytes = varint(44, raw);
+        let preset = ranki_storage::preset_from_proto(
+            9,
+            "Audio".to_owned(),
+            0,
+            0,
+            &bytes,
+            true,
+        );
+        assert_eq!(preset.wait_for_audio, raw != 0);
+        let encoded = ranki_storage::preset_to_proto(&preset);
+        let decoded = ranki_storage::preset_from_proto(
+            9,
+            "Audio".to_owned(),
+            0,
+            0,
+            &encoded,
+            true,
+        );
+        assert_eq!(decoded.wait_for_audio, raw != 0);
+    }
+}
