@@ -10,6 +10,7 @@ use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use chrono::TimeZone;
 use ranki_core::FsrsScheduler;
 use ranki_model::AddNoteOptions;
 use ranki_model::CardQueue;
@@ -68,6 +69,27 @@ fn pin_v1_timing(path: &Path) {
         stored_value.get("schedVer").and_then(Value::as_i64),
         Some(1)
     );
+}
+
+/// Adds the modern Anki config table and leaves `col.conf` empty.
+fn write_schema18_config(path: &Path, values: &[(&str, Value)]) {
+    let conn = Connection::open(path).expect("write connection");
+    conn.execute(
+        "CREATE TABLE config (KEY text NOT NULL PRIMARY KEY, usn integer NOT NULL, \
+         mtime_secs integer NOT NULL, val blob NOT NULL) WITHOUT ROWID",
+        [],
+    )
+    .expect("create config table");
+    for (key, value) in values {
+        let bytes = serde_json::to_vec(value).expect("config value");
+        conn.execute(
+            "INSERT INTO config (key, usn, mtime_secs, val) VALUES (?1, 0, 0, ?2)",
+            rusqlite::params![key, bytes],
+        )
+        .expect("write config value");
+    }
+    conn.execute("UPDATE col SET conf = '{}' WHERE id = 1", [])
+        .expect("clear legacy config");
 }
 
 fn read_only(path: &Path) -> Connection {
@@ -2528,6 +2550,63 @@ fn scheduler_v2_without_rollover_uses_ankis_four_am_default() {
     );
     assert_eq!(timing.days_elapsed, expected.days_elapsed);
     assert_eq!(timing.next_day_at, expected.next_day_at);
+}
+
+#[test]
+fn schema18_config_table_supplies_due_counts() {
+    let (_directory, path) = fixture();
+    let now = chrono::Local
+        .with_ymd_and_hms(2023, 11, 14, 12, 0, 0)
+        .single()
+        .expect("local timestamp")
+        .timestamp();
+    let created = now - 20 * 86_400;
+    let current_offset =
+        ranki_storage::local_minutes_west(now).expect("offset");
+    let rollover = 13;
+    write_schema18_config(
+        &path,
+        &[
+            ("schedVer", json!(2)),
+            ("creationOffset", json!(current_offset)),
+            ("rollover", json!(rollover)),
+        ],
+    );
+    let expected = ranki_model::Timing::new(
+        now,
+        created,
+        Some(current_offset),
+        current_offset,
+        Some(rollover),
+    );
+    assert_eq!(expected.days_elapsed, 19);
+
+    let conn = Connection::open(&path).expect("write connection");
+    conn.execute(
+        "UPDATE col SET crt = ?1 WHERE id = 1",
+        rusqlite::params![created],
+    )
+    .expect("set creation time");
+    for id in 0..17_i64 {
+        conn.execute(
+            "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, \
+             reps, lapses, left, odue, odid, flags, data) \
+             VALUES (?1, 1, 1, 0, 0, 0, 2, 2, ?2, 0, 0, 0, 0, 0, 0, 0, 0, '')",
+            rusqlite::params![1_000 + id, expected.days_elapsed],
+        )
+        .expect("insert due card");
+    }
+    drop(conn);
+
+    let store = Collection::open(&path).expect("open");
+    let legacy_conf: String = Connection::open(&path)
+        .expect("read connection")
+        .query_row("SELECT conf FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("legacy config unchanged");
+    assert_eq!(legacy_conf, "{}");
+    assert_eq!(Store::timing(&store, now).expect("timing"), expected);
+    assert_eq!(store.stats(None, now).expect("stats").review_cards, 17);
+    assert_eq!(store.due_cards(None, 20, now).expect("due").len(), 17);
 }
 
 #[test]
