@@ -211,6 +211,128 @@ fn rating_and_undo_persist_and_reverse_a_review() {
 }
 
 #[test]
+fn rating_loads_the_next_card_on_the_question_side() {
+    let mut fixture = fixture();
+    let model_id = fixture
+        .state
+        .add
+        .models
+        .first()
+        .map(|model| model.id)
+        .expect("basic model");
+    fixture
+        .state
+        .store
+        .add_note(&NewNote {
+            model_id,
+            deck_id: fixture.deck_id,
+            fields: vec![
+                String::from("Second question"),
+                String::from("Second answer"),
+            ],
+            tags: Vec::new(),
+        })
+        .expect("second note");
+    fixture.state.refresh().expect("refresh");
+    fixture
+        .state
+        .start_review(Some(fixture.deck_id))
+        .expect("start review");
+
+    fixture.state.reveal();
+    fixture.state.rate(Rating::Good).expect("rate card");
+
+    assert!(fixture.state.review.current.is_some());
+    assert!(matches!(fixture.state.review.phase, ReviewPhase::Question));
+    drop(fixture.dir);
+}
+
+#[test]
+fn study_all_loads_cards_from_every_deck() {
+    let mut fixture = fixture();
+    let model_id = fixture
+        .state
+        .add
+        .models
+        .first()
+        .map(|model| model.id)
+        .expect("basic model");
+    let other = fixture
+        .state
+        .store
+        .create_deck("Other Deck")
+        .expect("other deck");
+    fixture
+        .state
+        .store
+        .add_note(&NewNote {
+            model_id,
+            deck_id: other.id,
+            fields: vec![
+                String::from("Other question"),
+                String::from("Other answer"),
+            ],
+            tags: Vec::new(),
+        })
+        .expect("other note");
+    fixture.state.refresh().expect("refresh");
+
+    fixture
+        .state
+        .start_review(Some(fixture.deck_id))
+        .expect("study one deck");
+    fixture.state.start_review(None).expect("study all");
+
+    assert_eq!(fixture.state.selected_deck, None);
+    let loaded = usize::from(fixture.state.review.current.is_some())
+        + fixture.state.review.queue.len();
+    assert_eq!(loaded, 2);
+    drop(fixture.dir);
+}
+
+#[test]
+fn pending_learning_card_waits_for_its_due_time() {
+    let mut fixture = fixture();
+    fixture
+        .state
+        .start_review(Some(fixture.deck_id))
+        .expect("start review");
+    let mut pending =
+        fixture.state.review.current.clone().expect("current card");
+    pending.queue = CardQueue::Learning;
+    pending.due = i64::MAX;
+    fixture.state.review.current = None;
+    fixture.state.review.queue.clear();
+    fixture.state.review.pending = vec![pending];
+
+    fixture.state.take_next_card();
+
+    assert!(fixture.state.review.current.is_none());
+    assert_eq!(fixture.state.review.pending.len(), 1);
+    drop(fixture.dir);
+}
+
+#[test]
+fn undo_does_not_duplicate_a_restored_current_card() {
+    let mut fixture = fixture();
+    fixture
+        .state
+        .start_review(Some(fixture.deck_id))
+        .expect("start review");
+    let before = fixture.state.review.current.clone().expect("current card");
+    fixture.state.reveal();
+    fixture.state.rate(Rating::Again).expect("rate card");
+    fixture.state.review.queue.clear();
+    fixture.state.review.current = Some(before);
+
+    fixture.state.undo().expect("undo review");
+
+    assert_eq!(fixture.state.review.queue, Vec::new());
+    assert!(fixture.state.review.current.is_some());
+    drop(fixture.dir);
+}
+
+#[test]
 fn adding_a_note_makes_it_browsable() {
     let mut fixture = fixture();
 

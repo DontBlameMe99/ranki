@@ -226,11 +226,15 @@ impl AppState {
     /// Store failures are reported as toasts; this call still succeeds.
     pub fn start_review(&mut self, deck: Option<Id>) -> Result<()> {
         self.load_decks();
-        if let Some(id) = deck
+        let scope = if let Some(id) = deck
             && self.decks.iter().any(|row| row.id == Some(id))
         {
             self.selected_deck = Some(id);
-        }
+            Some(id)
+        } else {
+            self.selected_deck = None;
+            None
+        };
         self.screen = Screen::Review;
         self.review = ReviewState::default();
         self.review.phase = if dev_reveal() {
@@ -241,7 +245,7 @@ impl AppState {
 
         let now = now_secs();
         let limit = self.settings.review_batch_size.max(1);
-        match self.store.due_cards(self.selected_deck, limit, now) {
+        match self.store.due_cards(scope, limit, now) {
             Ok(cards) => self.review.queue = cards,
             Err(error) => self.fail(format!("Could not load cards: {error}")),
         }
@@ -308,6 +312,7 @@ impl AppState {
         ) {
             self.review.pending.push(decision.card);
         }
+        self.review.phase = ReviewPhase::Question;
         self.take_next_card();
         self.load_decks();
         if self.review.current.is_none()
@@ -364,7 +369,9 @@ impl AppState {
 
         self.review.answered = self.review.answered.saturating_sub(1);
         self.review.pending.retain(|card| card.id != before.id);
-        if let Some(current) = self.review.current.take() {
+        if let Some(current) = self.review.current.take()
+            && current.id != before.id
+        {
             self.review.queue.insert(0, current);
         }
         self.review.current = Some(before);
@@ -795,22 +802,27 @@ impl AppState {
         self.browse.rows = rows;
     }
 
-    fn take_next_card(&mut self) {
+    pub(crate) fn take_next_card(&mut self) {
         self.review.current = None;
         self.review.note = None;
         self.review.model = None;
         self.review.intervals = [0; 4];
-        let next = if self.review.pending.is_empty() {
-            if self.review.queue.is_empty() {
-                None
-            } else {
-                Some(self.review.queue.remove(0))
-            }
+        let now = now_secs();
+        let due = self.review.pending.iter().position(|card| {
+            matches!(card.queue, CardQueue::Learning | CardQueue::DayLearning)
+                && card.due <= now
+        });
+        let next = if let Some(index) = due {
+            Some(self.review.pending.remove(index))
+        } else if self.review.queue.is_empty() {
+            None
         } else {
-            self.review.pending.pop()
+            Some(self.review.queue.remove(0))
         };
         if let Some(card) = next {
             self.review.current = Some(card);
+            self.review.phase = ReviewPhase::Question;
+            self.review.summary.clear();
             self.load_current();
         }
     }
