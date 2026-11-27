@@ -431,6 +431,25 @@ impl Drop for EnvGuard {
     }
 }
 
+#[test]
+fn take_next_card_preserves_the_current_phase() {
+    let mut fixture = fixture();
+    fixture
+        .state
+        .start_review(Some(fixture.deck_id))
+        .expect("start review");
+    let current = fixture.state.review.current.clone().expect("current card");
+    fixture.state.review.queue = vec![current];
+    fixture.state.review.current = None;
+    fixture.state.review.phase = ReviewPhase::Answer;
+
+    fixture.state.take_next_card();
+
+    assert!(fixture.state.review.current.is_some());
+    assert!(matches!(fixture.state.review.phase, ReviewPhase::Answer));
+    drop(fixture.dir);
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[test]
 fn explicit_directories_win_over_xdg_and_home() {

@@ -312,8 +312,12 @@ impl AppState {
         ) {
             self.review.pending.push(decision.card);
         }
-        self.review.phase = ReviewPhase::Question;
         self.take_next_card();
+        if self.review.current.is_some()
+            && self.review.phase != ReviewPhase::Summary
+        {
+            self.review.phase = ReviewPhase::Question;
+        }
         self.load_decks();
         if self.review.current.is_none()
             && self.review.phase != ReviewPhase::Summary
@@ -821,7 +825,6 @@ impl AppState {
         };
         if let Some(card) = next {
             self.review.current = Some(card);
-            self.review.phase = ReviewPhase::Question;
             self.review.summary.clear();
             self.load_current();
         }
