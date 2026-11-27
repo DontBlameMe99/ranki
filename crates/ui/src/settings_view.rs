@@ -22,7 +22,9 @@ impl Root {
 
         let mut segments = div()
             .flex()
+            .flex_wrap()
             .items_center()
+            .min_w(px(0.))
             .gap(px(SPACE_INLINE))
             .p(px(SPACE_INLINE))
             .rounded(px(12.))
@@ -65,7 +67,8 @@ impl Root {
                         .flex()
                         .flex_col()
                         .gap(px(SPACE_INLINE))
-                        .w(px(112.))
+                        .flex_1()
+                        .min_w(px(80.))
                         .h(px(44.))
                         .items_center()
                         .justify_center()
@@ -116,6 +119,7 @@ impl Root {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .justify_between()
                             .gap(px(SPACE_SECTION))

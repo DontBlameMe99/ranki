@@ -237,6 +237,7 @@ pub struct NavDrag {
 
 /// Screen distance before a right press counts as a resize instead of a click.
 const RESIZE_SLOP: f32 = 3.0;
+
 impl OcclusionState {
     /// Rectangle of the fitted image inside the drawing area.
     pub(crate) fn image_rect(&self) -> Option<NormalizedRect> {
@@ -3236,7 +3237,9 @@ impl Render for Root {
                 self.render_add_card(window, cx).into_any_element()
             }
             View::Settings => self.render_settings().into_any_element(),
-            View::Statistics => self.render_statistics(cx).into_any_element(),
+            View::Statistics => {
+                self.render_statistics(window, cx).into_any_element()
+            }
         };
         div()
             .id("root")
@@ -3412,7 +3415,9 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &SyncKeepRemote, window, cx| {
                 this.dispatch(UiAction::SyncKeepRemote, window, cx);
             }))
-            .when(view != View::Review, |this| this.child(self.render_nav(cx)))
+            .when(view != View::Review, |this| {
+                this.child(self.render_nav(window, cx))
+            })
             .child(div().flex_1().overflow_hidden().child(main))
             .children(self.render_overlay(window, cx))
     }
