@@ -117,6 +117,12 @@ pub fn export_deck_apkg(
 
     let connection = Connection::open(snapshot.path())
         .map_err(error::db_error("cannot open deck export snapshot"))?;
+    ranki_storage::register_collations(&connection).map_err(|error| {
+        FormatError::with_source(
+            "cannot register deck export collations",
+            error,
+        )
+    })?;
     filter_records(&connection, &subtree)?;
     filter_deck_metadata(&connection, &subtree)?;
     let media = referenced_media(&connection, media_dir)?;

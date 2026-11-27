@@ -4,8 +4,8 @@ use ranki_format::export_deck_apkg;
 use ranki_format::import_apkg;
 use ranki_model::NewNote;
 use ranki_model::Store as _;
-use ranki_storage::Collection;
-use rusqlite::Connection;
+use ranki_storage::{Collection, register_collations};
+use rusqlite::{Connection, params};
 
 use serde_json::Value as Json;
 use serde_json::json;
@@ -103,6 +103,59 @@ fn deck_export_keeps_the_subtree_and_only_its_media() {
             "template_icon.png",
         ]
     );
+}
+
+#[test]
+fn deck_export_registers_schema18_collations() {
+    let language_id;
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.anki2");
+    let media = dir.path().join("source.media");
+    fs::create_dir_all(&media).unwrap();
+    {
+        let mut store = Collection::create(&source).unwrap();
+        let language = store.create_deck("Language").unwrap();
+        language_id = language.id;
+        let french = store.create_deck("Language::French").unwrap();
+        let other = store.create_deck("Other").unwrap();
+        store.add_note(&note(language.id, "root", "one")).unwrap();
+        store.add_note(&note(french.id, "child", "two")).unwrap();
+
+        let connection = Connection::open(&source).unwrap();
+        register_collations(&connection).unwrap();
+        connection
+            .execute("UPDATE col SET decks = '', ver = 18 WHERE id = 1", [])
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE decks (
+                     id INTEGER PRIMARY KEY NOT NULL,
+                     name TEXT NOT NULL COLLATE unicase,
+                     mtime_secs INTEGER NOT NULL,
+                     usn INTEGER NOT NULL,
+                     common BLOB NOT NULL,
+                     kind BLOB NOT NULL);
+                 CREATE UNIQUE INDEX idx_decks_name ON decks (name);",
+            )
+            .unwrap();
+        for deck in [language, french, other] {
+            connection
+                .execute(
+                    "INSERT INTO decks VALUES (?1, ?2, 0, 0, x'', x'')",
+                    params![deck.id, deck.name.replace("::", "\u{1f}")],
+                )
+                .unwrap();
+        }
+    }
+
+    let package = dir.path().join("language.apkg");
+    export_deck_apkg(&source, &media, &package, language_id).unwrap();
+
+    let destination = dir.path().join("imported.anki2");
+    let imported_media = dir.path().join("imported.media");
+    let report = import_apkg(&package, &destination, &imported_media).unwrap();
+    assert_eq!(report.notes, 2);
+    assert_eq!(report.cards, 2);
 }
 
 #[test]

@@ -1144,6 +1144,41 @@ impl Root {
             .search
             .update(cx, |field, cx| field.seed(saved.browse_query, cx));
         root.refresh_browse(cx);
+        if let (Ok(deck_name), Ok(path)) = (
+            env::var("RANKI_UI_DEV_EXPORT_DECK"),
+            env::var("RANKI_UI_DEV_EXPORT_PATH"),
+        ) && let Some(deck) = root
+            .decks
+            .iter()
+            .find(|deck| deck.name == deck_name)
+            .cloned()
+        {
+            let collection = root.options.paths.collection.clone();
+            let media_dir = root.options.paths.media_dir.clone();
+            let weak = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = weak.update(cx, |root, cx| {
+                    let result = ranki_format::export_deck_apkg(
+                        &collection,
+                        &media_dir,
+                        Path::new(&path),
+                        deck.id,
+                    );
+                    match result {
+                        Ok(()) => root.show_toast(
+                            ToastKind::Success,
+                            format!("Exported {} to {path}", deck.name),
+                            cx,
+                        ),
+                        Err(error) => root.show_toast(
+                            ToastKind::Error,
+                            format!("Could not export {}: {error}", deck.name),
+                            cx,
+                        ),
+                    }
+                });
+            });
+        }
         if root.view == View::Review {
             match root.selected {
                 Some(index) if !saved.review_all_decks => {
