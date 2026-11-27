@@ -111,6 +111,7 @@ impl Store for ReopeningCollection {
         max_taken_secs(deck_id: Id) -> Result<u32, StoreError>;
         review_count_since(cutoff_ms: i64) -> Result<u32, StoreError>;
         last_review_secs(card_id: Id) -> Result<Option<i64>, StoreError>;
+        learn_ahead_secs() -> Result<i64, StoreError>;
     }
     fn cards_with_notes(
         &self,

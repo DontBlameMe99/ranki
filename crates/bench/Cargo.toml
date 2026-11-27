@@ -13,6 +13,7 @@ ranki-core.workspace = true
 ranki-format.workspace = true
 ranki-model.workspace = true
 ranki-storage.workspace = true
+rusqlite = { workspace = true, features = ["collation", "functions"] }
 ranki-ui.workspace = true
 serde.workspace = true
 serde_json.workspace = true

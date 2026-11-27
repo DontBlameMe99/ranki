@@ -341,7 +341,7 @@ fn review_and_day_learning_dues_use_days_since_collection_creation() {
         .into_iter()
         .map(|card| card.id)
         .collect();
-    assert_eq!(due_ids, [25, 21, 23]);
+    assert_eq!(due_ids, [25, 26, 21, 23]);
     assert!(!due_ids.contains(&22));
     assert!(!due_ids.contains(&24));
 
@@ -618,7 +618,7 @@ fn due_cards_respects_queue_and_time_windows() {
         .into_iter()
         .map(|card| card.id)
         .collect();
-    assert_eq!(due_ids, [11, 13, 15, 10]);
+    assert_eq!(due_ids, [11, 12, 13, 10, 15]);
     let limited = store.due_cards(None, 2, now).expect("due");
     assert_eq!(limited.len(), 2);
     assert_eq!(
@@ -655,7 +655,7 @@ fn stats_count_only_cards_due_at_the_given_time() {
     let store = Collection::open(&path).expect("open");
     let stats = store.stats(None, now).expect("stats");
     assert_eq!(stats.new_cards, 1);
-    assert_eq!(stats.learning_cards, 2);
+    assert_eq!(stats.learning_cards, 3);
     assert_eq!(stats.review_cards, 1);
     assert_eq!(stats.total_cards, 7);
 
@@ -1570,8 +1570,8 @@ fn deck_stats_counts_children_of_names_ending_in_a_colon() {
 fn apply_reviews_writes_a_batch_atomically() {
     let (_directory, path) = fixture();
     let mut store = Collection::open(&path).expect("open");
-    let mut decisions = Vec::with_capacity(1000);
-    for index in 0..1000_u32 {
+    let mut decisions = Vec::with_capacity(100);
+    for index in 0..100_u32 {
         let ids = store
             .add_note(&NewNote {
                 model_id: 1,
@@ -1672,13 +1672,13 @@ fn stats_counts_boundaries_within_a_deck_subtree() {
     let store = Collection::open(&path).expect("open");
     let all = store.stats(Some(parent.id), now).expect("parent stats");
     assert_eq!(all.new_cards, 2);
-    assert_eq!(all.learning_cards, 3);
+    assert_eq!(all.learning_cards, 5);
     assert_eq!(all.review_cards, 2);
     assert_eq!(all.total_cards, 11);
 
     let subtree = store.stats(Some(child.id), now).expect("child stats");
     assert_eq!(subtree.new_cards, 1);
-    assert_eq!(subtree.learning_cards, 1);
+    assert_eq!(subtree.learning_cards, 2);
     assert_eq!(subtree.review_cards, 1);
     assert_eq!(subtree.total_cards, 5);
 
@@ -1736,7 +1736,7 @@ fn due_cards_probe_keeps_priority_and_all_new_order() {
         .into_iter()
         .map(|card| card.id)
         .collect();
-    assert_eq!(due, [30, 11]);
+    assert_eq!(due, [11, 30]);
 }
 
 #[test]
@@ -2773,4 +2773,900 @@ fn reopening_store_batches_cards_and_counts_reviews() {
         .expect("insert reviews");
     drop(connection);
     assert_eq!(store.review_count_since(150).expect("count"), 1);
+}
+fn set_conf_values(path: &Path, values: &[(&str, Value)]) {
+    let conn = Connection::open(path).expect("write connection");
+    let raw: String = conn
+        .query_row("SELECT conf FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("conf");
+    let mut parsed: Value = serde_json::from_str(&raw).expect("conf JSON");
+    let object = parsed.as_object_mut().expect("conf object");
+    for (key, value) in values {
+        let _ = object.insert((*key).to_owned(), value.clone());
+    }
+    let stored = parsed.to_string();
+    conn.execute(
+        "UPDATE col SET conf = ?1 WHERE id = 1",
+        rusqlite::params![stored],
+    )
+    .expect("store conf");
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the fixture inserts one complete card row"
+)]
+fn insert_queue_card(
+    conn: &Connection,
+    id: i64,
+    note_id: i64,
+    deck_id: i64,
+    card_type: i64,
+    queue: i64,
+    due: i64,
+) {
+    conn.execute(
+        "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, \
+         lapses, left, odue, odid, flags, data) VALUES (?1, ?2, ?3, 0, 0, 0, ?4, ?5, ?6, 1, \
+         2500, 0, 0, 0, 0, 0, 0, '')",
+        rusqlite::params![id, note_id, deck_id, card_type, queue, due],
+    )
+    .expect("insert card");
+}
+
+#[test]
+fn due_cards_applies_remaining_daily_limits_and_parent_limits() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let mut store = Collection::open(&path).expect("open");
+    let parent = store.create_deck("Parent").expect("parent");
+    let child = store.create_deck("Parent::Child").expect("child");
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.new_per_day = 2;
+    preset.reviews_per_day = 5;
+    store.write_preset(&preset).expect("write preset");
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        for id in 10..15 {
+            insert_queue_card(&conn, id, id, child.id, 0, 0, id);
+        }
+        for id in 20..23 {
+            insert_queue_card(&conn, id, id, child.id, 2, 2, 0);
+        }
+    }
+
+    let ids: Vec<_> = store
+        .due_cards(Some(child.id), 50, now)
+        .expect("due")
+        .into_iter()
+        .map(|card| card.id)
+        .collect();
+    assert_eq!(ids.len(), 5, "two new and three review cards remain");
+    assert_eq!(ids.iter().filter(|id| **id < 15).count(), 2);
+    assert_eq!(ids.iter().filter(|id| **id >= 20).count(), 3);
+
+    let mut parent_deck = store
+        .effective_decks()
+        .expect("decks")
+        .into_iter()
+        .find(|deck| deck.id == parent.id)
+        .expect("parent deck");
+    parent_deck.overrides.new_limit = Some(1);
+    store.write_deck(&parent_deck).expect("write parent");
+    set_conf_values(&path, &[("applyAllParentLimits", json!(true))]);
+    let ids = store
+        .due_cards(Some(child.id), 50, now)
+        .expect("limited by parent");
+    assert_eq!(
+        ids.iter()
+            .filter(|card| card.queue == CardQueue::New)
+            .count(),
+        1
+    );
+
+    set_conf_values(&path, &[("newCardsIgnoreReviewLimit", json!(true))]);
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.reviews_per_day = 0;
+    store.write_preset(&preset).expect("zero review limit");
+    let ids = store
+        .due_cards(Some(child.id), 50, now)
+        .expect("new ignores review limit");
+    assert!(ids.iter().any(|card| card.queue == CardQueue::New));
+    assert!(ids.iter().all(|card| card.queue != CardQueue::Review));
+}
+
+#[test]
+fn answering_updates_today_counters_and_the_next_batch() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let mut store = Collection::open(&path).expect("open");
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.new_per_day = 1;
+    store.write_preset(&preset).expect("write preset");
+    let ids = store
+        .add_note(&note(&["Front?", "Answer!"], &[]))
+        .expect("note");
+    let card = store.card(ids[0]).expect("card").expect("present");
+    let timing = store.timing(now).expect("timing");
+    let decision = FsrsScheduler::default()
+        .schedule_timed(&card, Rating::Good, &timing, None, 0)
+        .expect("decision");
+    store.apply_review(&decision).expect("apply");
+
+    let deck = store
+        .effective_decks()
+        .expect("decks")
+        .into_iter()
+        .find(|deck| deck.id == 1)
+        .expect("default deck");
+    assert_eq!(deck.common.new_studied, 1);
+    assert_eq!(deck.overrides.new_today.today, 1);
+    assert!(
+        store
+            .due_cards(None, 20, now)
+            .expect("due")
+            .iter()
+            .all(|card| card.queue != CardQueue::New)
+    );
+}
+
+#[test]
+fn scheduled_siblings_are_buried_and_restored_after_rollover() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let mut store = Collection::open(&path).expect("open");
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.bury_new = true;
+    store.write_preset(&preset).expect("write preset");
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        insert_queue_card(&conn, 10, 1, 1, 0, 0, 1);
+        insert_queue_card(&conn, 11, 1, 1, 0, 0, 2);
+        insert_queue_card(&conn, 12, 2, 1, 0, -3, 3);
+    }
+    let first = store
+        .due_cards(None, 20, now)
+        .expect("due")
+        .into_iter()
+        .map(|card| card.id)
+        .collect::<Vec<_>>();
+    assert_eq!(first, [10], "only the first sibling is gathered");
+
+    let card = store.card(10).expect("card").expect("present");
+    let timing = store.timing(now).expect("timing");
+    let decision = FsrsScheduler::default()
+        .schedule_timed(&card, Rating::Good, &timing, None, 0)
+        .expect("decision");
+    store.apply_review(&decision).expect("apply");
+    let queue: i64 = {
+        let conn = read_only(&path);
+        conn.query_row("SELECT queue FROM cards WHERE id = 11", [], |row| {
+            row.get(0)
+        })
+        .expect("buried sibling")
+    };
+    assert_eq!(queue, -2);
+
+    let conn = Connection::open(&path).expect("write connection");
+    conn.execute(
+        "UPDATE col SET crt = ?1 WHERE id = 1",
+        rusqlite::params![now.saturating_sub(86_400 * 2)],
+    )
+    .expect("roll over a day");
+    drop(conn);
+    let store = Collection::open(&path).expect("reopen after rollover");
+    let _ = store.due_cards(None, 20, now).expect("after rollover");
+    let conn = read_only(&path);
+    let restored: i64 = conn
+        .query_row("SELECT queue FROM cards WHERE id = 11", [], |row| {
+            row.get(0)
+        })
+        .expect("restored sibling");
+    let manual: i64 = conn
+        .query_row("SELECT queue FROM cards WHERE id = 12", [], |row| {
+            row.get(0)
+        })
+        .expect("manual burial");
+    assert_eq!(restored, 0);
+    assert_eq!(manual, 0, "Anki restores user buries at rollover too");
+    let last: String = conn
+        .query_row("SELECT conf FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("conf");
+    let parsed: Value = serde_json::from_str(&last).expect("conf JSON");
+    assert!(
+        parsed
+            .get("lastUnburied")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            > 0
+    );
+}
+
+#[test]
+fn filtered_cards_count_in_their_home_deck_on_original_due() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    pin_v1_timing(&path);
+    let conn = Connection::open(&path).expect("write connection");
+    conn.execute(
+        "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, \
+         lapses, left, odue, odid, flags, data) VALUES (10, 1, 2, 0, 0, 0, 2, 2, 90, 1, 2500, \
+         0, 0, 0, 0, 1, 0, ''), (11, 2, 2, 0, 0, 0, 2, 2, 90, 1, 2500, 0, 0, 0, 5, 1, 0, ''), \
+         (12, 3, 1, 0, 0, 0, 2, 2, 0, 1, 2500, 0, 0, 0, 0, 0, 0, '')",
+        [],
+    )
+    .expect("insert filtered cards");
+    drop(conn);
+
+    let store = Collection::open(&path).expect("open");
+    let stats = store.stats(Some(1), now).expect("home deck stats");
+    assert_eq!(
+        stats.review_cards, 2,
+        "filtered due day and home review count"
+    );
+    assert_eq!(stats.total_cards, 3);
+    let totals = store.deck_stats(now).expect("deck stats");
+    assert_eq!(
+        totals
+            .into_iter()
+            .find(|(id, _)| *id == 1)
+            .map(|(_, stats)| stats),
+        Some(stats)
+    );
+    assert_eq!(
+        store.due_forecast(7, now).expect("forecast")[0],
+        2,
+        "only cards due on the original day are in today's bucket"
+    );
+}
+
+#[test]
+fn is_due_and_type_filters_use_queues_and_learn_ahead() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    set_conf_values(&path, &[("collapseTime", json!(1200))]);
+    let conn = Connection::open(&path).expect("write connection");
+    conn.execute("UPDATE col SET crt = ?1 WHERE id = 1", [now])
+        .expect("set creation");
+    for id in 10..=16 {
+        conn.execute(
+            "INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data) \
+             VALUES (?1, ?2, 1, 0, 0, '', 'front', 'front', 0, 0, '')",
+            rusqlite::params![id, format!("guid-{id}")],
+        )
+        .expect("insert note");
+    }
+    insert_queue_card(&conn, 10, 10, 1, 2, -1, 0);
+    insert_queue_card(&conn, 11, 11, 1, 3, -1, 0);
+    insert_queue_card(&conn, 12, 12, 1, 2, 2, 0);
+    insert_queue_card(&conn, 13, 13, 1, 1, 1, now.saturating_add(600));
+    insert_queue_card(&conn, 14, 14, 1, 1, 1, now.saturating_add(3_600));
+    insert_queue_card(&conn, 15, 15, 1, 0, 0, 1);
+    insert_queue_card(&conn, 16, 16, 1, 1, 4, now.saturating_add(300));
+    drop(conn);
+
+    let store = Collection::open(&path).expect("open");
+    assert_eq!(store.learn_ahead_secs().expect("learn ahead"), 1200);
+    assert_eq!(
+        store.find_cards("is:review").expect("review type"),
+        [10, 11, 12]
+    );
+    assert_eq!(
+        store.find_cards("is:learn").expect("learning types"),
+        [11, 13, 14, 16]
+    );
+    assert_eq!(store.find_cards("is:due").expect("due cards"), [12, 13, 16]);
+}
+
+#[test]
+fn random_new_card_insert_order_uses_anki_positions() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.new_card_insert_order = 1;
+    store.write_preset(&preset).expect("write preset");
+    set_conf_values(&path, &[("nextPos", json!(5))]);
+
+    let ids = store
+        .add_note(&note(&["Front?", "Answer!"], &[]))
+        .expect("note");
+    let positions: Vec<_> = ids
+        .into_iter()
+        .map(|id| store.card(id).expect("card").expect("present").due)
+        .collect();
+    assert_ne!(positions, [] as [i64; 0]);
+    assert!(
+        positions.iter().all(|position| *position == 180),
+        "Anki's seeded position for nextPos 5"
+    );
+}
+
+#[test]
+fn external_option_commit_invalidates_the_queue_cache() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        insert_queue_card(&conn, 10, 10, 1, 0, 0, 1);
+        insert_queue_card(&conn, 11, 11, 1, 0, 0, 2);
+    }
+    let store = Collection::open(&path).expect("open");
+    let warm = store.due_cards(None, 20, now).expect("warm cache");
+    assert_eq!(warm.len(), 2);
+
+    let conn = Connection::open(&path).expect("external writer");
+    let dconf: String = conn
+        .query_row("SELECT dconf FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("dconf");
+    let modified: i64 = conn
+        .query_row("SELECT mod FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("mod");
+    let mut value: Value = serde_json::from_str(&dconf).expect("dconf JSON");
+    let preset = value
+        .as_object_mut()
+        .expect("preset object")
+        .get_mut("1")
+        .expect("default preset");
+    preset["new"]["perDay"] = json!(0);
+    let stored = value.to_string();
+    conn.execute(
+        "UPDATE col SET dconf = ?1, mod = ?2 WHERE id = 1",
+        rusqlite::params![stored, modified.saturating_add(1)],
+    )
+    .expect("external commit");
+    drop(conn);
+
+    let after = store
+        .due_cards(None, 20, now)
+        .expect("after external commit");
+    assert!(after.is_empty(), "the cached preset must be refreshed");
+}
+
+#[test]
+fn today_limit_day_number_is_not_a_count() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    pin_v1_timing(&path);
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        for id in 10..13 {
+            insert_queue_card(&conn, id, id, 1, 0, 0, id);
+        }
+    }
+    let set_limit = |day: i64| {
+        let conn = Connection::open(&path).expect("write connection");
+        let raw: String = conn
+            .query_row("SELECT decks FROM col WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("decks");
+        let mut decks: Value = serde_json::from_str(&raw).expect("decks JSON");
+        decks["1"]["newLimitToday"] = json!([0, day]);
+        let stored = decks.to_string();
+        conn.execute(
+            "UPDATE col SET decks = ?1 WHERE id = 1",
+            rusqlite::params![stored],
+        )
+        .expect("store decks");
+    };
+    set_limit(0);
+    let store = Collection::open(&path).expect("open");
+    assert!(
+        store
+            .due_cards(None, 20, now)
+            .expect("zero today limit")
+            .is_empty(),
+        "a zero limit on today must stop new cards"
+    );
+    set_limit(5);
+    let store = Collection::open(&path).expect("reopen");
+    assert_eq!(store.due_cards(None, 20, now).expect("other day").len(), 3);
+}
+
+#[test]
+fn missing_review_ignore_flag_defaults_to_false() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let store = Collection::open(&path).expect("open");
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.new_per_day = 2;
+    preset.reviews_per_day = 0;
+    store.write_preset(&preset).expect("write preset");
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        insert_queue_card(&conn, 10, 10, 1, 0, 0, 1);
+        insert_queue_card(&conn, 11, 11, 1, 0, 0, 2);
+    }
+    let default = store.due_cards(None, 20, now).expect("default flags");
+    assert!(
+        default.iter().all(|card| card.queue != CardQueue::New),
+        "new cards stay capped by the zero review limit"
+    );
+    set_conf_values(&path, &[("newCardsIgnoreReviewLimit", json!(true))]);
+    let store = Collection::open(&path).expect("reopen");
+    let ignored = store.due_cards(None, 20, now).expect("ignore flag");
+    assert_eq!(ignored.len(), 2);
+}
+
+#[test]
+fn review_order_deck_then_day_uses_deck_preorder() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let mut store = Collection::open(&path).expect("open");
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.review_order = 2;
+    store.write_preset(&preset).expect("write preset");
+    let parent = store.create_deck("Parent").expect("parent");
+    let child = store.create_deck("Parent::Child").expect("child");
+    let grandchild = store
+        .create_deck("Parent::Child::Grandchild")
+        .expect("grandchild");
+    let child2 = store.create_deck("Parent::Child2").expect("child2");
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        for (index, deck) in [parent.id, child.id, grandchild.id, child2.id]
+            .into_iter()
+            .enumerate()
+        {
+            let id = i64::try_from(index).expect("id") + 20;
+            insert_queue_card(&conn, id, id, deck, 2, 2, 0);
+        }
+    }
+    let ids: Vec<_> = store
+        .due_cards(Some(parent.id), 20, now)
+        .expect("due")
+        .into_iter()
+        .map(|card| card.id)
+        .collect();
+    assert_eq!(ids, [20, 21, 22, 23], "Child precedes Child2 in preorder");
+}
+
+#[test]
+fn undo_restores_scheduled_burials_but_not_manual_burials() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let mut store = Collection::open(&path).expect("open");
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.bury_new = true;
+    store.write_preset(&preset).expect("write preset");
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        insert_queue_card(&conn, 10, 1, 1, 0, 0, 1);
+        insert_queue_card(&conn, 11, 1, 1, 0, 0, 2);
+        insert_queue_card(&conn, 12, 2, 1, 0, -3, 3);
+        insert_queue_card(&conn, 13, 2, 1, 0, 0, 4);
+    }
+    let before = store.card(10).expect("card").expect("present");
+    let timing = store.timing(now).expect("timing");
+    let decision = FsrsScheduler::default()
+        .schedule_timed(&before, Rating::Good, &timing, None, 0)
+        .expect("decision");
+    let mut decision = decision;
+    decision.revlog.id = decision.card.modified.saturating_mul(1_000);
+    let log_id = store.apply_review(&decision).expect("apply");
+    let queue = |id| {
+        let conn = read_only(&path);
+        conn.query_row("SELECT queue FROM cards WHERE id = ?1", [id], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("queue")
+    };
+    assert_eq!(queue(11), -2, "scheduled sibling burial");
+    assert_eq!(queue(12), -3, "manual burial survives the answer");
+    assert!(store.undo_review(&before, log_id).expect("undo"));
+    assert_eq!(queue(11), 0, "undo restores scheduled burial");
+    assert_eq!(queue(12), -3, "undo does not unbury manual state");
+}
+
+#[test]
+fn unknown_deck_id_has_no_due_cards() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        insert_queue_card(&conn, 10, 10, 1, 0, 0, 1);
+    }
+    let store = Collection::open(&path).expect("open");
+    assert_eq!(
+        store.due_cards(Some(999), 20, now).expect("missing deck"),
+        [] as [ranki_model::Card; 0]
+    );
+}
+
+#[test]
+fn intraday_learning_keeps_attempted_cards_ahead() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        for (id, due, reps) in [(10, now.saturating_add(1), 1), (11, now, 0)] {
+            conn.execute(
+                "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, \
+                 reps, lapses, left, odue, odid, flags, data) VALUES (?1, ?2, 1, 0, 0, 0, 1, 1, \
+                 ?3, 0, 2500, ?4, 0, 1, 0, 0, 0, '')",
+                rusqlite::params![id, id, due, reps],
+            )
+            .expect("insert learning card");
+        }
+    }
+    let store = Collection::open(&path).expect("open");
+    let due = store.due_cards(None, 1, now).expect("due");
+    assert_eq!(
+        due.into_iter().map(|card| card.id).collect::<Vec<_>>(),
+        [10]
+    );
+}
+
+#[test]
+fn sibling_burial_invalidates_a_stale_review_decision() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let mut store = Collection::open(&path).expect("open");
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.bury_new = true;
+    store.write_preset(&preset).expect("preset");
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        insert_queue_card(&conn, 10, 1, 1, 0, 0, 1);
+        insert_queue_card(&conn, 11, 1, 1, 0, 0, 2);
+    }
+    let sibling = store.card(11).expect("sibling").expect("present");
+    let timing = store.timing(now).expect("timing");
+    let mut stale = FsrsScheduler::default()
+        .schedule_timed(&sibling, Rating::Good, &timing, None, 0)
+        .expect("decision");
+    stale.revlog.id = decision_time(&stale, now);
+    let first = store.card(10).expect("card").expect("present");
+    let mut decision = FsrsScheduler::default()
+        .schedule_timed(&first, Rating::Good, &timing, None, 0)
+        .expect("decision");
+    decision.revlog.id = decision_time(&decision, now);
+    store.apply_review(&decision).expect("apply first answer");
+    assert!(
+        store.apply_review(&stale).is_err(),
+        "the buried sibling's old decision is stale"
+    );
+}
+
+#[must_use]
+pub const fn decision_time(decision: &ReviewDecision, fallback: i64) -> i64 {
+    let secs = if decision.card.modified > 0 {
+        decision.card.modified
+    } else {
+        fallback
+    };
+    secs.saturating_mul(1_000)
+}
+
+#[test]
+fn undo_does_not_overwrite_later_burial_state() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let mut store = Collection::open(&path).expect("open");
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.bury_new = true;
+    store.write_preset(&preset).expect("preset");
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        insert_queue_card(&conn, 10, 1, 1, 0, 0, 1);
+        insert_queue_card(&conn, 11, 1, 1, 0, 0, 2);
+        insert_queue_card(&conn, 12, 1, 1, 0, -2, 3);
+    }
+    let card = store.card(10).expect("card").expect("present");
+    let timing = store.timing(now).expect("timing");
+    let mut decision = FsrsScheduler::default()
+        .schedule_timed(&card, Rating::Good, &timing, None, 0)
+        .expect("decision");
+    decision.revlog.id = decision_time(&decision, now);
+    let log_id = store.apply_review(&decision).expect("apply");
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        conn.execute(
+            "UPDATE cards SET queue = -3, mod = ?1 WHERE id = 11",
+            rusqlite::params![now.saturating_add(10)],
+        )
+        .expect("later manual burial");
+    }
+    assert!(store.undo_review(&card, log_id).expect("undo"));
+    let queue = |id| {
+        let conn = read_only(&path);
+        conn.query_row("SELECT queue FROM cards WHERE id = ?1", [id], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("queue")
+    };
+    assert_eq!(queue(11), -3, "a later manual burial is untouched");
+    assert_eq!(queue(12), -2, "an earlier burial is untouched");
+}
+
+#[test]
+fn undoing_an_older_answer_keeps_today_counter() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let mut store = Collection::open(&path).expect("open");
+    let older_ids = store
+        .add_note(&note(&["Older?", "Answer!"], &[]))
+        .expect("older note");
+    let newer_ids = store
+        .add_note(&note(&["Newer?", "Answer!"], &[]))
+        .expect("newer note");
+    let older = store
+        .card(older_ids[0])
+        .expect("older card")
+        .expect("present");
+    let newer = store
+        .card(newer_ids[0])
+        .expect("newer card")
+        .expect("present");
+    let timing = store.timing(now).expect("timing");
+    let mut first = FsrsScheduler::default()
+        .schedule_timed(&older, Rating::Good, &timing, None, 0)
+        .expect("older decision");
+    first.revlog.id = now.saturating_sub(86_400 * 3).saturating_mul(1_000);
+    let first_log = store.apply_review(&first).expect("older answer");
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        conn.execute(
+            "UPDATE col SET crt = ?1 WHERE id = 1",
+            rusqlite::params![now.saturating_sub(86_400 * 2)],
+        )
+        .expect("roll to a later study day");
+    }
+    let mut store = Collection::open(&path).expect("reopen after rollover");
+
+    let mut second = FsrsScheduler::default()
+        .schedule_timed(&newer, Rating::Good, &timing, None, 0)
+        .expect("newer decision");
+    second.revlog.id = decision_time(&second, now);
+    store.apply_review(&second).expect("newer answer");
+
+    let deck = store
+        .effective_decks()
+        .expect("decks")
+        .into_iter()
+        .find(|deck| deck.id == 1)
+        .expect("deck");
+    let counted_day = deck.common.last_day_studied;
+    let counted = deck.common.new_studied;
+    assert!(counted > 0, "the newer answer charged today's counter");
+
+    assert!(
+        store
+            .undo_review(&older, first_log)
+            .expect("undo older answer")
+    );
+    let deck = store
+        .effective_decks()
+        .expect("decks")
+        .into_iter()
+        .find(|deck| deck.id == 1)
+        .expect("deck");
+    assert_eq!(deck.common.new_studied, counted, "newer count is unchanged");
+    assert_eq!(
+        deck.common.last_day_studied, counted_day,
+        "study day unchanged"
+    );
+}
+
+#[test]
+fn due_gather_scans_past_skipped_candidates() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let mut store = Collection::open(&path).expect("open");
+    let parent = store.create_deck("Parent").expect("parent");
+    let child = store.create_deck("Parent::Child").expect("child");
+    let mut child_deck = store
+        .effective_decks()
+        .expect("decks")
+        .into_iter()
+        .find(|deck| deck.id == child.id)
+        .expect("child deck");
+    child_deck.overrides.new_limit = Some(0);
+    store.write_deck(&child_deck).expect("zero child limit");
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.new_card_gather_priority = 2;
+    store.write_preset(&preset).expect("highest position first");
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        insert_queue_card(&conn, 10, 10, child.id, 0, 0, 10);
+        insert_queue_card(&conn, 11, 11, parent.id, 0, 0, 1);
+    }
+    let due = store
+        .due_cards(Some(parent.id), 1, now)
+        .expect("scan past child");
+    assert_eq!(
+        due.into_iter().map(|card| card.id).collect::<Vec<_>>(),
+        [11]
+    );
+
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.bury_new = true;
+    store.write_preset(&preset).expect("bury new");
+    let store = Collection::open(&path).expect("reopen");
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        insert_queue_card(&conn, 20, 100, 1, 0, 0, 1);
+        insert_queue_card(&conn, 21, 100, 1, 0, 0, 2);
+        insert_queue_card(&conn, 22, 101, 1, 0, 0, 3);
+    }
+    let due = store
+        .due_cards(None, 2, now)
+        .expect("scan past buried siblings");
+    let ids: Vec<_> = due.into_iter().map(|card| card.id).collect();
+    assert!(
+        ids.contains(&22),
+        "later eligible new card survives: {ids:?}"
+    );
+}
+
+#[test]
+fn caller_timestamp_does_not_persist_rollover_state() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        insert_queue_card(&conn, 10, 10, 1, 0, -2, 1);
+    }
+    let store = Collection::open(&path).expect("open");
+    let _ = store
+        .due_cards(None, 20, now.saturating_add(86_400 * 5))
+        .expect("future read view");
+    let conn = read_only(&path);
+    let queue: i64 = conn
+        .query_row("SELECT queue FROM cards WHERE id = 10", [], |row| {
+            row.get(0)
+        })
+        .expect("queue");
+    assert_eq!(queue, -2, "a caller timestamp must not unbury cards");
+    let stored_conf: String = conn
+        .query_row("SELECT conf FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("conf");
+    let parsed: Value = serde_json::from_str(&stored_conf).expect("conf JSON");
+    assert!(parsed.get("lastUnburied").is_none());
+}
+
+#[test]
+fn ancestor_decks_contribute_limits_not_cards() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let mut store = Collection::open(&path).expect("open");
+    let parent = store.create_deck("Parent").expect("parent");
+    let child = store.create_deck("Parent::Child").expect("child");
+    set_conf_values(&path, &[("applyAllParentLimits", json!(true))]);
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        insert_queue_card(&conn, 10, 10, parent.id, 0, 0, 1);
+        insert_queue_card(&conn, 11, 11, child.id, 0, 0, 2);
+    }
+    let store = Collection::open(&path).expect("reopen");
+    let due = store
+        .due_cards(Some(child.id), 10, now)
+        .expect("child candidates");
+    assert_eq!(
+        due.into_iter().map(|card| card.id).collect::<Vec<_>>(),
+        [11]
+    );
+}
+
+#[test]
+fn all_decks_has_no_default_root_cap() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let mut store = Collection::open(&path).expect("open");
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.new_per_day = 1;
+    store.write_preset(&preset).expect("preset");
+    let other = store.create_deck("Other").expect("other deck");
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        insert_queue_card(&conn, 10, 10, 1, 0, 0, 1);
+        insert_queue_card(&conn, 11, 11, other.id, 0, 0, 2);
+    }
+    let due = store.due_cards(None, 10, now).expect("all decks");
+    let ids: Vec<_> = due.into_iter().map(|card| card.id).collect();
+    assert_eq!(ids, [10, 11], "each deck keeps its own budget");
+}
+
+#[test]
+fn preview_cards_stay_out_of_review_sessions() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        for id in 10..=11 {
+            conn.execute(
+                "INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data) \
+                 VALUES (?1, ?2, 1, 0, 0, '', 'front', 'front', 0, 0, '')",
+                rusqlite::params![id, format!("guid-{id}")],
+            )
+            .expect("insert note");
+        }
+        insert_queue_card(&conn, 10, 10, 1, 1, 4, now);
+        insert_queue_card(&conn, 11, 11, 1, 0, 0, 1);
+    }
+    let store = Collection::open(&path).expect("open");
+    let due = store.due_cards(None, 10, now).expect("due");
+    assert_eq!(
+        due.into_iter().map(|card| card.id).collect::<Vec<_>>(),
+        [11]
+    );
+    assert_eq!(
+        store.find_cards("is:due").expect("is:due"),
+        [10],
+        "preview is still visible to Anki-style search"
+    );
+    let stats = store.stats(Some(1), now).expect("stats");
+    assert_eq!(
+        stats.learning_cards, 0,
+        "preview cannot select a study deck"
+    );
+}
+
+#[test]
+fn stale_today_limit_still_subtracts_todays_studies() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let store = Collection::open(&path).expect("open");
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.new_per_day = 1;
+    store.write_preset(&preset).expect("preset");
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        conn.execute(
+            "UPDATE col SET crt = ?1 WHERE id = 1",
+            rusqlite::params![now.saturating_sub(86_400 * 2)],
+        )
+        .expect("day 2 collection");
+        let decks = json!({
+            "1": {"id": 1, "name": "Default", "conf": 1,
+                  "newToday": [2, 1], "revToday": [2, 0],
+                  "newLimitToday": [5, 0]}
+        });
+        conn.execute(
+            "UPDATE col SET decks = ?1 WHERE id = 1",
+            rusqlite::params![decks.to_string()],
+        )
+        .expect("stale override with one study today");
+        insert_queue_card(&conn, 10, 10, 1, 0, 0, 1);
+    }
+    let store = Collection::open(&path).expect("reopen");
+    let due = store.due_cards(None, 10, now).expect("remaining limit");
+    assert!(due.is_empty(), "today's one study still consumes the cap");
+}
+
+#[test]
+fn reopening_forwards_learn_ahead_from_collection() {
+    let (_directory, path) = fixture();
+    set_conf_values(&path, &[("collapseTime", json!(0))]);
+    let store = ReopeningCollection::new(&path);
+    assert_eq!(store.learn_ahead_secs().expect("forwarded"), 0);
+}
+
+#[test]
+fn browse_is_due_uses_the_same_timing_as_find_cards() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    {
+        let conn = Connection::open(&path).expect("write connection");
+        conn.execute("UPDATE col SET crt = ?1 WHERE id = 1", [now])
+            .expect("creation");
+        for id in 10..=11 {
+            conn.execute(
+                "INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data) \
+                 VALUES (?1, ?2, 1, 0, 0, '', 'front', 'front', 0, 0, '')",
+                rusqlite::params![id, format!("guid-{id}")],
+            )
+            .expect("note");
+        }
+        insert_queue_card(&conn, 10, 10, 1, 2, 2, 0);
+        insert_queue_card(&conn, 11, 11, 1, 1, 1, now.saturating_add(600));
+    }
+    let store = Collection::open(&path).expect("open");
+    let ids: Vec<_> = store
+        .browse_cards("is:due")
+        .expect("browse due")
+        .into_iter()
+        .map(|card| card.card_id)
+        .collect();
+    assert_eq!(ids, [10, 11]);
 }

@@ -586,6 +586,8 @@ pub struct ReviewState {
     pub more_due: bool,
     pub load_errors: usize,
     pub load_error: Option<String>,
+    /// `collapseTime` resolved once when the session starts.
+    pub learn_ahead_secs: Option<i64>,
 }
 
 /// Root entity. The store boundary stays identical to the previous UI.
@@ -2758,6 +2760,7 @@ impl Root {
     /// cards wait in `pending` until their step is due, so an answer that comes
     /// back in a minute does not jump ahead of the cards already waiting.
     fn seed_session(&mut self, cards: Vec<Card>) {
+        self.review.learn_ahead_secs = self.store.learn_ahead_secs().ok();
         for card in cards {
             if card.queue == CardQueue::Learning {
                 Self::insert_pending(&mut self.review.pending, card);
@@ -2784,7 +2787,9 @@ impl Root {
     /// already due while nothing else is waiting is pushed behind the card it
     /// would have replaced, so it is not shown twice in a row.
     fn requeue_learning(&mut self, mut card: Card) {
-        let cutoff = Self::now().saturating_add(LEARN_AHEAD_SECS);
+        let cutoff = Self::now().saturating_add(
+            self.review.learn_ahead_secs.unwrap_or(LEARN_AHEAD_SECS),
+        );
         if card.due <= cutoff
             && self.review.queue.is_empty()
             && let Some(next) = self.review.pending.front()
@@ -2904,9 +2909,13 @@ impl Root {
             break;
         }
         while self.review.current.is_none()
-            && self.take_learning_card(now.saturating_add(LEARN_AHEAD_SECS), cx)
-        {
-        }
+            && self.take_learning_card(
+                now.saturating_add(
+                    self.review.learn_ahead_secs.unwrap_or(LEARN_AHEAD_SECS),
+                ),
+                cx,
+            )
+        {}
         if self.review.current.is_none() {
             self.review.question = None;
             self.review.answer = None;

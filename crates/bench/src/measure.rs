@@ -237,6 +237,21 @@ fn rank(times: &[f64], numerator: usize, denominator: usize) -> f64 {
     times.get(index).copied().unwrap_or(0.0)
 }
 
+fn mark_first_cards_as_reviews(
+    collection: &Path,
+    count: usize,
+) -> BenchResult<()> {
+    let conn = rusqlite::Connection::open(collection)
+        .map_err(|error| message(format!("fixture SQL open: {error}")))?;
+    conn.execute(
+        "UPDATE cards SET type = 2, queue = 2, due = 0, ivl = 1, factor = 2500 \
+         WHERE id IN (SELECT id FROM cards ORDER BY id LIMIT ?1)",
+        [i64::try_from(count).unwrap_or(0)],
+    )
+    .map_err(|error| message(format!("fixture SQL update: {error}")))?;
+    Ok(())
+}
+
 struct Fixture {
     directory: TempDir,
     collection: PathBuf,
@@ -276,6 +291,7 @@ impl Fixture {
             cards.push(card);
         }
         drop(store);
+        mark_first_cards_as_reviews(&collection, REVIEW_COUNT)?;
         let package = directory.path().join("seed.apkg");
         export_apkg(&collection, &media, &package)?;
         let now = created.saturating_add(86_400_i64.saturating_mul(2));
@@ -922,4 +938,32 @@ pub fn run() -> BenchResult<Report> {
         results: recorder.results,
         workload_hash: workload_hash(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_sql_fixture_creates_due_review_cards() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("collection.anki2");
+        let mut store = Collection::create(&path).expect("create");
+        for index in 0..3 {
+            store
+                .add_note(&NewNote {
+                    model_id: DEFAULT_MODEL_ID,
+                    deck_id: DEFAULT_DECK_ID,
+                    fields: vec![format!("card {index}"), "back".to_owned()],
+                    tags: Vec::new(),
+                })
+                .expect("note");
+        }
+        drop(store);
+        mark_first_cards_as_reviews(&path, 2).expect("convert cards");
+        let store = Collection::open(&path).expect("open");
+        let now = store.collection_created().expect("created");
+        let stats = store.stats(None, now).expect("stats");
+        assert_eq!(stats.review_cards, 2);
+    }
 }

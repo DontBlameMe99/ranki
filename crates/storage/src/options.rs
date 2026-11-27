@@ -664,11 +664,26 @@ fn put_bool(bytes: &mut Vec<u8>, field: u32, value: bool) {
     anki::put_varint(bytes, field, u64::from(value));
 }
 
-fn day_limit(bytes: &[u8]) -> DayLimit {
+fn day_limit(bytes: &[u8], studied: u32) -> DayLimit {
     DayLimit {
-        limit: proto_u32(bytes, 1),
-        today: proto_u32(bytes, 2).unwrap_or_default(),
-        day: 0,
+        limit: Some(proto_u32(bytes, 1).unwrap_or_default()),
+        day: proto_u32(bytes, 2).unwrap_or_default(),
+        today: studied,
+    }
+}
+
+/// `newLimitToday` and `reviewLimitToday` are `[limit, day]`, not counts.
+fn json_day_limit(
+    entry: Option<&Json>,
+    studied_day: u32,
+    studied: u32,
+) -> DayLimit {
+    let valid = entry.and_then(Json::as_array).is_some();
+    let (limit, day) = pair(entry);
+    DayLimit {
+        limit: valid.then_some(limit),
+        day: if valid { day } else { studied_day },
+        today: studied,
     }
 }
 
@@ -679,12 +694,29 @@ pub fn deck_from_json(id: Id, value: &Json) -> EffectiveDeck {
     let dynamic = value.get("dyn").and_then(Json::as_i64).unwrap_or_default();
     let (new_day, new_amount) = pair(value.get("newToday"));
     let (review_day, review_amount) = pair(value.get("revToday"));
-    let (_, learning_amount) = pair(value.get("lrnToday"));
-    let (_, time_amount) = pair(value.get("timeToday"));
-    let new_limit_entry = value.get("newLimitToday");
-    let review_limit_entry = value.get("reviewLimitToday");
-    let (new_limit_day, new_limit_today) = pair(new_limit_entry);
-    let (review_limit_day, review_limit_today) = pair(review_limit_entry);
+    let (learning_day, learning_amount) = pair(value.get("lrnToday"));
+    let (time_day, time_amount) = pair(value.get("timeToday"));
+    let combined_day = new_day.max(review_day).max(learning_day).max(time_day);
+    let new_amount = if new_day == combined_day {
+        new_amount
+    } else {
+        0
+    };
+    let review_amount = if review_day == combined_day {
+        review_amount
+    } else {
+        0
+    };
+    let learning_amount = if learning_day == combined_day {
+        learning_amount
+    } else {
+        0
+    };
+    let time_amount = if time_day == combined_day {
+        time_amount
+    } else {
+        0
+    };
     let desired_retention = unsigned(value.get("desiredRetention"))
         .map(|percent| f32::from(u16::try_from(percent).unwrap_or(90)) / 100.0);
     EffectiveDeck {
@@ -694,7 +726,7 @@ pub fn deck_from_json(id: Id, value: &Json) -> EffectiveDeck {
         kind: DeckKind::from_code(i32::try_from(dynamic).unwrap_or_default()),
         preset_id,
         common: DeckCommon {
-            last_day_studied: new_day.max(review_day),
+            last_day_studied: combined_day,
             new_studied: i32_from_u32(new_amount),
             review_studied: i32_from_u32(review_amount),
             learning_studied: i32_from_u32(learning_amount),
@@ -714,24 +746,16 @@ pub fn deck_from_json(id: Id, value: &Json) -> EffectiveDeck {
             desired_retention,
             extend_new: unsigned(value.get("extendNew")).unwrap_or_default(),
             extend_review: unsigned(value.get("extendRev")).unwrap_or_default(),
-            new_today: DayLimit {
-                limit: (new_limit_day > 0).then_some(new_limit_day),
-                today: if new_limit_entry.is_some() {
-                    new_limit_today
-                } else {
-                    new_amount
-                },
-                day: new_day,
-            },
-            review_today: DayLimit {
-                limit: (review_limit_day > 0).then_some(review_limit_day),
-                today: if review_limit_entry.is_some() {
-                    review_limit_today
-                } else {
-                    review_amount
-                },
-                day: review_day,
-            },
+            new_today: json_day_limit(
+                value.get("newLimitToday"),
+                combined_day,
+                new_amount,
+            ),
+            review_today: json_day_limit(
+                value.get("reviewLimitToday"),
+                combined_day,
+                review_amount,
+            ),
         },
         markdown_description: value
             .get("md")
@@ -789,12 +813,24 @@ pub fn deck_from_proto(
             review_limit: proto_u32(normal, 6),
             new_limit: proto_u32(normal, 7),
             desired_retention: anki::protobuf_f32(normal, 10),
-            new_today: anki::protobuf_bytes(normal, 9)
-                .map(|bytes| day_limit(&bytes))
-                .unwrap_or_default(),
-            review_today: anki::protobuf_bytes(normal, 8)
-                .map(|bytes| day_limit(&bytes))
-                .unwrap_or_default(),
+            new_today: if let Some(bytes) = anki::protobuf_bytes(normal, 9) {
+                day_limit(&bytes, u32_from_i32(deck.common.new_studied))
+            } else {
+                DayLimit {
+                    limit: None,
+                    today: u32_from_i32(deck.common.new_studied),
+                    day: deck.common.last_day_studied,
+                }
+            },
+            review_today: if let Some(bytes) = anki::protobuf_bytes(normal, 8) {
+                day_limit(&bytes, u32_from_i32(deck.common.review_studied))
+            } else {
+                DayLimit {
+                    limit: None,
+                    today: u32_from_i32(deck.common.review_studied),
+                    day: deck.common.last_day_studied,
+                }
+            },
         };
     }
     deck
@@ -853,14 +889,14 @@ fn put_i32(bytes: &mut Vec<u8>, field: u32, value: i32) {
 }
 
 fn put_day_limit(bytes: &mut Vec<u8>, field: u32, limit: &DayLimit) {
-    if limit.limit.is_none() && limit.today == 0 {
+    if limit.limit.is_none() {
         return;
     }
     let mut blob = Vec::new();
     if let Some(value) = limit.limit {
         put_u32(&mut blob, 1, value);
     }
-    put_u32(&mut blob, 2, limit.today);
+    put_u32(&mut blob, 2, limit.day);
     anki::put_bytes(bytes, field, &blob);
 }
 
@@ -884,14 +920,14 @@ pub fn deck_to_json(deck: &EffectiveDeck) -> Json {
     object.insert(
         "newToday".into(),
         json!([
-            deck.overrides.new_today.day,
+            deck.common.last_day_studied,
             u32_from_i32(deck.common.new_studied)
         ]),
     );
     object.insert(
         "revToday".into(),
         json!([
-            deck.overrides.review_today.day,
+            deck.common.last_day_studied,
             u32_from_i32(deck.common.review_studied)
         ]),
     );
@@ -904,13 +940,13 @@ pub fn deck_to_json(deck: &EffectiveDeck) -> Json {
     if let Some(limit) = deck.overrides.new_today.limit {
         object.insert(
             "newLimitToday".into(),
-            json!([limit, deck.overrides.new_today.today]),
+            json!([limit, deck.overrides.new_today.day]),
         );
     }
     if let Some(limit) = deck.overrides.review_today.limit {
         object.insert(
             "reviewLimitToday".into(),
-            json!([limit, deck.overrides.review_today.today]),
+            json!([limit, deck.overrides.review_today.day]),
         );
     }
     if let Some(retention) = deck.overrides.desired_retention {
@@ -1034,39 +1070,65 @@ fn decks_from_tables(
     decks.sort_unstable_by_key(|deck| deck.id);
     Ok(decks)
 }
+fn atomic_write(
+    conn: &Connection,
+    write: impl FnOnce(&Connection) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    if conn.is_autocommit() {
+        let transaction =
+            conn.unchecked_transaction().map_err(crate::backend)?;
+        write(&transaction)?;
+        transaction.commit().map_err(crate::backend)
+    } else {
+        write(conn)
+    }
+}
 
 /// Writes one preset back to whatever layout the collection uses.
 pub fn write_preset(
     conn: &Connection,
     preset: &DeckPreset,
 ) -> Result<(), StoreError> {
-    let col = records::read_col(conn)?;
-    let stamp = crate::col_stamp(&col)?;
     if normalized(conn)? {
-        conn.execute(
-            "UPDATE deck_config SET name = ?1, mtime_secs = ?2, usn = ?3, config = ?4 WHERE id = ?5",
-            params![
-                preset.name,
-                preset.mtime_secs,
-                preset.usn,
-                preset_to_proto(preset),
-                preset.id,
-            ],
-        )
-        .map_err(crate::backend)?;
+        atomic_write(conn, |conn| {
+            let col = records::read_col(conn)?;
+            let stamp = crate::col_stamp(&col)?;
+            conn.execute(
+                "UPDATE deck_config SET name = ?1, mtime_secs = ?2, usn = ?3, config = ?4 WHERE id = ?5",
+                params![
+                    preset.name,
+                    preset.mtime_secs,
+                    preset.usn,
+                    preset_to_proto(preset),
+                    preset.id,
+                ],
+            )
+            .map_err(crate::backend)?;
+            conn.execute(
+                "UPDATE col SET mod = ?1 WHERE id = 1",
+                [stamp.modified],
+            )
+            .map_err(crate::backend)?;
+            Ok(())
+        })?;
     } else {
-        let mut decks = parse_json(&col.dconf, "dconf")?;
-        let Some(object) = decks.as_object_mut() else {
-            return Err(invalid("dconf is not an object"));
-        };
-        object.insert(preset.id.to_string(), preset_to_json(preset));
-        let json = serde_json::to_string(&decks)
-            .map_err(|error| invalid(error.to_string()))?;
-        conn.execute(
-            "UPDATE col SET mod = ?1, scm = ?2, dconf = ?3 WHERE id = 1",
-            params![stamp.modified, stamp.scm, json],
-        )
-        .map_err(crate::backend)?;
+        atomic_write(conn, |conn| {
+            let col = records::read_col(conn)?;
+            let stamp = crate::col_stamp(&col)?;
+            let mut decks = parse_json(&col.dconf, "dconf")?;
+            let Some(object) = decks.as_object_mut() else {
+                return Err(invalid("dconf is not an object"));
+            };
+            object.insert(preset.id.to_string(), preset_to_json(preset));
+            let json = serde_json::to_string(&decks)
+                .map_err(|error| invalid(error.to_string()))?;
+            conn.execute(
+                "UPDATE col SET mod = ?1, scm = ?2, dconf = ?3 WHERE id = 1",
+                params![stamp.modified, stamp.scm, json],
+            )
+            .map_err(crate::backend)?;
+            Ok(())
+        })?;
     }
     Ok(())
 }
@@ -1076,35 +1138,48 @@ pub fn write_deck(
     conn: &Connection,
     deck: &EffectiveDeck,
 ) -> Result<(), StoreError> {
-    let col = records::read_col(conn)?;
-    let stamp = crate::col_stamp(&col)?;
     if normalized(conn)? {
         let (common, kind) = deck_to_proto(deck);
-        conn.execute(
-            "UPDATE decks SET name = ?1, mtime_secs = ?2, usn = ?3, common = ?4, kind = ?5 WHERE id = ?6",
-            params![
-                crate::anki::encode_deck_name(&deck.name),
-                stamp.now_secs,
-                stamp.usn,
-                common,
-                kind,
-                deck.id,
-            ],
-        )
-        .map_err(crate::backend)?;
+        atomic_write(conn, |conn| {
+            let col = records::read_col(conn)?;
+            let stamp = crate::col_stamp(&col)?;
+            conn.execute(
+                "UPDATE decks SET name = ?1, mtime_secs = ?2, usn = ?3, common = ?4, kind = ?5 WHERE id = ?6",
+                params![
+                    crate::anki::encode_deck_name(&deck.name),
+                    stamp.now_secs,
+                    stamp.usn,
+                    common,
+                    kind,
+                    deck.id,
+                ],
+            )
+            .map_err(crate::backend)?;
+            conn.execute(
+                "UPDATE col SET mod = ?1 WHERE id = 1",
+                [stamp.modified],
+            )
+            .map_err(crate::backend)?;
+            Ok(())
+        })?;
         return Ok(());
     }
-    let mut decks = parse_json(&col.decks, "decks")?;
-    let Some(object) = decks.as_object_mut() else {
-        return Err(invalid("decks is not an object"));
-    };
-    object.insert(deck.id.to_string(), deck_to_json(deck));
-    let json = serde_json::to_string(&decks)
-        .map_err(|error| invalid(error.to_string()))?;
-    conn.execute(
-        "UPDATE col SET mod = ?1, scm = ?2, decks = ?3 WHERE id = 1",
-        params![stamp.modified, stamp.scm, json],
-    )
-    .map_err(crate::backend)?;
+    atomic_write(conn, |conn| {
+        let col = records::read_col(conn)?;
+        let stamp = crate::col_stamp(&col)?;
+        let mut decks = parse_json(&col.decks, "decks")?;
+        let Some(object) = decks.as_object_mut() else {
+            return Err(invalid("decks is not an object"));
+        };
+        object.insert(deck.id.to_string(), deck_to_json(deck));
+        let json = serde_json::to_string(&decks)
+            .map_err(|error| invalid(error.to_string()))?;
+        conn.execute(
+            "UPDATE col SET mod = ?1, scm = ?2, decks = ?3 WHERE id = 1",
+            params![stamp.modified, stamp.scm, json],
+        )
+        .map_err(crate::backend)?;
+        Ok(())
+    })?;
     Ok(())
 }

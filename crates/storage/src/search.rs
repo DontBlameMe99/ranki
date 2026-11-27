@@ -13,10 +13,16 @@ pub struct SearchQuery {
     pub params: Vec<SqlValue>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "search clauses need tokens, decks, models and current timing"
+)]
 pub fn build(
     tokens: &[String],
     decks: &[Deck],
     models: &[NoteModel],
+    today: i64,
+    learn_cutoff: i64,
 ) -> Result<SearchQuery, StoreError> {
     let mut conditions = Vec::new();
     let mut params = Vec::new();
@@ -30,7 +36,7 @@ pub fn build(
             Some(("note", value)) => {
                 model_condition(value, models, &mut params)
             }
-            Some(("is", value)) => state_condition(value)?,
+            Some(("is", value)) => state_condition(value, today, learn_cutoff)?,
             _ => {
                 params.push(SqlValue::Text(like_pattern(token, false)));
                 "n.flds LIKE ? ESCAPE '\\'".into()
@@ -62,6 +68,15 @@ pub fn needs_models(tokens: &[String]) -> bool {
     tokens
         .iter()
         .any(|token| matches!(token.split_once(':'), Some(("note", _))))
+}
+
+/// Whether a query needs the current day and learn-ahead cutoff.
+pub fn needs_timing(tokens: &[String]) -> bool {
+    tokens.iter().any(|token| {
+        token.split_once(':').is_some_and(|(key, value)| {
+            key.eq_ignore_ascii_case("is") && value.eq_ignore_ascii_case("due")
+        })
+    })
 }
 
 pub fn tokenize(query: &str) -> Result<Vec<String>, StoreError> {
@@ -150,20 +165,28 @@ fn id_condition(
     format!("{column} IN ({placeholders})")
 }
 
-fn state_condition(value: &str) -> Result<String, StoreError> {
+fn state_condition(
+    value: &str,
+    today: i64,
+    learn_cutoff: i64,
+) -> Result<String, StoreError> {
     let condition = match value.to_ascii_lowercase().as_str() {
-        "new" => "c.queue = 0",
-        "learn" | "learning" | "relearn" => "c.queue IN (1, 3, 4)",
-        "review" => "c.queue = 2",
-        "suspended" => "c.queue = -1",
-        "buried" => "c.queue IN (-2, -3)",
+        "new" => String::from("c.type = 0"),
+        "learn" | "learning" | "relearn" => String::from("c.type IN (1, 3)"),
+        "review" => String::from("c.type IN (2, 3)"),
+        "suspended" => String::from("c.queue = -1"),
+        "buried" => String::from("c.queue IN (-2, -3)"),
+        "due" => format!(
+            "((c.queue IN (2, 3) AND c.due <= {today}) OR \
+             (c.queue IN (1, 4) AND c.due <= {learn_cutoff}))"
+        ),
         _ => {
             return Err(StoreError::InvalidData(format!(
                 "unsupported is: filter: {value}"
             )));
         }
     };
-    Ok(condition.into())
+    Ok(condition)
 }
 
 fn like_pattern(value: &str, wrap: bool) -> String {

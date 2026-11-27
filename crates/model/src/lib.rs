@@ -751,6 +751,17 @@ pub trait Store {
         now_secs: i64,
     ) -> Result<Vec<Card>, StoreError>;
 
+    /// Returns Anki's learn-ahead window in seconds, `collapseTime`.
+    ///
+    /// Stores without collection config use the default of 1200 seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the collection cannot be read.
+    fn learn_ahead_secs(&self) -> Result<i64, StoreError> {
+        Ok(1200)
+    }
+
     /// Returns the learning and relearning steps configured for a deck.
     ///
     /// Implementations without deck presets return
