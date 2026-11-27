@@ -294,6 +294,7 @@ impl Root {
             .gap(px(SPACE_SECTION))
             .id("statistics-scroll")
             .overflow_scroll()
+            .track_scroll(&self.statistics_scroll)
             .px(px(PAGE_X))
             .py(px(PAGE_Y))
             .child(

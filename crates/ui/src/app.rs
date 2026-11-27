@@ -23,16 +23,17 @@ use ranki_model::{
 use crate::{
     Options, SettingsSaver, ThemeChoice,
     add_card_view::{ColorPicker, ColorTarget},
-    browser_view::{BrowseState, browse_expand_paths},
+    browser_view::{BROWSE_DETAIL_MIN_WIDTH, BrowseState, browse_expand_paths},
     card_view::{self, MediaKind, MediaRef, RenderedCard},
     components::warm_brand,
     occlusion::{
         self, MaskShape, NormalizedRect, OcclusionMask, image_occlusion_fields,
     },
+    scrollbar::{self, ScrollbarDrag},
     smooth_scroll::SmoothScroll,
     statistics_view::{Statistics, build_statistics},
     text_field::{EditHook, TextField},
-    theme::{self, Palette, Theme},
+    theme::{self, Palette, Theme, alpha},
 };
 
 /// Anki shows learning cards due within this window when the queue runs dry.
@@ -621,7 +622,15 @@ pub struct Root {
     pub(crate) collection_modified: i64,
     pub(crate) collection_start: i64,
     pub(crate) decks_scroll: SmoothScroll,
+    pub(crate) statistics_scroll: ScrollHandle,
+    pub(crate) settings_scroll: ScrollHandle,
+    pub(crate) add_scroll: ScrollHandle,
+    pub(crate) deck_picker_scroll: ScrollHandle,
+    pub(crate) browse_scroll: ScrollHandle,
+    pub(crate) browse_detail_scroll: ScrollHandle,
     pub(crate) review_stage_scroll: ScrollHandle,
+    pub(crate) scrollbar_drag: Option<ScrollbarDrag>,
+    pub(crate) scrollbar_layouts: BTreeMap<&'static str, (Bounds<Pixels>, f32)>,
     pub(crate) sync: SyncUiState,
     pub(crate) sync_run: Arc<crate::sync_view::SyncRun>,
     pub(crate) save_settings: SettingsSaver,
@@ -713,6 +722,213 @@ impl Root {
                 cx,
             );
         }
+    }
+
+    fn begin_scrollbar_drag(
+        &mut self,
+        id: &'static str,
+        handle: &ScrollHandle,
+        y: f32,
+    ) {
+        let Some(geometry) = scrollbar::geometry(handle) else {
+            return;
+        };
+        let offset = -f32::from(handle.offset().y);
+        self.scrollbar_drag =
+            Some(ScrollbarDrag::new(id, handle, y, offset, &geometry));
+    }
+
+    fn press_scrollbar_track(
+        &mut self,
+        id: &'static str,
+        handle: &ScrollHandle,
+        y: f32,
+    ) {
+        let Some(geometry) = scrollbar::geometry(handle) else {
+            return;
+        };
+        let offset = scrollbar::offset_for_click(&geometry, y);
+        handle.set_offset(point(Pixels::ZERO, px(-offset)));
+        self.scrollbar_drag =
+            Some(ScrollbarDrag::new(id, handle, y, offset, &geometry));
+    }
+
+    pub(crate) fn drag_scrollbar(&mut self, y: f32, window: &mut Window) {
+        let Some(drag) = self.scrollbar_drag.as_mut() else {
+            return;
+        };
+        let offset = drag.offset_at(y);
+        drag.handle.set_offset(point(Pixels::ZERO, px(-offset)));
+        window.refresh();
+    }
+
+    pub(crate) fn end_scrollbar_drag(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.scrollbar_drag.take().is_some() {
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn pointer_on_scrollbar(
+        &self,
+        event: &MouseDownEvent,
+        window: &Window,
+    ) -> bool {
+        let x = f32::from(event.position.x);
+        let y = f32::from(event.position.y);
+        self.active_scrollbars(window).iter().any(|(_, handle)| {
+            scrollbar::geometry(handle).is_some_and(|geometry| {
+                x >= geometry.left
+                    && x <= geometry.left + scrollbar::WIDTH
+                    && y >= geometry.track_top
+                    && y <= geometry.track_top + geometry.track_height
+            })
+        })
+    }
+    pub(crate) fn active_scrollbars(
+        &self,
+        window: &Window,
+    ) -> Vec<(&'static str, &ScrollHandle)> {
+        let mut bars: Vec<(&'static str, &ScrollHandle)> = Vec::new();
+        match self.view {
+            View::Decks => bars.push(("decks", self.decks_scroll.handle())),
+            View::Browse => {
+                bars.push(("browse", &self.browse_scroll));
+                let width = crate::theme::page_width(
+                    f32::from(window.viewport_size().width),
+                    self.nav_width,
+                );
+                if self.browse.selected.is_some()
+                    && width >= BROWSE_DETAIL_MIN_WIDTH
+                {
+                    bars.push(("browse-detail", &self.browse_detail_scroll));
+                }
+            }
+            View::Review => {
+                if self.review.current.is_some() {
+                    bars.push(("review-stage", &self.review_stage_scroll));
+                }
+            }
+            View::AddCard => {
+                bars.push(("add", &self.add_scroll));
+                if self.add.deck_picker {
+                    bars.push(("deck-picker", &self.deck_picker_scroll));
+                }
+            }
+            View::Settings => bars.push(("settings", &self.settings_scroll)),
+            View::Statistics => {
+                bars.push(("statistics", &self.statistics_scroll));
+            }
+        }
+        bars
+    }
+
+    pub(crate) fn render_scrollbar(
+        &self,
+        id: &'static str,
+        handle: &ScrollHandle,
+        cx: &Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let geometry = scrollbar::geometry(handle)?;
+
+        let colors = self.colors();
+        let dragging = self
+            .scrollbar_drag
+            .as_ref()
+            .is_some_and(|drag| drag.id == id);
+        let thumb_fill = if dragging {
+            colors.mauve
+        } else {
+            alpha(colors.mauve, 0.55)
+        };
+
+        let track_handle = handle.clone();
+        let track = cx.listener(
+            move |this: &mut Self, event: &MouseDownEvent, _, cx| {
+                if this
+                    .scrollbar_drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.id == id)
+                {
+                    return;
+                }
+                this.press_scrollbar_track(
+                    id,
+                    &track_handle,
+                    f32::from(event.position.y),
+                );
+                cx.notify();
+            },
+        );
+        let thumb_handle = handle.clone();
+        let thumb = cx.listener(
+            move |this: &mut Self, event: &MouseDownEvent, _, cx| {
+                this.begin_scrollbar_drag(
+                    id,
+                    &thumb_handle,
+                    f32::from(event.position.y),
+                );
+                cx.notify();
+            },
+        );
+
+        Some(
+            div()
+                .id(SharedString::from(format!("scrollbar-{id}-track")))
+                .debug_selector(move || format!("scrollbar-{id}-track"))
+                .absolute()
+                .left(px(geometry.left))
+                .top(px(geometry.track_top))
+                .w(px(scrollbar::WIDTH))
+                .h(px(geometry.track_height))
+                .rounded(px(5.))
+                .bg(alpha(colors.surface1, 0.35))
+                .cursor_pointer()
+                .block_mouse_except_scroll()
+                .on_mouse_down(MouseButton::Left, track)
+                .on_mouse_move(cx.listener(
+                    |this: &mut Self, event: &MouseMoveEvent, window, _| {
+                        this.drag_scrollbar(
+                            f32::from(event.position.y),
+                            window,
+                        );
+                    },
+                ))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("scrollbar-{id}-thumb")))
+                        .debug_selector(move || format!("scrollbar-{id}-thumb"))
+                        .absolute()
+                        .left(px(
+                            (scrollbar::WIDTH - scrollbar::THUMB_WIDTH) / 2.0
+                        ))
+                        .top(px(geometry.thumb_top - geometry.track_top))
+                        .w(px(scrollbar::THUMB_WIDTH))
+                        .h(px(geometry.thumb_height))
+                        .rounded_full()
+                        .bg(thumb_fill)
+                        .hover(move |style| style.bg(alpha(colors.mauve, 0.85)))
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, thumb)
+                        .on_mouse_move(cx.listener(
+                            |this: &mut Self,
+                             event: &MouseMoveEvent,
+                             window,
+                             _| {
+                                this.drag_scrollbar(
+                                    f32::from(event.position.y),
+                                    window,
+                                );
+                            },
+                        )),
+                )
+                .into_any_element(),
+        )
     }
 }
 
@@ -874,7 +1090,15 @@ impl Root {
             collection_modified: 0,
             collection_start: 0,
             decks_scroll: SmoothScroll::new(),
+            statistics_scroll: ScrollHandle::new(),
+            settings_scroll: ScrollHandle::new(),
+            add_scroll: ScrollHandle::new(),
+            deck_picker_scroll: ScrollHandle::new(),
+            browse_scroll: ScrollHandle::new(),
+            browse_detail_scroll: ScrollHandle::new(),
             review_stage_scroll: ScrollHandle::new(),
+            scrollbar_drag: None,
+            scrollbar_layouts: BTreeMap::new(),
             sync: SyncUiState {
                 username: sync_username,
                 password: sync_password,
@@ -3241,7 +3465,7 @@ impl Render for Root {
                 self.render_statistics(window, cx).into_any_element()
             }
         };
-        div()
+        let root = div()
             .id("root")
             .size_full()
             .flex()
@@ -3250,21 +3474,27 @@ impl Render for Root {
             .text_color(colors.text)
             .font_family(self.font_family)
             .track_focus(&self.focus)
-            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                let menu = this.deck_menu_dismissed_press.take().is_some()
-                    || this.card_menu_dismissed_press.take().is_some();
-                let deck =
-                    this.add.deck_picker_dismissed_press.take().is_some();
-                let color =
-                    this.add.color_picker_dismissed_press.take().is_some();
-                let _ = this.add.color_picker_dismissed_target.take();
-                let picker = deck || color;
-                if menu || picker {
-                    cx.notify();
-                }
-            }))
+            .capture_any_mouse_down(cx.listener(
+                |this, event: &MouseDownEvent, window, cx| {
+                    if this.pointer_on_scrollbar(event, window) {
+                        return;
+                    }
+                    let menu = this.deck_menu_dismissed_press.take().is_some()
+                        || this.card_menu_dismissed_press.take().is_some();
+                    let deck =
+                        this.add.deck_picker_dismissed_press.take().is_some();
+                    let color =
+                        this.add.color_picker_dismissed_press.take().is_some();
+                    let _ = this.add.color_picker_dismissed_target.take();
+                    let picker = deck || color;
+                    if menu || picker {
+                        cx.notify();
+                    }
+                },
+            ))
             .on_mouse_move(cx.listener(
-                |this, event: &MouseMoveEvent, _, cx| {
+                |this, event: &MouseMoveEvent, window, cx| {
+                    this.drag_scrollbar(f32::from(event.position.y), window);
                     if event.dragging() {
                         this.drag_nav(f32::from(event.position.x), cx);
                     }
@@ -3273,6 +3503,7 @@ impl Render for Root {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
+                    let scrollbar = this.end_scrollbar_drag(cx);
                     this.end_nav_drag(cx);
                     let menu = this.deck_menu_dismissed_press.take().is_some()
                         || this.card_menu_dismissed_press.take().is_some();
@@ -3282,14 +3513,17 @@ impl Render for Root {
                         this.add.color_picker_dismissed_press.take().is_some();
                     let _ = this.add.color_picker_dismissed_target.take();
                     let picker = picker || color;
-                    if menu || picker {
+                    if menu || picker || scrollbar {
                         cx.notify();
                     }
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| this.end_nav_drag(cx)),
+                cx.listener(|this, _, _, cx| {
+                    this.end_scrollbar_drag(cx);
+                    this.end_nav_drag(cx);
+                }),
             )
             .on_action(cx.listener(|this, action: &Reveal, window, cx| {
                 this.dispatch(UiAction::from(action), window, cx);
@@ -3419,7 +3653,40 @@ impl Render for Root {
                 this.child(self.render_nav(window, cx))
             })
             .child(div().flex_1().overflow_hidden().child(main))
-            .children(self.render_overlay(window, cx))
+            .children(self.render_overlay(window, cx));
+        let bars: Vec<_> = self
+            .active_scrollbars(window)
+            .into_iter()
+            .map(|(id, handle)| (id, handle.clone()))
+            .collect();
+        for (id, handle) in &bars {
+            self.scrollbar_layouts.insert(
+                *id,
+                (handle.bounds(), f32::from(handle.max_offset().height)),
+            );
+        }
+        if !bars.is_empty() {
+            let weak = cx.entity().downgrade();
+            window.on_next_frame(move |_, app_cx| {
+                let _ = weak.update(app_cx, |this, cx| {
+                    let mut changed = false;
+                    for (id, handle) in bars {
+                        let layout = (
+                            handle.bounds(),
+                            f32::from(handle.max_offset().height),
+                        );
+                        if this.scrollbar_layouts.get(id) != Some(&layout) {
+                            this.scrollbar_layouts.insert(id, layout);
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        cx.notify();
+                    }
+                });
+            });
+        }
+        root
     }
 }
 

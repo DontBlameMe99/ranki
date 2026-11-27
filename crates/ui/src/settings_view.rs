@@ -93,6 +93,7 @@ impl Root {
             .flex_col()
             .gap(px(SPACE_SECTION))
             .overflow_scroll()
+            .track_scroll(&self.settings_scroll)
             .px(px(PAGE_X))
             .py(px(PAGE_Y))
             .child(

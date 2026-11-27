@@ -108,6 +108,7 @@ impl Root {
             .flex()
             .flex_col()
             .overflow_scroll()
+            .track_scroll(&self.add_scroll)
             .on_scroll_wheel(cx.listener(
                 |this, _: &gpui::ScrollWheelEvent, window, cx| {
                     if this.add.deck_picker {
@@ -1003,6 +1004,7 @@ impl Root {
             .max_h(px(220.))
             .id("add-deck-list")
             .overflow_scroll()
+            .track_scroll(&self.deck_picker_scroll)
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
         let mut matches = 0;
         for (index, deck) in self.decks.iter().enumerate() {

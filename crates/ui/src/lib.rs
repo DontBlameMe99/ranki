@@ -36,6 +36,7 @@ mod decks_view;
 mod nav;
 pub use ranki_model::occlusion;
 mod review_view;
+mod scrollbar;
 mod settings_view;
 mod smooth_scroll;
 mod statistics_view;
