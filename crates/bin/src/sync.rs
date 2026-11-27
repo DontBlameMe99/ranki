@@ -726,7 +726,8 @@ mod tests {
                 SyncMethod::Download,
                 MockResponse::ok_bytes(bytes).unwrap(),
             )
-            .with_response(SyncMethod::MediaBegin, media_begin());
+            .with_response(SyncMethod::MediaBegin, media_begin())
+            .with_response(SyncMethod::Meta, meta(false));
         let outcome = sync_once(
             TransportRef(&mut transport),
             &settings,
@@ -745,7 +746,8 @@ mod tests {
             [
                 SyncMethod::Meta,
                 SyncMethod::Download,
-                SyncMethod::MediaBegin
+                SyncMethod::MediaBegin,
+                SyncMethod::Meta
             ]
         );
     }
@@ -794,10 +796,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         collection_with_cards(directory.path());
         let settings = settings(directory.path());
-        let mut transport = MockTransport::new().with_response(
-            SyncMethod::Upload,
-            MockResponse::ok_bytes(b"OK".to_vec()).unwrap(),
-        );
+        let mut transport = MockTransport::new()
+            .with_response(
+                SyncMethod::Upload,
+                MockResponse::ok_bytes(b"OK".to_vec()).unwrap(),
+            )
+            .with_response(SyncMethod::Meta, meta(false));
         let text = manual_sync(
             TransportRef(&mut transport),
             &settings,
@@ -807,6 +811,7 @@ mod tests {
         .unwrap();
         assert_eq!(text, "uploaded");
         assert_eq!(transport.requests()[0].method, SyncMethod::Upload);
+        assert_eq!(transport.requests()[1].method, SyncMethod::Meta);
     }
 
     #[test]

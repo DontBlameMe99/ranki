@@ -1071,6 +1071,22 @@ mod tests {
     use super::run_with_sync;
     use ranki_model::Rating;
 
+    fn uploaded() -> MockResponse {
+        MockResponse::ok_bytes(b"OK".to_vec()).unwrap()
+    }
+
+    fn remote_meta() -> MockResponse {
+        MockResponse::ok_json(&serde_json::json!({
+            "mod": 1_700_000_000_000_i64,
+            "scm": 1_700_000_000_000_i64,
+            "usn": 1,
+            "ts": now_secs().unwrap(),
+            "empty": false,
+            "cont": true,
+        }))
+        .unwrap()
+    }
+
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).unwrap_or_else(|error| panic!("{error}"))
     }
@@ -1139,37 +1155,20 @@ mod tests {
         )
         .unwrap();
         let mut seed = ranki_sync::SyncClient::new(
-            MockTransport::new().with_response(
-                SyncMethod::Upload,
-                MockResponse::ok_bytes(b"OK".to_vec()).unwrap(),
-            ),
+            MockTransport::new()
+                .with_response(SyncMethod::Upload, uploaded())
+                .with_response(SyncMethod::Meta, remote_meta()),
             &paths.collection,
             &paths.media_dir,
             &paths.sync_state,
         )
         .unwrap();
         seed.full_upload().unwrap();
-        let state: serde_json::Value =
-            serde_json::from_slice(&fs::read(&paths.sync_state).unwrap())
-                .unwrap();
-        let mod_time = state["last_mod"].as_i64().unwrap();
-        let scm = state["last_scm"].as_i64().unwrap();
-        let meta = MockResponse::ok_json(&serde_json::json!({
-            "mod": mod_time,
-            "scm": scm,
-            "usn": 1,
-            "ts": now_secs().unwrap(),
-            "empty": false,
-            "cont": true,
-        }))
-        .unwrap();
         let mut transport = MockTransport::new()
-            .with_response(SyncMethod::Meta, meta.clone())
-            .with_response(SyncMethod::Meta, meta)
-            .with_response(
-                SyncMethod::Upload,
-                MockResponse::ok_bytes(b"OK".to_vec()).unwrap(),
-            );
+            .with_response(SyncMethod::Meta, remote_meta())
+            .with_response(SyncMethod::Meta, remote_meta())
+            .with_response(SyncMethod::Upload, uploaded())
+            .with_response(SyncMethod::Meta, remote_meta());
         let mut config = ranki_model::Config::default();
         config.sync.enabled = true;
         config.scheduler.auto_optimize = false;
@@ -1193,7 +1192,12 @@ mod tests {
             .collect();
         assert_eq!(
             methods,
-            vec![SyncMethod::Meta, SyncMethod::Meta, SyncMethod::Upload]
+            vec![
+                SyncMethod::Meta,
+                SyncMethod::Meta,
+                SyncMethod::Upload,
+                SyncMethod::Meta
+            ]
         );
     }
 

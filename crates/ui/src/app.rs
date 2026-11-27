@@ -32,6 +32,7 @@ use crate::{
     scrollbar::{self, ScrollbarDrag},
     smooth_scroll::SmoothScroll,
     statistics_view::{Statistics, build_statistics},
+    sync_view::SyncActivity,
     text_field::{EditHook, TextField},
     theme::{self, Palette, Theme, alpha},
 };
@@ -183,8 +184,15 @@ pub struct SyncUiState {
     pub username: Entity<TextField>,
     pub password: Entity<TextField>,
     pub signed_in: bool,
-    pub busy: bool,
+    pub running: Option<SyncActivity>,
     pub conflict: Option<String>,
+    /// Failure from the last attempt, kept on screen after the toast fades.
+    pub error: Option<String>,
+}
+impl SyncUiState {
+    pub(crate) const fn busy(&self) -> bool {
+        self.running.is_some()
+    }
 }
 impl Toast {
     /// A toast outlives its text only by the timer that clears it.
@@ -1176,8 +1184,9 @@ impl Root {
                 username: sync_username,
                 password: sync_password,
                 signed_in,
-                busy: false,
+                running: None,
                 conflict: None,
+                error: None,
             },
             sync_run: Arc::new(crate::sync_view::run_sync),
             save_settings,
@@ -1384,10 +1393,19 @@ impl Root {
         {
             root.nav_width = theme::nav_width(width);
         }
+        if let Ok(activity) = env::var("RANKI_UI_DEV_SYNC_RUNNING") {
+            root.sync.signed_in = true;
+            root.options.sync.enabled = true;
+            root.sync.running = Some(match activity.as_str() {
+                "signing-in" => SyncActivity::SigningIn,
+                "keep-local" => SyncActivity::KeepingLocal,
+                "keep-remote" => SyncActivity::KeepingRemote,
+                _ => SyncActivity::Syncing,
+            });
+        }
         if env::var("RANKI_UI_DEV_SYNC_CONFLICT")
             .is_ok_and(|value| value == "1")
         {
-            root.view = View::Settings;
             root.sync.signed_in = true;
             root.options.sync.enabled = true;
             root.sync.conflict = Some(String::from(
@@ -1396,6 +1414,18 @@ impl Root {
         }
         if let Ok(path) = env::var("RANKI_UI_DEV_IMPORT") {
             root.import_path(PathBuf::from(path), cx);
+        }
+        if let Ok(error) = env::var("RANKI_UI_DEV_SYNC_ERROR") {
+            root.sync.signed_in = true;
+            root.options.sync.enabled = true;
+            root.sync.error = Some(error);
+        }
+        if env::var("RANKI_UI_DEV_SYNC_RUNNING").is_ok()
+            || env::var("RANKI_UI_DEV_SYNC_CONFLICT")
+                .is_ok_and(|value| value == "1")
+            || env::var("RANKI_UI_DEV_SYNC_ERROR").is_ok()
+        {
+            root.view = View::Settings;
         }
         if root.view == View::Decks
             && env::var("RANKI_UI_DEV_CREATE").is_ok_and(|value| value == "1")

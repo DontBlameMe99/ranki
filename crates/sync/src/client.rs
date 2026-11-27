@@ -19,6 +19,10 @@ use tempfile::Builder;
 const CLOCK_SKEW_SECONDS: i64 = 300;
 const MAX_REDIRECTS: u8 = 3;
 
+/// Checkpoint attempts before an upload gives up on folding the log in.
+const CHECKPOINT_TRIES: u8 = 3;
+const CHECKPOINT_PAUSE: Duration = Duration::from_millis(50);
+
 /// Username and password used only for a single login call.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Credentials {
@@ -241,8 +245,7 @@ impl<T: SyncTransport> SyncClient<T> {
                 "upload was not accepted".to_owned(),
             ));
         }
-        self.state.last_mod = Some(info.mod_time);
-        self.state.last_scm = Some(info.scm);
+        self.adopt_server_stamps(info.mod_time)?;
         self.record_success()?;
         Ok(())
     }
@@ -283,8 +286,7 @@ impl<T: SyncTransport> SyncClient<T> {
         self.backup_collection()?;
         file.persist(&self.collection)
             .map_err(|error| SyncError::Io(error.to_string()))?;
-        self.state.last_mod = Some(info.mod_time);
-        self.state.last_scm = Some(info.scm);
+        self.adopt_server_stamps(info.mod_time)?;
         self.record_success()?;
         Ok(())
     }
@@ -440,11 +442,10 @@ impl<T: SyncTransport> SyncClient<T> {
             None => local.scm == status.schema_mod_time,
         };
         if !schema_matches {
-            return Ok(conflict(
-                "schema changed; choose whether to keep the local or AnkiWeb collection",
-            ));
+            return Ok(conflict("the schema changed since the last sync"));
         }
-        let local_changed = local.mod_time != last;
+        let local_changed =
+            local.mod_time != self.state.last_local_mod.unwrap_or(last);
         let remote_changed = status.mod_time != last;
         if local_changed && remote_changed {
             return Ok(conflict(
@@ -499,6 +500,21 @@ impl<T: SyncTransport> SyncClient<T> {
         } else {
             Ok(())
         }
+    }
+
+    /// Adopts the server's own stamps after a full upload or download.
+    ///
+    /// `AnkiWeb` re-stamps `col.mod` when it stores a collection, so the value
+    /// the client sent is not the value the next `sync/meta` reports. Recording
+    /// the server's stamp, next to the local one it covers, keeps the next
+    /// decision from reading that re-stamp as a second, remote change.
+    fn adopt_server_stamps(&mut self, local_mod: i64) -> Result<()> {
+        let status = self.status()?;
+        self.state.last_mod = Some(status.mod_time);
+        self.state.last_scm = Some(status.schema_mod_time);
+        self.state.last_usn = status.usn;
+        self.state.last_local_mod = Some(local_mod);
+        Ok(())
     }
 
     fn record_success(&mut self) -> Result<()> {
@@ -585,16 +601,7 @@ impl<T: SyncTransport> SyncClient<T> {
             prepare_transaction(&transaction)?;
             transaction.commit()?;
         }
-        let checkpoint: i64 = connection.query_row(
-            "PRAGMA wal_checkpoint(TRUNCATE)",
-            [],
-            |row| row.get(0),
-        )?;
-        if checkpoint < 0 {
-            return Err(SyncError::Database(
-                "wal checkpoint was busy".to_owned(),
-            ));
-        }
+        checkpoint(&connection)?;
         let info = local_info(&connection)?;
         connection
             .close()
@@ -732,6 +739,29 @@ fn prepare_transaction(transaction: &Transaction<'_>) -> Result<()> {
         params![now],
     )?;
     Ok(())
+}
+
+/// Folds the write-ahead log into the collection file before it is read.
+///
+/// A blocked checkpoint leaves committed rows in the log only, and the file
+/// read that follows would then carry an older collection. The window keeps
+/// its own connection open, so a checkpoint can be briefly blocked by a
+/// reader; retry a few times before calling the upload unsafe.
+fn checkpoint(connection: &Connection) -> Result<()> {
+    for attempt in 0..CHECKPOINT_TRIES {
+        let busy: i64 = connection.query_row(
+            "PRAGMA wal_checkpoint(TRUNCATE)",
+            [],
+            |row| row.get(0),
+        )?;
+        if busy == 0 {
+            return Ok(());
+        }
+        if attempt.saturating_add(1) < CHECKPOINT_TRIES {
+            sleep(CHECKPOINT_PAUSE);
+        }
+    }
+    Err(SyncError::Database("wal checkpoint was busy".to_owned()))
 }
 
 fn read_local_info(path: &Path) -> Result<LocalInfo> {

@@ -204,6 +204,7 @@ pub struct SyncState {
     pub host_key: String,
     pub username: Option<String>,
     pub last_mod: Option<i64>,
+    pub last_local_mod: Option<i64>,
     pub last_scm: Option<i64>,
     pub last_usn: i32,
     pub last_media_usn: i32,
@@ -250,7 +251,8 @@ redacted from diagnostics.
    the hkey.
 2. POST `meta`. Follow at most 3 redirects. Persist a new endpoint.
 3. Reject `cont = false` by surfacing `msg`. Reject `|ts - now| > 300`.
-4. If `mod` equals `last_mod` and `scm` equals `last_scm`, return `NoChanges`.
+4. If `mod` equals `last_mod`, `col.mod` equals `last_local_mod`, and `scm`
+   equals `last_scm`, return `NoChanges`.
 5. Decide direction. Download when the local collection is empty and the remote
    one is not. If `last_mod` is known, download when only the remote changed.
    Every other case, including a first sync with data on both sides, returns
@@ -258,11 +260,17 @@ redacted from diagnostics.
    decision.
 6. For upload, checkpoint and close the collection, clear pending local sync
    state, increment `usn`, set `scm`, set `ls`, read the file, check the 300 MiB
-   limit, and POST `upload`.
+   limit, and POST `upload`. A checkpoint that SQLite reports as blocked is an
+   error: the file would otherwise miss rows that are still in the log.
 7. For download, POST `download` to a temp file, verify SQLite integrity and a
    valid `col` row, set `col.ls = col.mod`, close, and rename atomically.
-8. On success, update state from the server modified time and clear the failure
-   counter.
+8. After either full sync, read `meta` once more and keep that `mod` and `scm`
+   as `last_mod` and `last_scm`, with the local `col.mod` as `last_local_mod`.
+   `AnkiWeb` stamps its own `mod` when it stores a collection, so the value the
+   client sent is not the value the next `meta` reports. Comparing the local
+   file against the remote stamp alone would read that re-stamp as a second
+   change and report a conflict on every later sync.
+9. Clear the failure counter and store the last success time.
 
 Error handling maps HTTP 401 and 403 to `Auth`, 400 to `DatabaseCheck`, 409 to
 `Conflict`, 501 to `ClientTooOld`, 5xx to `Server`, 308 to redirect, and
