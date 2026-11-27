@@ -365,6 +365,71 @@ fn browse_loads_cards_past_the_first_page(cx: &mut gpui::TestAppContext) {
         assert_eq!(groups, [("WorldFlags", 201), ("personal", 1)]);
     });
 }
+
+#[gpui::test]
+fn browse_scroll_builds_only_nearby_rows(cx: &mut gpui::TestAppContext) {
+    use crate::browser_view::BrowseEntry;
+
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    cx.update_entity(&root, |root, cx| {
+        root.view = View::Browse;
+        root.browse.rows = (0..2_000)
+            .map(|index| {
+                let mut row = browser_test_row(format!("Question {index}"));
+                row.card.id = index;
+                row.key = SharedString::from(format!("browse-row-{index}"));
+                row.menu_key =
+                    SharedString::from(format!("browse-menu-{index}"));
+                row
+            })
+            .collect();
+        root.browse.entries = (0..root.browse.rows.len())
+            .map(|index| BrowseEntry::Card {
+                row: index,
+                depth: 1,
+            })
+            .collect();
+        root.browse.selected = Some(0);
+        cx.notify();
+    });
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        cx.debug_bounds("browse-row-1999").is_none(),
+        "offscreen cards must not be built"
+    );
+    assert!(cx.debug_bounds("browse-row-0").is_some());
+
+    cx.update_entity(&root, |root, cx| {
+        root.browse_smooth
+            .handle()
+            .set_offset(point(px(0.), px(-103_383.)));
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        cx.debug_bounds("browse-row-1990").is_some(),
+        "a card deep in the table must appear when scrolled down"
+    );
+}
+
 #[gpui::test]
 fn create_deck_modal_closes_only_on_outside_click(
     cx: &mut gpui::TestAppContext,

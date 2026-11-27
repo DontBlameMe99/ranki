@@ -34,8 +34,14 @@ impl Default for SmoothScroll {
 impl SmoothScroll {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_handle(ScrollHandle::new())
+    }
+
+    /// Drives an existing scroll handle, such as one shared with a scrollbar.
+    #[must_use]
+    pub fn with_handle(handle: ScrollHandle) -> Self {
         Self {
-            handle: ScrollHandle::new(),
+            handle,
             offset: 0.0,
             target: 0.0,
             painted: 0.0,
@@ -77,6 +83,17 @@ impl SmoothScroll {
         if self.tick.is_none() {
             self.tick = Some(Instant::now());
         }
+    }
+
+    /// Keeps the offset inside a new scroll range, such as after a smaller
+    /// search result set.
+    pub fn clamp(&mut self, max: f32) {
+        self.offset = self.offset.clamp(0.0, max);
+        self.target = self.target.clamp(0.0, max);
+        self.painted = self.offset;
+        self.tick = None;
+        self.handle
+            .set_offset(point(Pixels::ZERO, px(-self.offset)));
     }
 
     /// Advances the visible offset one frame. With motion disabled the
@@ -159,6 +176,19 @@ mod tests {
         scroll.wheel(-40.0);
         assert_eq!(scroll.offset(), 0.0);
         assert_eq!(scroll.target(), 0.0);
+    }
+
+    #[test]
+    fn shrinking_the_scroll_range_brings_the_offset_back_into_view() {
+        let mut scroll = SmoothScroll::new();
+        scroll.offset = 500.0;
+        scroll.target = 500.0;
+        scroll.painted = 500.0;
+        scroll.tick = Some(std::time::Instant::now());
+        scroll.clamp(120.0);
+        assert_eq!(scroll.offset(), 120.0);
+        assert_eq!(scroll.target(), 120.0);
+        assert!(!scroll.animating());
     }
 
     #[test]
