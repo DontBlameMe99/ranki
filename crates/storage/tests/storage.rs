@@ -59,27 +59,41 @@ fn note(fields: &[&str], tags: &[&str]) -> NewNote {
 }
 
 #[test]
-fn due_query_uses_the_queue_index_for_learning_cards() {
+fn due_queries_use_their_queue_indexes() {
     let (_directory, path) = fixture();
     let store = Collection::open(&path).expect("open");
     let _ = store.due_cards(None, 1, now_secs()).expect("due");
     let conn = read_only(&path);
-    // Learning cards are the one group the due index can order for. Reviews and
-    // interday learning sort on `fnvhash`, and new cards on template ordinal.
-    let plan: Vec<String> = conn
-        .prepare(
-            "EXPLAIN QUERY PLAN SELECT id FROM cards WHERE queue = ?1 AND due <= ?2 \
-             ORDER BY due, id LIMIT ?3",
-        )
-        .expect("prepare")
-        .query_map([1_i64, i64::MAX, 20_i64], |row| row.get(3))
-        .expect("query")
-        .map(|row| row.expect("row"))
-        .collect();
+    let plan = |sql: &str, parameters: &[i64]| -> Vec<String> {
+        conn.prepare(sql)
+            .expect("prepare")
+            .query_map(rusqlite::params_from_iter(parameters), |row| row.get(3))
+            .expect("query")
+            .map(|row| row.expect("row"))
+            .collect()
+    };
+    // Learning cards order by due and time window, new cards by template then
+    // position. Both walk an index instead of sorting the whole queue.
+    let learning = plan(
+        "EXPLAIN QUERY PLAN SELECT id FROM cards WHERE queue = ?1 AND due <= ?2 \
+         ORDER BY due, id LIMIT ?3",
+        &[1, i64::MAX, 20],
+    );
     assert!(
-        plan.iter()
+        learning
+            .iter()
             .any(|step| step.contains("idx_ranki_cards_queue_due")),
-        "{plan:?}"
+        "{learning:?}"
+    );
+    let new = plan(
+        "EXPLAIN QUERY PLAN SELECT id FROM cards WHERE queue = ?1 \
+         ORDER BY ord, due, id LIMIT ?2",
+        &[0, 20],
+    );
+    assert!(
+        new.iter()
+            .any(|step| step.contains("idx_ranki_cards_queue_ord")),
+        "{new:?}"
     );
 }
 #[test]

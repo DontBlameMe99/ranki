@@ -358,7 +358,8 @@ params![stamp.modified, stamp.scm, json],
         }
         self.conn
             .execute_batch(
-                "CREATE INDEX IF NOT EXISTS idx_ranki_cards_queue_due ON cards (queue, due, id)",
+                "CREATE INDEX IF NOT EXISTS idx_ranki_cards_queue_due ON cards (queue, due, id); \
+                 CREATE INDEX IF NOT EXISTS idx_ranki_cards_queue_ord ON cards (queue, ord, due)",
             )
             .map_err(backend)?;
         let _ = self.due_index.set(());
@@ -638,22 +639,28 @@ impl Store for Collection {
         // then interday learning, then new cards. Within reviews and interday
         // learning it orders by due day, then by `fnvhash(id, mod)`. New cards
         // follow template order, then position.
+        // Anki's default deck options gather intraday learning, then reviews,
+        // then interday learning, then new cards. Within reviews and interday
+        // learning it orders by due day, then by `fnvhash(id, mod)`. New cards
+        // follow template order, then position.
         for (queue, due, present, order) in [
-            (1, now_secs, learning_now, "c.due, c.id"),
-            (2, today, review, "c.due, fnvhash(c.id, c.mod)"),
-            (3, today, learning_day, "c.due, fnvhash(c.id, c.mod)"),
-            (0, i64::MAX, true, "c.ord, c.due, c.id"),
+            (1, Some(now_secs), learning_now, "c.due, c.id"),
+            (2, Some(today), review, "c.due, fnvhash(c.id, c.mod)"),
+            (3, Some(today), learning_day, "c.due, fnvhash(c.id, c.mod)"),
+            (0, None, true, "c.ord, c.due, c.id"),
         ] {
             if !present {
                 continue;
             }
+            // A new card's `due` is its position, so it has no time window.
+            let due_clause = if due.is_some() { "AND c.due <= ?" } else { "" };
             let sql = format!(
                 "SELECT c.id, c.nid, c.did, c.ord, c.mod, c.usn, c.type, c.queue, c.due, c.ivl, \
                  c.factor, c.reps, c.lapses, c.left, c.odue, c.odid, c.flags, c.data FROM cards c \
-                 WHERE c.queue = ? AND c.due <= ? {deck_clause} ORDER BY {order} LIMIT ?"
+                 WHERE c.queue = ? {due_clause} {deck_clause} ORDER BY {order} LIMIT ?"
             );
-            let mut parameters =
-                vec![SqlValue::Integer(queue), SqlValue::Integer(due)];
+            let mut parameters = vec![SqlValue::Integer(queue)];
+            parameters.extend(due.map(SqlValue::Integer));
             parameters.extend(filter.params.iter().cloned());
             parameters.push(SqlValue::Integer(limit_value));
             let mut statement = self.conn.prepare(&sql).map_err(backend)?;
