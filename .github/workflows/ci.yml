@@ -34,3 +34,10 @@ jobs:
           .#checks.x86_64-linux.fmt
           .#checks.x86_64-linux.nextest
           --print-build-logs
+
+      - name: Mobile target checks
+        run: |
+          CC_aarch64_linux_android=gcc CRATE_CC_NO_DEFAULTS=1 \
+            nix develop --command cargo check -p ranki-mobile --target aarch64-linux-android
+          CC_aarch64_apple_ios=clang CRATE_CC_NO_DEFAULTS=1 \
+            nix develop --command cargo check -p ranki-mobile --target aarch64-apple-ios

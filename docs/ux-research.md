@@ -2,6 +2,8 @@
 
 Research note for one focused UI worktree. It describes the current state machine, external patterns, and a prioritized change list. It does not propose a rewrite of the scheduler, storage, or transports.
 
+This note is scoped to the desktop review worktree. The separate mobile UI path in `crates/mobile` intentionally adds touch layout, browse, add-note and sync screens; see `docs/mobile.md`.
+
 ## Internal baseline
 
 `crates/ui/src/app.rs` owns all review UI state. `ReviewApp::new` loads decks, models, and per-deck stats, selects deck 0, then `reset_queue` clears the queue and calls `ensure_current`. Each frame `eframe::App::ui` refills the queue, loads the next card if needed, handles all unmodified key events in `handle_key`, and draws a sidebar plus central panel.

@@ -42,6 +42,10 @@
             "clippy"
             "rust-analyzer"
           ];
+          targets = [
+            "aarch64-linux-android"
+            "aarch64-apple-ios"
+          ];
         };
 
         craneLib =
@@ -220,6 +224,7 @@
               libxkbcommon.dev
               vulkan-loader
               fontconfig
+              clang
               cargo-nextest
               cargo-watch
               cargo-audit
