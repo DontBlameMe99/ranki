@@ -701,6 +701,7 @@ impl Root {
             let Some(row) =
                 self.browse.rows.get(&self.browse.hits[*index].card_id)
             else {
+                table = table.child(div().h(px(CARD_HEIGHT)).flex_none());
                 continue;
             };
             let id = row.card.id;
