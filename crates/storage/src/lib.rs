@@ -583,6 +583,25 @@ params![stamp.modified, stamp.scm, json],
         })
     }
 
+    /// Builds the WHERE clause and parameters for a search query.
+    fn search_query(
+        &self,
+        query: &str,
+    ) -> Result<search::SearchQuery, StoreError> {
+        let tokens = search::tokenize(query)?;
+        let decks = if search::needs_decks(&tokens) {
+            self.deck_list()?
+        } else {
+            Vec::new()
+        };
+        let models = if search::needs_models(&tokens) {
+            self.model_list()?
+        } else {
+            Vec::new()
+        };
+        search::build(&tokens, &decks, &models)
+    }
+
     fn ensure_due_index(&self) -> Result<(), StoreError> {
         if self.due_index.get().is_some() {
             return Ok(());
@@ -803,18 +822,7 @@ impl Store for Collection {
     }
 
     fn find_cards(&self, query: &str) -> Result<Vec<Id>, StoreError> {
-        let tokens = search::tokenize(query)?;
-        let decks = if search::needs_decks(&tokens) {
-            self.deck_list()?
-        } else {
-            Vec::new()
-        };
-        let models = if search::needs_models(&tokens) {
-            self.model_list()?
-        } else {
-            Vec::new()
-        };
-        let search = search::build(&tokens, &decks, &models)?;
+        let search = self.search_query(query)?;
         let sql = format!(
             "SELECT c.id FROM cards c JOIN notes n ON n.id = c.nid WHERE {} ORDER BY c.id",
             search.clause
@@ -830,6 +838,35 @@ impl Store for Collection {
             ids.push(row.map_err(backend)?);
         }
         Ok(ids)
+    }
+
+    fn browse_cards(
+        &self,
+        query: &str,
+    ) -> Result<Vec<ranki_model::BrowseCard>, StoreError> {
+        let search = self.search_query(query)?;
+        let sql = format!(
+            "SELECT c.id, c.did, n.sfld FROM cards c JOIN notes n ON n.id = c.nid \
+             WHERE {} ORDER BY c.id",
+            search.clause
+        );
+        let mut statement = self.conn.prepare(&sql).map_err(backend)?;
+        let rows = statement
+            .query_map(params_from_iter(search.params), |row| {
+                Ok(ranki_model::BrowseCard {
+                    card_id: row.get(0)?,
+                    deck_id: row.get(1)?,
+                    // `sfld` has integer affinity, so a numeric-looking sort
+                    // field comes back as a number, not text.
+                    sort_field: records::text(row.get::<_, SqlValue>(2)?),
+                })
+            })
+            .map_err(backend)?;
+        let mut cards = Vec::new();
+        for row in rows {
+            cards.push(row.map_err(backend)?);
+        }
+        Ok(cards)
     }
 
     #[expect(

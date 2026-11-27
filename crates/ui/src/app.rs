@@ -1129,10 +1129,10 @@ impl Root {
             deck_search,
             browse: BrowseState {
                 search: browse_search,
-                rows: Vec::new(),
+                hits: Vec::new(),
                 entries: Vec::new(),
+                rows: HashMap::new(),
                 expanded: HashSet::new(),
-                total: 0,
                 selected: None,
                 error: None,
                 generation: 0,
@@ -1357,7 +1357,7 @@ impl Root {
                 root.refresh_browse(cx);
                 if expand != "0" {
                     root.browse.expanded =
-                        browse_expand_paths(&root.browse.rows);
+                        browse_expand_paths(&root.browse.hits);
                     root.rebuild_browse_entries();
                 }
             }
@@ -1528,10 +1528,13 @@ impl Root {
             root.view = View::Browse;
             root.refresh_browse(cx);
             let viewport = window.viewport_size();
-            root.card_menu = root.browse.rows.first().map(|row| CardMenu {
-                id: row.card.id,
-                anchor: point(viewport.width - px(408.), px(250.)),
-            });
+            if let Some(id) = root.browse.hits.first().map(|hit| hit.card_id) {
+                let _ = root.ensure_browse_row(id);
+                root.card_menu = Some(CardMenu {
+                    id,
+                    anchor: point(viewport.width - px(408.), px(250.)),
+                });
+            }
         }
         if let Ok(index) = env::var("RANKI_UI_DEV_SELECT_ALL")
             && let Ok(index) = index.parse::<usize>()
@@ -1544,8 +1547,8 @@ impl Root {
         {
             root.view = View::Browse;
             root.refresh_browse(cx);
-            if let Some(row) = root.browse.rows.first().cloned() {
-                root.start_card_edit(row.card.id, window, cx);
+            if let Some(id) = root.browse.hits.first().map(|hit| hit.card_id) {
+                root.start_card_edit(id, window, cx);
             }
         }
         if env::var("RANKI_UI_DEV_BROWSE_REMOVE")
@@ -1553,11 +1556,13 @@ impl Root {
         {
             root.view = View::Browse;
             root.refresh_browse(cx);
-            if let Some(row) = root.browse.rows.first() {
-                root.confirmation = Some(Confirmation::RemoveCard {
-                    id: row.card.id,
-                    front: crate::browser_view::preview_line(&row.front),
-                });
+            if let Some(id) = root.browse.hits.first().map(|hit| hit.card_id) {
+                let front = root
+                    .ensure_browse_row(id)
+                    .map(|row| crate::browser_view::preview_line(&row.front))
+                    .unwrap_or_default();
+                root.confirmation =
+                    Some(Confirmation::RemoveCard { id, front });
                 window.focus(&root.dialog_focus);
             }
         }
@@ -3350,19 +3355,34 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(row) = self
-            .browse
-            .rows
-            .iter()
-            .find(|row| row.card.id == card_id)
-            .cloned()
-        else {
-            return;
+        let card = match self.store.card(card_id) {
+            Ok(Some(card)) => card,
+            Ok(None) => return,
+            Err(error) => {
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not load card: {error}"),
+                    cx,
+                );
+                return;
+            }
+        };
+        let note = match self.store.note(card.note_id) {
+            Ok(Some(note)) => note,
+            Ok(None) => return,
+            Err(error) => {
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not load note: {error}"),
+                    cx,
+                );
+                return;
+            }
         };
         let Some(model_index) = self
             .models
             .iter()
-            .position(|model| model.id == row.note.model_id)
+            .position(|model| model.id == note.model_id)
         else {
             self.show_toast(
                 ToastKind::Error,
@@ -3382,20 +3402,19 @@ impl Root {
         self.discard_card_edit(cx);
         self.card_edit = Some(CardEdit {
             card_id,
-            note_id: row.note.id,
+            note_id: note.id,
         });
         self.add.model_index = model_index;
-        self.add.deck_id = Some(row.card.deck_id);
+        self.add.deck_id = Some(card.deck_id);
         self.add.deck_picker = false;
         self.add.color_picker = None;
         self.add.errors.clear();
-        self.add.tag_chips.clone_from(&row.note.tags);
+        self.add.tag_chips.clone_from(&note.tags);
         self.add
             .tags
             .update(cx, |field, cx| field.seed(String::new(), cx));
         self.reset_fields(cx);
-        for (field, value) in self.add.fields.iter().zip(row.note.fields.iter())
-        {
+        for (field, value) in self.add.fields.iter().zip(note.fields.iter()) {
             field.update(cx, |field, cx| field.seed(value.clone(), cx));
         }
         self.previous_view = View::Browse;

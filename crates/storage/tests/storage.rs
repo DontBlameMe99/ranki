@@ -648,6 +648,20 @@ fn stats_count_only_cards_due_at_the_given_time() {
 }
 
 #[test]
+fn browse_cards_read_the_sort_field_of_numeric_questions() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    // `notes.sfld` has integer affinity, so this stores an integer.
+    let ids = store
+        .add_note(&note(&["1942", "answer"], &[]))
+        .expect("add");
+    let cards = store.browse_cards("").expect("browse");
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].card_id, ids[0]);
+    assert_eq!(cards[0].sort_field, "1942");
+}
+
+#[test]
 fn find_cards_matches_text_wildcards_and_state() {
     let (_directory, path) = fixture();
     let mut store = Collection::open(&path).expect("open");

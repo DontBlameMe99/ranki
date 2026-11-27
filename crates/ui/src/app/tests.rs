@@ -65,6 +65,13 @@ impl ranki_model::Store for ModalStore {
         Ok(Vec::new())
     }
 
+    fn browse_cards(
+        &self,
+        _: &str,
+    ) -> Result<Vec<ranki_model::BrowseCard>, StoreError> {
+        Ok(Vec::new())
+    }
+
     fn due_cards(
         &self,
         _: Option<Id>,
@@ -113,6 +120,57 @@ struct BrowseStore {
     cards: HashMap<Id, Card>,
     notes: HashMap<Id, Note>,
     ids: Vec<Id>,
+    card_reads: Arc<AtomicUsize>,
+    fail_reads: bool,
+}
+
+impl BrowseStore {
+    /// Adds one card with its note and returns its id.
+    fn push_card(&mut self, deck_id: Id) -> Id {
+        let index = self.ids.len();
+        let id = i64::try_from(index + 1).expect("id");
+        self.ids.push(id);
+        let _ = self.cards.insert(
+            id,
+            Card {
+                id,
+                note_id: id,
+                deck_id,
+                ordinal: 0,
+                modified: 0,
+                usn: 0,
+                card_type: CardType::New,
+                queue: CardQueue::New,
+                due: 0,
+                interval: 0,
+                factor: 0,
+                reps: 0,
+                lapses: 0,
+                left: 0,
+                original_due: 0,
+                original_deck_id: 0,
+                flags: 0,
+                data: String::new(),
+            },
+        );
+        let _ = self.notes.insert(
+            id,
+            Note {
+                id,
+                guid: String::new(),
+                model_id: 0,
+                modified: 0,
+                usn: 0,
+                tags: Vec::new(),
+                fields: vec![format!("Question {index}"), "Answer".into()],
+                sort_field: String::new(),
+                checksum: 0,
+                flags: 0,
+                data: String::new(),
+            },
+        );
+        id
+    }
 }
 
 impl ranki_model::Store for BrowseStore {
@@ -129,6 +187,10 @@ impl ranki_model::Store for BrowseStore {
     }
 
     fn card(&self, id: Id) -> Result<Option<Card>, StoreError> {
+        let _ = self.card_reads.fetch_add(1, Ordering::Relaxed);
+        if self.fail_reads {
+            return Err(StoreError::Backend(String::from("disk is on fire")));
+        }
         Ok(self.cards.get(&id).cloned())
     }
 
@@ -138,6 +200,22 @@ impl ranki_model::Store for BrowseStore {
 
     fn create_deck(&mut self, name: &str) -> Result<Deck, StoreError> {
         ModalStore.create_deck(name)
+    }
+
+    fn browse_cards(
+        &self,
+        _: &str,
+    ) -> Result<Vec<ranki_model::BrowseCard>, StoreError> {
+        Ok(self
+            .ids
+            .iter()
+            .filter_map(|id| self.cards.get(id))
+            .map(|card| ranki_model::BrowseCard {
+                card_id: card.id,
+                deck_id: card.deck_id,
+                sort_field: String::new(),
+            })
+            .collect())
     }
 
     fn due_cards(
@@ -240,7 +318,9 @@ fn browse_panels_fill_the_window_for_any_card(cx: &mut gpui::TestAppContext) {
     let mut panel_heights = |front: &str| {
         cx.update_entity(&root, |root, cx| {
             root.view = View::Browse;
-            root.browse.rows = vec![browser_test_row(front.to_owned())];
+            root.browse.rows = [(1, browser_test_row(front.to_owned()))]
+                .into_iter()
+                .collect();
             root.browse.selected = Some(1);
             cx.notify();
         });
@@ -291,50 +371,12 @@ fn browse_loads_cards_past_the_first_page(cx: &mut gpui::TestAppContext) {
         cards: HashMap::new(),
         notes: HashMap::new(),
         ids: Vec::new(),
+        card_reads: Arc::new(AtomicUsize::new(0)),
+        fail_reads: false,
     };
     for (deck_id, count) in [(10, 201), (11, 1)] {
-        for index in 0..count {
-            let id = i64::try_from(store.ids.len() + 1).expect("id");
-            store.ids.push(id);
-            let _ = store.cards.insert(
-                id,
-                Card {
-                    id,
-                    note_id: id,
-                    deck_id,
-                    ordinal: 0,
-                    modified: 0,
-                    usn: 0,
-                    card_type: CardType::New,
-                    queue: CardQueue::New,
-                    due: 0,
-                    interval: 0,
-                    factor: 0,
-                    reps: 0,
-                    lapses: 0,
-                    left: 0,
-                    original_due: 0,
-                    original_deck_id: 0,
-                    flags: 0,
-                    data: String::new(),
-                },
-            );
-            let _ = store.notes.insert(
-                id,
-                Note {
-                    id,
-                    guid: String::new(),
-                    model_id: 0,
-                    modified: 0,
-                    usn: 0,
-                    tags: Vec::new(),
-                    fields: vec![format!("Question {index}"), "Answer".into()],
-                    sort_field: String::new(),
-                    checksum: 0,
-                    flags: 0,
-                    data: String::new(),
-                },
-            );
+        for _ in 0..count {
+            let _ = store.push_card(deck_id);
         }
     }
     let (root, cx) = cx.add_window_view(|window, cx| {
@@ -350,7 +392,8 @@ fn browse_loads_cards_past_the_first_page(cx: &mut gpui::TestAppContext) {
     });
     cx.update_entity(&root, super::Root::refresh_browse);
     cx.update_entity(&root, |root, _| {
-        assert_eq!(root.browse.rows.len(), 202);
+        assert_eq!(root.browse.hits.len(), 202);
+        assert!(root.browse.rows.is_empty());
         let groups = root
             .browse
             .entries
@@ -367,13 +410,28 @@ fn browse_loads_cards_past_the_first_page(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn browse_scroll_builds_only_nearby_rows(cx: &mut gpui::TestAppContext) {
-    use crate::browser_view::BrowseEntry;
-
+fn browse_reads_only_the_cards_it_shows(cx: &mut gpui::TestAppContext) {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut store = BrowseStore {
+        decks: vec![Deck {
+            id: 10,
+            name: String::from("Default"),
+            description: String::new(),
+        }],
+        models: ranki_model::stock_models(),
+        cards: HashMap::new(),
+        notes: HashMap::new(),
+        ids: Vec::new(),
+        card_reads: Arc::clone(&reads),
+        fail_reads: false,
+    };
+    for _ in 0..2_000 {
+        let _ = store.push_card(10);
+    }
     let (root, cx) = cx.add_window_view(|window, cx| {
         super::Root::new(
             super::Launch {
-                store: Box::new(ModalStore),
+                store: Box::new(store),
                 options: Options::default(),
                 save_settings: Arc::new(|_| Ok(())),
             },
@@ -382,25 +440,16 @@ fn browse_scroll_builds_only_nearby_rows(cx: &mut gpui::TestAppContext) {
         )
     });
     cx.simulate_resize(size(px(1280.), px(800.)));
+    assert_eq!(
+        reads.load(Ordering::Relaxed),
+        0,
+        "opening browse must not read cards"
+    );
+
     cx.update_entity(&root, |root, cx| {
         root.view = View::Browse;
-        root.browse.rows = (0..2_000)
-            .map(|index| {
-                let mut row = browser_test_row(format!("Question {index}"));
-                row.card.id = index;
-                row.key = SharedString::from(format!("browse-row-{index}"));
-                row.menu_key =
-                    SharedString::from(format!("browse-menu-{index}"));
-                row
-            })
-            .collect();
-        root.browse.entries = (0..root.browse.rows.len())
-            .map(|index| BrowseEntry::Card {
-                row: index,
-                depth: 1,
-            })
-            .collect();
-        root.browse.selected = Some(0);
+        let _ = root.browse.expanded.insert(String::from("Default"));
+        root.rebuild_browse_entries();
         cx.notify();
     });
     cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
@@ -409,23 +458,33 @@ fn browse_scroll_builds_only_nearby_rows(cx: &mut gpui::TestAppContext) {
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
+    let visible = reads.load(Ordering::Relaxed);
     assert!(
-        cx.debug_bounds("browse-row-1999").is_none(),
+        visible > 0 && visible < 64,
+        "only the visible lines are read: {visible}"
+    );
+    assert!(
+        cx.debug_bounds("browse-row-2000").is_none(),
         "offscreen cards must not be built"
     );
-    assert!(cx.debug_bounds("browse-row-0").is_some());
+    assert!(cx.debug_bounds("browse-row-1").is_some());
 
     cx.update_entity(&root, |root, cx| {
         root.browse_smooth
             .handle()
-            .set_offset(point(px(0.), px(-103_383.)));
+            .set_offset(point(px(0.), px(-78_100.)));
         cx.notify();
     });
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
+    let scrolled = reads.load(Ordering::Relaxed);
     assert!(
-        cx.debug_bounds("browse-row-1990").is_some(),
+        scrolled > visible && scrolled < visible + 128,
+        "scrolling reads the lines it reveals: {scrolled}"
+    );
+    assert!(
+        cx.debug_bounds("browse-row-1500").is_some(),
         "a card deep in the table must appear when scrolled down"
     );
 }
@@ -4142,10 +4201,24 @@ fn editing_a_browse_card_saves_the_add_card_view(
     cx: &mut gpui::TestAppContext,
 ) {
     let (saver, latest) = recording_saver();
+    let mut store = BrowseStore {
+        decks: vec![Deck {
+            id: 10,
+            name: String::from("Default"),
+            description: String::new(),
+        }],
+        models: ranki_model::stock_models(),
+        cards: HashMap::new(),
+        notes: HashMap::new(),
+        ids: Vec::new(),
+        card_reads: Arc::new(AtomicUsize::new(0)),
+        fail_reads: false,
+    };
+    let _ = store.push_card(10);
     let (root, cx) = cx.add_window_view(|window, cx| {
         super::Root::new(
             super::Launch {
-                store: Box::new(ModalStore),
+                store: Box::new(store),
                 options: Options::default(),
                 save_settings: saver,
             },
@@ -4155,8 +4228,6 @@ fn editing_a_browse_card_saves_the_add_card_view(
     });
     cx.update(|window, cx| {
         root.update(cx, |root, cx| {
-            root.browse.rows =
-                vec![browser_test_row(String::from("Question?"))];
             root.start_card_edit(1, window, cx);
         });
     });
@@ -4168,6 +4239,50 @@ fn editing_a_browse_card_saves_the_add_card_view(
         .expect("recorded settings");
     assert_eq!(recorded.ui_state.view, ranki_model::UiView::AddCard);
     assert_eq!(recorded.ui_state.previous_view, ranki_model::UiView::Browse);
+}
+
+#[gpui::test]
+fn editing_a_card_reports_a_store_read_failure(cx: &mut gpui::TestAppContext) {
+    let mut store = BrowseStore {
+        decks: vec![Deck {
+            id: 10,
+            name: String::from("Default"),
+            description: String::new(),
+        }],
+        models: ranki_model::stock_models(),
+        cards: HashMap::new(),
+        notes: HashMap::new(),
+        ids: Vec::new(),
+        card_reads: Arc::new(AtomicUsize::new(0)),
+        fail_reads: true,
+    };
+    let _ = store.push_card(10);
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(store),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| {
+            root.start_card_edit(1, window, cx);
+        });
+    });
+
+    let toast = cx
+        .update(|_, app| root.read(app).toast.clone())
+        .expect("error toast");
+    assert!(matches!(toast.kind, super::ToastKind::Error));
+    assert_eq!(
+        toast.text,
+        "Could not load card: storage failure: disk is on fire"
+    );
+    assert!(cx.update(|_, app| root.read(app).card_edit.is_none()));
 }
 
 #[gpui::test]

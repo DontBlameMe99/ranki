@@ -1031,7 +1031,7 @@ fn infer_cloze_tags(model: &mut NoteModel) {
     }
 }
 
-fn text(raw: Value) -> String {
+pub(crate) fn text(raw: Value) -> String {
     match raw {
         Value::Text(value) => value,
         Value::Blob(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
