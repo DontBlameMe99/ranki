@@ -15,6 +15,7 @@ use rusqlite::MAIN_DB;
 use rusqlite::backup::Progress;
 use serde::Serialize;
 use serde_json::Value;
+use tempfile::Builder;
 use tempfile::NamedTempFile;
 use zip::CompressionMethod;
 use zip::ZipArchive;
@@ -41,7 +42,10 @@ pub struct ApkgPackage {
     pub media: Vec<MediaEntry>,
 }
 
-pub fn read_apkg(package: &Path) -> Result<ApkgPackage, FormatError> {
+pub fn read_apkg(
+    package: &Path,
+    scratch_dir: &Path,
+) -> Result<ApkgPackage, FormatError> {
     let file = File::open(package).map_err(io_error(format!(
         "cannot open package {}",
         package.display()
@@ -61,7 +65,7 @@ pub fn read_apkg(package: &Path) -> Result<ApkgPackage, FormatError> {
         maybe_decompress(read_bytes(&mut archive, collection_name)?)?;
     let mapping = read_media_mapping(&mut archive, &names)?;
     let media = read_media_entries(&mut archive, &mapping)?;
-    let collection = write_temp_collection(&collection_bytes)?;
+    let collection = write_temp_collection(&collection_bytes, scratch_dir)?;
 
     Ok(ApkgPackage { collection, media })
 }
@@ -404,8 +408,14 @@ pub fn maybe_decompress(bytes: Vec<u8>) -> Result<Vec<u8>, FormatError> {
     }
 }
 
-fn write_temp_collection(bytes: &[u8]) -> Result<NamedTempFile, FormatError> {
-    let mut file = NamedTempFile::new()
+fn write_temp_collection(
+    bytes: &[u8],
+    scratch_dir: &Path,
+) -> Result<NamedTempFile, FormatError> {
+    let mut file = Builder::new()
+        .prefix(".ranki-import-")
+        .suffix(".anki2")
+        .tempfile_in(scratch_dir)
         .map_err(io_error("cannot create temporary collection"))?;
     file.write_all(bytes)
         .map_err(io_error("cannot write temporary collection"))?;
@@ -425,7 +435,14 @@ pub fn snapshot_collection(collection: &Path) -> Result<Vec<u8>, FormatError> {
         "cannot open collection {}",
         collection.display()
     )))?;
-    let snapshot = NamedTempFile::new()
+    let parent = collection
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let snapshot = Builder::new()
+        .prefix(".ranki-export-")
+        .suffix(".anki2")
+        .tempfile_in(parent)
         .map_err(io_error("cannot create collection snapshot"))?;
     source
         .backup(MAIN_DB, snapshot.path(), None::<fn(Progress)>)

@@ -573,7 +573,7 @@ impl Root {
                     }))
                     .children(card_view::media_column(
                         &question_media,
-                        &self.options.media_dir,
+                        &self.options.paths.media_dir,
                         colors,
                         120.,
                     ))
@@ -581,7 +581,7 @@ impl Root {
                     .child(preview_answer)
                     .children(card_view::media_column(
                         &answer_media,
-                        &self.options.media_dir,
+                        &self.options.paths.media_dir,
                         colors,
                         120.,
                     ))
@@ -759,7 +759,6 @@ impl Root {
         let image = self.add.occlusion.image.clone();
         let masks = self.add.occlusion.masks.clone();
         let dragging = self.add.occlusion.drag_rect();
-        let media_dir = self.options.media_dir.clone();
 
         let image_button = {
             let has_image = image.is_some();
@@ -825,8 +824,10 @@ impl Root {
                 colors.surface1
             })
             .bg(colors.mantle);
-        if let Some(name) = &image {
-            let mut fitted_image = img(media_dir.join(name))
+        if let Some(path) = image.as_deref().and_then(|name| {
+            card_view::media_path(&self.options.paths.media_dir, name)
+        }) {
+            let mut fitted_image = img(path)
                 .h(px(OCCLUSION_CANVAS_HEIGHT))
                 .object_fit(gpui::ObjectFit::Contain);
             if let Some((width, height)) = self.add.occlusion.image_size {

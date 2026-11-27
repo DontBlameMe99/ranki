@@ -58,7 +58,7 @@ impl Root {
             (!self.review.answer_media.is_empty()).then(|| {
                 card_view::media_column(
                     &self.review.answer_media,
-                    &self.options.media_dir,
+                    &self.options.paths.media_dir,
                     colors,
                     image_height,
                 )
@@ -484,7 +484,7 @@ impl Root {
                         .items_center()
                         .gap(px(SPACE_GROUP))
                         .child(card_view::occlusion_media(
-                            &self.options.media_dir,
+                            &self.options.paths.media_dir,
                             &image.name,
                             &card.masks,
                             colors,
@@ -500,7 +500,7 @@ impl Root {
                         .collect::<Vec<_>>();
                     if let Some(rest) = card_view::media_column(
                         &rest,
-                        &self.options.media_dir,
+                        &self.options.paths.media_dir,
                         colors,
                         image_height,
                     ) {
@@ -509,7 +509,7 @@ impl Root {
                     stage = stage.child(media);
                 } else if let Some(media) = card_view::media_column(
                     &card.media,
-                    &self.options.media_dir,
+                    &self.options.paths.media_dir,
                     colors,
                     image_height,
                 ) {

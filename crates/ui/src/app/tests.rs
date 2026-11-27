@@ -788,7 +788,11 @@ fn occlusion_canvas_moves_resizes_and_removes_masks(
         .save(media.join("diagram.png"))
         .expect("test image");
     let options = Options {
-        media_dir: media,
+        paths: ranki_model::DataPaths {
+            collection: dir.path().join("collection.anki2"),
+            media_dir: media,
+            sync_state: dir.path().join("ranki-sync.json"),
+        },
         ..Options::default()
     };
     let (root, cx) = cx.add_window_view(|window, cx| {
@@ -1144,7 +1148,7 @@ fn repeated_hard_answers_leave_progress_unchanged(
         })
         .expect("note");
     let options = Options {
-        collection: path,
+        paths: ranki_model::DataPaths::new(dir.path()),
         ..Options::default()
     };
     let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
@@ -1193,7 +1197,7 @@ fn finishing_a_session_starts_one_quiet_sync(cx: &mut gpui::TestAppContext) {
             .expect("note");
     }
     let options = Options {
-        collection,
+        paths: ranki_model::DataPaths::new(dir.path()),
         sync: ranki_model::SyncSettings {
             enabled: true,
             ..Default::default()
@@ -1213,7 +1217,7 @@ fn finishing_a_session_starts_one_quiet_sync(cx: &mut gpui::TestAppContext) {
             cx,
         );
         root.sync.signed_in = true;
-        root.sync_run = Arc::new(move |_, _, _, _| {
+        root.sync_run = Arc::new(move |_, _, _, _, _| {
             counted.fetch_add(1, Ordering::Relaxed);
             Ok(ranki_sync::SyncOutcome::Uploaded)
         });
@@ -2284,7 +2288,7 @@ fn saving_an_occlusion_note_clears_the_chosen_image(
     let store =
         Box::new(ranki_storage::Collection::create(&path).expect("collection"));
     let options = Options {
-        collection: path,
+        paths: ranki_model::DataPaths::new(dir.path()),
         ..Options::default()
     };
     let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
@@ -2569,7 +2573,7 @@ fn clicking_create_button_saves_the_deck(cx: &mut gpui::TestAppContext) {
     let store =
         Box::new(ranki_storage::Collection::create(&path).expect("collection"));
     let options = Options {
-        collection: path,
+        paths: ranki_model::DataPaths::new(dir.path()),
         ..Options::default()
     };
     let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
@@ -2647,7 +2651,7 @@ fn clicking_a_deck_row_studies_that_deck(cx: &mut gpui::TestAppContext) {
         .expect("note");
     assert_eq!(cards.len(), 1);
     let options = Options {
-        collection: path,
+        paths: ranki_model::DataPaths::new(dir.path()),
         ..Options::default()
     };
     let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
@@ -2707,7 +2711,7 @@ fn space_reveals_after_clicking_a_deck_row(cx: &mut gpui::TestAppContext) {
         })
         .expect("note");
     let options = Options {
-        collection: path,
+        paths: ranki_model::DataPaths::new(dir.path()),
         ..Options::default()
     };
     let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
@@ -2978,7 +2982,7 @@ fn deck_row_controls_do_not_start_a_session(cx: &mut gpui::TestAppContext) {
         })
         .expect("note");
     let options = Options {
-        collection: path,
+        paths: ranki_model::DataPaths::new(dir.path()),
         ..Options::default()
     };
     let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
@@ -3041,7 +3045,7 @@ fn right_clicking_a_deck_opens_its_actions_menu(cx: &mut gpui::TestAppContext) {
         .expect("note");
     assert_eq!(cards.len(), 1);
     let options = Options {
-        collection: path,
+        paths: ranki_model::DataPaths::new(dir.path()),
         ..Options::default()
     };
     let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
@@ -3106,7 +3110,7 @@ fn exporting_a_deck_asks_for_a_save_path(cx: &mut gpui::TestAppContext) {
         })
         .expect("note");
     let options = Options {
-        collection: path,
+        paths: ranki_model::DataPaths::new(dir.path()),
         ..Options::default()
     };
     let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
@@ -3175,7 +3179,7 @@ fn escape_closes_a_deck_actions_menu(cx: &mut gpui::TestAppContext) {
         })
         .expect("note");
     let options = Options {
-        collection: path,
+        paths: ranki_model::DataPaths::new(dir.path()),
         ..Options::default()
     };
     let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
@@ -3230,7 +3234,7 @@ fn clicking_the_rename_field_keeps_the_decks_view(
         })
         .expect("note");
     let options = Options {
-        collection: path,
+        paths: ranki_model::DataPaths::new(dir.path()),
         ..Options::default()
     };
     let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
@@ -3278,7 +3282,7 @@ fn popup_actions_do_not_study_the_deck_below(cx: &mut gpui::TestAppContext) {
         let _ = store.create_deck(name).expect("deck");
     }
     let options = Options {
-        collection: path,
+        paths: ranki_model::DataPaths::new(dir.path()),
         ..Options::default()
     };
     let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));

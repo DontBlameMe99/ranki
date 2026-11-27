@@ -190,12 +190,19 @@ impl AssetSource for Assets {
             let svg = icon(body);
             return Ok(Some(Cow::Owned(svg.into_bytes())));
         }
-        let file = self.media_dir.join(path);
+        let Some(file) = crate::card_view::media_path(&self.media_dir, path)
+        else {
+            return Ok(None);
+        };
         Ok(fs::read(file).ok().map(Cow::Owned))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        let Ok(entries) = fs::read_dir(self.media_dir.join(path)) else {
+        let Some(dir) = crate::card_view::media_path(&self.media_dir, path)
+        else {
+            return Ok(Vec::new());
+        };
+        let Ok(entries) = fs::read_dir(dir) else {
             return Ok(Vec::new());
         };
         Ok(entries
@@ -234,6 +241,27 @@ mod tests {
             );
         }
         assert!(assets.load("missing-file").unwrap().is_none());
+    }
+
+    #[test]
+    fn media_paths_cannot_escape_the_media_directory() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let media = dir.path().join("media");
+        std::fs::create_dir_all(&media).expect("media directory");
+        let secret = dir.path().join("secret");
+        std::fs::write(&secret, b"secret").expect("secret file");
+        let assets = Assets { media_dir: media };
+
+        assert!(assets.load("../secret").unwrap().is_none());
+        assert!(assets.load(&secret.to_string_lossy()).unwrap().is_none());
+        assert_eq!(
+            assets.list("..").unwrap(),
+            Vec::<gpui::SharedString>::new()
+        );
+        assert_eq!(
+            assets.list(&secret.to_string_lossy()).unwrap(),
+            Vec::<gpui::SharedString>::new()
+        );
     }
 
     #[test]

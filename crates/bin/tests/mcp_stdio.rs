@@ -9,10 +9,10 @@
 )]
 #![expect(clippy::panic, reason = "test assertions")]
 #![expect(clippy::unwrap_used, reason = "test assertions")]
+use std::fs;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
-use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
 use std::process::ChildStdin;
@@ -44,10 +44,10 @@ impl Drop for McpClient {
 }
 
 impl McpClient {
-    fn start(collection: &Path) -> Self {
+    fn start(app: &Isolated) -> Self {
         let mut process = Command::new(env!("CARGO_BIN_EXE_ranki"))
-            .arg("--collection")
-            .arg(collection)
+            .env("XDG_DATA_HOME", &app.data)
+            .env("XDG_CONFIG_HOME", &app.config)
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -153,11 +153,26 @@ impl McpClient {
     }
 }
 
-fn collection(dir: &TempDir, name: &str) -> PathBuf {
-    let path = dir.path().join(name);
+struct Isolated {
+    data: PathBuf,
+    config: PathBuf,
+}
+
+fn isolated(dir: &TempDir, name: &str) -> Isolated {
+    let root = dir.path().join(name);
+    let data = root.join("xdg/data");
+    let config = root.join("xdg/config");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(config.join("ranki")).unwrap();
+    Isolated { data, config }
+}
+
+fn collection(dir: &TempDir, name: &str) -> (Isolated, PathBuf) {
+    let app = isolated(dir, name);
+    let path = app.data.join("ranki/collection.anki2");
     let output = Command::new(env!("CARGO_BIN_EXE_ranki"))
-        .arg("--collection")
-        .arg(&path)
+        .env("XDG_DATA_HOME", &app.data)
+        .env("XDG_CONFIG_HOME", &app.config)
         .arg("check")
         .output()
         .unwrap();
@@ -166,13 +181,14 @@ fn collection(dir: &TempDir, name: &str) -> PathBuf {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    path
+    assert!(path.is_file());
+    (app, path)
 }
 
 fn fixture() -> (TempDir, McpClient) {
     let dir = tempfile::tempdir().unwrap();
-    let path = collection(&dir, "collection.anki2");
-    let client = McpClient::start(&path);
+    let (app, _collection) = collection(&dir, "collection");
+    let client = McpClient::start(&app);
     (dir, client)
 }
 
@@ -306,7 +322,7 @@ fn stdio_rejects_unconfirmed_and_invalid_calls() {
 #[test]
 fn stdio_exports_and_imports_within_the_collection_directory() {
     let dir = tempfile::tempdir().unwrap();
-    let source = collection(&dir, "source.anki2");
+    let (source, source_collection) = collection(&dir, "source");
     let mut from = McpClient::start(&source);
     add_card(&mut from);
 
@@ -316,7 +332,13 @@ fn stdio_exports_and_imports_within_the_collection_directory() {
     );
     assert_eq!(exported["path"], json!("backup.apkg"));
     assert!(exported["bytes"].as_u64().unwrap() > 0);
-    assert!(dir.path().join("backup.apkg").is_file());
+    assert!(
+        source_collection
+            .parent()
+            .unwrap()
+            .join("backup.apkg")
+            .is_file()
+    );
     let duplicate = from.tool_failure(
         "export_apkg",
         json!({"path": "backup.apkg", "confirm": true}),
@@ -324,7 +346,11 @@ fn stdio_exports_and_imports_within_the_collection_directory() {
     assert!(duplicate.contains("already exists"), "{duplicate}");
     drop(from);
 
-    let destination = collection(&dir, "destination.anki2");
+    let (destination, destination_collection) = collection(&dir, "destination");
+    let package = source_collection.parent().unwrap().join("backup.apkg");
+    let imported_package =
+        destination_collection.parent().unwrap().join("backup.apkg");
+    fs::copy(&package, &imported_package).unwrap();
     let mut to = McpClient::start(&destination);
     let imported = to.tool(
         "import_apkg",

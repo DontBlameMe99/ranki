@@ -12,9 +12,9 @@
 //! [`MockTransport`] provides scripted responses and failures for tests.
 //!
 //! Requests and responses are raw zstd-framed bytes. The client owns framing,
-//! decompression, status checks, and payload limits. The state file under
-//! `collection`'s directory stores only the host key and sync metadata, with
-//! mode `0600`. Credentials are passed to [`SyncClient::login`] or
+//! decompression, status checks, and payload limits. The caller supplies a state
+//! file inside Ranki's app data directory. It stores only the host key and sync
+//! metadata, with mode `0600` on Unix. Credentials are passed to [`SyncClient::login`] or
 //! [`SyncClient::sync`] and are never written to disk or diagnostics.
 //!
 //! Wire details follow `docs/ankiweb-sync-research.md`. Delta sync and merge
@@ -33,11 +33,11 @@ mod wire;
 pub use client::{Credentials, RemoteStatus, SyncClient, SyncOutcome};
 pub use error::{Result, SyncError};
 pub use mock::{MockResponse, MockTransport, RecordedRequest};
-pub use state::{SyncState, clear_host_key, state_path};
+pub use state::{SyncState, clear_host_key, set_host_key};
 pub use transport::{
-    DEFAULT_CLIENT_VERSION, DEFAULT_ENDPOINT, HttpTransport,
-    META_CLIENT_VERSION, ORIGINAL_SIZE_HEADER, RetryPolicy, SyncMethod,
-    SyncResponse, SyncTransport, TransportConfig,
+    DEFAULT_ENDPOINT, HttpTransport, ORIGINAL_SIZE_HEADER, RetryPolicy,
+    SYNC_PLATFORM, SyncMethod, SyncResponse, SyncTransport, TransportConfig,
+    client_version, meta_client_version,
 };
 
 #[cfg(test)]

@@ -13,7 +13,10 @@ mkdir -p .tmp
 dir="$(mktemp -d -p "$PWD/.tmp" ranki-visual.XXXXXX)"
 host_runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 runtime="$host_runtime/ranki-visual.$$"
-mkdir -p "$runtime" "$dir/config/ranki" "$dir/collection.media"
+data="$dir/data"
+config="$dir/config"
+collection="$data/ranki/collection.anki2"
+mkdir -p "$runtime" "$config/ranki" "$data/ranki/collection.media"
 chmod 700 "$runtime"
 mkdir -p "$dir/bin"
 cat > "$dir/bin/ydotool" <<'SHIM'
@@ -33,22 +36,19 @@ repo="$PWD"
 nix develop --command cargo build -p ranki >/dev/null
 
 bin="$repo/target/debug/ranki"
-collection="$dir/collection.anki2"
-cat > "$dir/config/ranki/config.toml" <<EOF
-[general]
-collection = "$collection"
-media_dir = "$dir/collection.media"
+cat > "$config/ranki/config.toml" <<EOF
 [ui]
 theme = "dark"
 reduce_motion = true
 EOF
-seed_env=(env XDG_CONFIG_HOME="$dir/config")
-"${seed_env[@]}" "$bin" --no-sync --collection "$collection" deck-create 'Visual Deck' >/dev/null
-deck_id="$("${seed_env[@]}" "$bin" --no-sync --collection "$collection" decks | awk -F '\t' '$2 == "Visual Deck" {print $1}')"
-"${seed_env[@]}" "$bin" --no-sync --collection "$collection" add-note --model Basic --deck "$deck_id" \
+seed_env=(env XDG_CONFIG_HOME="$config" XDG_DATA_HOME="$data")
+"${seed_env[@]}" "$bin" --no-sync deck-create 'Visual Deck' >/dev/null
+deck_id="$("${seed_env[@]}" "$bin" --no-sync decks | awk -F '\t' '$2 == "Visual Deck" {print $1}')"
+"${seed_env[@]}" "$bin" --no-sync add-note --model Basic --deck "$deck_id" \
   --field 'Question?' --field 'Answer!' >/dev/null
-"${seed_env[@]}" "$bin" --no-sync --collection "$collection" add-note --model Cloze --deck "$deck_id" \
+"${seed_env[@]}" "$bin" --no-sync add-note --model Cloze --deck "$deck_id" \
   --field 'The {{c1::capital}} is Paris.' --field 'Remember it' >/dev/null
+[[ -f "$collection" ]]
 
 cat > "$dir/sway.conf" <<'EOF'
 output * resolution 1280x800
@@ -113,7 +113,8 @@ if [[ "$mode" == "session" ]]; then
     printf 'export VISUAL_REPO=%q\n' "$repo"
     printf 'export VISUAL_RUNTIME=%q\n' "$runtime"
     printf 'export VISUAL_DISPLAY=%q\n' "$display"
-    printf 'export VISUAL_CONFIG=%q\n' "$dir/config"
+    printf 'export VISUAL_CONFIG=%q\n' "$config"
+    printf 'export VISUAL_DATA=%q\n' "$data"
     printf 'export VISUAL_BIN=%q\n' "$bin"
     printf 'export VISUAL_SWAY_SOCK=%q\n' "$ipc"
     printf 'export PATH=%q\n' "$dir/bin:$PATH"
@@ -140,7 +141,7 @@ hidden() {
 }
 
 start_ranki() {
-  setsid env XDG_CONFIG_HOME="$VISUAL_CONFIG" RANKI_REDUCE_MOTION=1 \
+  setsid env XDG_CONFIG_HOME="$VISUAL_CONFIG" XDG_DATA_HOME="$VISUAL_DATA" RANKI_REDUCE_MOTION=1 \
     nix develop "$VISUAL_REPO" --command nix shell "${VISUAL_PACKAGES[@]}" --command env \
     XDG_RUNTIME_DIR="$VISUAL_RUNTIME" WAYLAND_DISPLAY="$VISUAL_DISPLAY" \
     "$VISUAL_BIN" "$@" >"$VISUAL_DIR/app.log" 2>&1 &
@@ -214,7 +215,7 @@ capture() {
   local view="${2:-}"
   local reveal="${3:-}"
   local app_pid
-  local -a app_env=(env XDG_CONFIG_HOME="$dir/config" RANKI_REDUCE_MOTION=1)
+  local -a app_env=(env XDG_CONFIG_HOME="$config" XDG_DATA_HOME="$data" RANKI_REDUCE_MOTION=1)
   if [[ -n "$view" ]]; then
     app_env+=("RANKI_UI_DEV_VIEW=$view")
   fi

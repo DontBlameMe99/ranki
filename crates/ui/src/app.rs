@@ -791,7 +791,8 @@ impl Root {
             field.set_secure(true, cx);
             field
         });
-        let sync_state = crate::sync_view::read_state(&options.collection);
+        let sync_state =
+            crate::sync_view::read_state(&options.paths.sync_state);
         let signed_in = sync_state
             .as_ref()
             .is_some_and(|state| !state.host_key.is_empty());
@@ -1846,8 +1847,8 @@ impl Root {
 
     /// Exports a deck and its subdecks to a path chosen in a save dialog.
     pub(crate) fn export_deck(&mut self, deck: &Deck, cx: &mut Context<Self>) {
-        let collection = self.options.collection.clone();
-        let media_dir = self.options.media_dir.clone();
+        let collection = self.options.paths.collection.clone();
+        let media_dir = self.options.paths.media_dir.clone();
         let deck_id = deck.id;
         let deck_name = deck.name.clone();
         let suggested = Self::export_file_name(&deck.name);
@@ -1904,7 +1905,7 @@ impl Root {
     }
     /// Copies a chosen image into the media directory for the occlusion editor.
     pub(crate) fn upload_occlusion_image(&mut self, cx: &mut Context<Self>) {
-        let media_dir = self.options.media_dir.clone();
+        let media_dir = self.options.paths.media_dir.clone();
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -1943,7 +1944,7 @@ impl Root {
         field: Entity<TextField>,
         cx: &mut Context<Self>,
     ) {
-        let media_dir = self.options.media_dir.clone();
+        let media_dir = self.options.paths.media_dir.clone();
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -1999,8 +2000,8 @@ impl Root {
         {
             self.add.occlusion.masks.clear();
         }
-        let size = image::image_dimensions(self.options.media_dir.join(&name))
-            .ok()
+        let size = card_view::media_path(&self.options.paths.media_dir, &name)
+            .and_then(|path| image::image_dimensions(path).ok())
             .map(|(width, height)| {
                 (
                     f32::from(u16::try_from(width).unwrap_or(u16::MAX)),
@@ -2346,7 +2347,10 @@ impl Root {
             occlusion_image
                 .as_ref()
                 .and_then(|media| {
-                    card_view::media_path(&self.options.media_dir, &media.name)
+                    card_view::media_path(
+                        &self.options.paths.media_dir,
+                        &media.name,
+                    )
                 })
                 .and_then(|path| image::image_dimensions(path).ok())
                 .map(|(width, height)| {

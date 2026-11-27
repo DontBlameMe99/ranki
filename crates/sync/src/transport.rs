@@ -2,6 +2,7 @@ use crate::error::{Result, SyncError};
 use crate::wire::{MAX_COLLECTION_BYTES, SYNC_VERSION};
 use std::collections::BTreeMap;
 use std::collections::hash_map::RandomState;
+use std::env::consts;
 use std::fmt;
 use std::hash::BuildHasher;
 use std::process;
@@ -11,12 +12,21 @@ use ureq::Agent;
 /// Default `AnkiWeb` endpoint.
 pub const DEFAULT_ENDPOINT: &str = "https://sync.ankiweb.net/";
 
+/// Platform token used in `AnkiWeb` client identifiers.
+pub const SYNC_PLATFORM: &str = consts::OS;
+
 /// Client identifier sent in the `anki-sync` header.
-pub const DEFAULT_CLIENT_VERSION: &str = "ranki,0.1.0,1,linux";
+#[must_use]
+pub fn client_version() -> String {
+    format!("ranki,0.1.0,1,{SYNC_PLATFORM}")
+}
 
 /// Client version reported in `sync/meta`. `AnkiWeb` rejects a `cv` value that
 /// does not follow Anki's `anki,<version>,<platform>` shape.
-pub const META_CLIENT_VERSION: &str = "anki,ranki-0.1.0,linux";
+#[must_use]
+pub fn meta_client_version() -> String {
+    format!("anki,ranki-0.1.0,{SYNC_PLATFORM}")
+}
 
 /// Header that carries the uncompressed response length.
 pub const ORIGINAL_SIZE_HEADER: &str = "anki-original-size";
@@ -282,7 +292,7 @@ impl HttpTransport {
             agent,
             endpoint: endpoint.into(),
             host_key: String::new(),
-            client_version: DEFAULT_CLIENT_VERSION.to_owned(),
+            client_version: client_version(),
             session_key: session_key(),
             config,
         }

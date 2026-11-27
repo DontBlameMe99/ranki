@@ -1,13 +1,15 @@
 use crate::{
-    Credentials, META_CLIENT_VERSION, MockResponse, MockTransport,
-    ORIGINAL_SIZE_HEADER, RemoteStatus, RetryPolicy, SyncClient, SyncError,
-    SyncMethod, SyncOutcome, SyncResponse, SyncState, wire,
+    Credentials, MockResponse, MockTransport, ORIGINAL_SIZE_HEADER,
+    RemoteStatus, RetryPolicy, SYNC_PLATFORM, SyncClient, SyncError,
+    SyncMethod, SyncOutcome, SyncResponse, SyncState, client_version,
+    meta_client_version, wire,
 };
 use rusqlite::{Connection, params};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{Cursor, Write};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -380,13 +382,23 @@ fn meta_request_uses_an_supported_client_version() -> TestResult {
     let body = decode_request(request)?;
     let meta: serde_json::Value = serde_json::from_slice(&body)?;
     assert_eq!(meta["v"], wire::SYNC_VERSION);
-    assert_eq!(meta["cv"], crate::META_CLIENT_VERSION);
+    assert_eq!(meta["cv"], meta_client_version());
     let version = meta["cv"]
         .as_str()
         .ok_or_else(|| SyncError::State("missing client version".to_owned()))?;
     assert!(version.starts_with("anki,"));
-    assert!(version.split(',').count() >= 3);
+    assert_eq!(version.split(',').count(), 3);
+    assert_eq!(version, format!("anki,ranki-0.1.0,{SYNC_PLATFORM}"));
     Ok(())
+}
+
+#[test]
+fn client_identifiers_report_the_current_platform() {
+    assert_eq!(client_version(), format!("ranki,0.1.0,1,{SYNC_PLATFORM}"));
+    assert_eq!(
+        meta_client_version(),
+        format!("anki,ranki-0.1.0,{SYNC_PLATFORM}")
+    );
 }
 
 #[test]
@@ -604,7 +616,7 @@ fn full_download_restores_remote_media() -> TestResult {
         .expect("begin request");
     let begin_body = decode_request(begin)?;
     let begin_json: serde_json::Value = serde_json::from_slice(&begin_body)?;
-    assert_eq!(begin_json.get("v"), Some(&json!(META_CLIENT_VERSION)));
+    assert_eq!(begin_json.get("v"), Some(&json!(meta_client_version())));
     Ok(())
 }
 
@@ -746,8 +758,11 @@ fn login_writes_state_with_mode_0600() -> TestResult {
         fixture_login(&directory),
     ))?;
 
-    let metadata = fs::metadata(&state_path)?;
-    assert_eq!(metadata.mode() & 0o777, 0o600);
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(&state_path)?;
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+    }
     Ok(())
 }
 

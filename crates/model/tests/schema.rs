@@ -68,9 +68,9 @@ fn rating_and_review_kinds_cover_every_code() {
 #[test]
 fn invalid_config_values_fall_back_field_by_field() {
     let config = parse(
-        "[general]\ncollection = ''\n[ui]\ntheme = ''\nshow_keyboard_hints = 'no'\n[scheduler]\ndesired_retention = 'no'\n",
+        "[sync]\nusername = ''\n[ui]\ntheme = ''\nshow_keyboard_hints = 'no'\n[scheduler]\ndesired_retention = 'no'\n",
     );
-    assert_eq!(config.general.collection, None);
+    assert_eq!(config.sync.username, None);
     assert_eq!(config.ui.theme, ThemeChoice::System);
     assert!(config.ui.show_keyboard_hints);
     assert_eq!(config.scheduler.desired_retention, 0.9);
@@ -85,5 +85,5 @@ fn invalid_sections_keep_their_defaults() {
     assert_eq!(config.ui.theme, ThemeChoice::System);
 
     let config = parse("this is not TOML");
-    assert_eq!(config.general.collection, None);
+    assert_eq!(config.ui.theme, ThemeChoice::System);
 }

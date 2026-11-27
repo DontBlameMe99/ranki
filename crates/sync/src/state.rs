@@ -2,15 +2,18 @@ use crate::error::{Result, SyncError};
 use crate::transport::DEFAULT_ENDPOINT;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::fs::{self, Permissions};
-use std::io::{ErrorKind, Write};
+use std::fs;
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::Permissions;
+use std::io::{ErrorKind, Result as IoResult, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::path::PathBuf;
 
 const STATE_VERSION: u8 = 1;
+#[cfg(unix)]
 const STATE_MODE: u32 = 0o600;
-
 /// Persisted sync state.
 ///
 /// Only the host key and sync metadata are stored. Passwords never reach this
@@ -95,16 +98,16 @@ impl SyncState {
     }
 
     pub(crate) fn save(&self, path: &Path) -> Result<()> {
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
         let mut file = tempfile::Builder::new()
             .prefix(".ranki-sync-")
             .suffix(".json")
             .tempfile_in(parent)?;
-        file.as_file_mut()
-            .set_permissions(Permissions::from_mode(STATE_MODE))?;
+        restrict_permissions(file.as_file())?;
         {
             let writer = file.as_file_mut();
             serde_json::to_writer(&mut *writer, self)
@@ -118,11 +121,25 @@ impl SyncState {
     }
 }
 
-/// Path of the sync state file beside a collection.
-#[must_use]
-pub fn state_path(collection: &Path) -> PathBuf {
-    let parent = collection.parent().unwrap_or_else(|| Path::new("."));
-    parent.join("ranki-sync.json")
+#[cfg(unix)]
+fn restrict_permissions(file: &File) -> IoResult<()> {
+    file.set_permissions(Permissions::from_mode(STATE_MODE))
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_: &File) -> IoResult<()> {
+    Ok(())
+}
+
+/// Stores a host key atomically while preserving the rest of the state.
+///
+/// # Errors
+///
+/// Returns an error when the state file cannot be read or written.
+pub fn set_host_key(path: &Path, key: &str) -> Result<()> {
+    let mut state = SyncState::load(path)?;
+    key.clone_into(&mut state.host_key);
+    state.save(path)
 }
 
 /// Clears the host key while keeping the last sync stamps.
@@ -130,12 +147,11 @@ pub fn state_path(collection: &Path) -> PathBuf {
 /// # Errors
 ///
 /// Returns an error when an existing state file cannot be read or written.
-pub fn clear_host_key(collection: &Path) -> Result<()> {
-    let path = state_path(collection);
+pub fn clear_host_key(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    let mut state = SyncState::load(&path)?;
+    let mut state = SyncState::load(path)?;
     state.host_key.clear();
-    state.save(&path)
+    state.save(path)
 }

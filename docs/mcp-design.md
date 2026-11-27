@@ -133,16 +133,15 @@ CLI wiring:
 
 ```rust
 enum Command {
-    Mcp { collection: PathBuf },
+    Mcp,
     Connect { /* HTTP options */ },
     // review, import, export, GUI
 }
 ```
 
-`Mcp` resolves `--collection PATH` or `RANKI_COLLECTION`, opens the collection once, then
-serves stdio. A missing path exits with a usage error on stderr. The subcommand never
-starts eframe, never binds a socket and never prints protocol data to stdout. Logs go to
-stderr through `tracing-subscriber`.
+`Mcp` opens Ranki's app collection once, then serves stdio. It takes no path flag. A missing
+collection exits with an error on stderr. The subcommand never starts eframe, never binds a
+socket and never prints protocol data to stdout. Logs go to stderr through `tracing-subscriber`.
 
 ## Tool surface
 
@@ -278,9 +277,9 @@ Mapping to the `Store` trait:
 - Writes (`create_deck`, `rename_deck`, `remove_deck`, `add_note`, `answer_card`, `import_apkg`, `export_apkg`) require `confirm: true`. A missing or false value performs no write and returns a tool error. Tool
   annotations mark them non-idempotent. `remove_deck` is destructive and the others are not.
 - The original proposal excluded delete, suspend, bury, reset, empty-deck and schema-changing tools. The registered surface includes `remove_deck` with `confirm: true` and a destructive annotation. The other exclusions still apply.
-- The collection comes from `ranki mcp --collection PATH`, `RANKI_COLLECTION`, or `[general].collection`. Missing
-  collection is a startup error; do not create one implicitly. Relative paths resolve
-  against the server's launch directory and are canonicalized at startup.
+- The collection comes from Ranki's app data directory. `ranki mcp` takes no path
+  flag. A missing collection is a startup error; do not create one implicitly.
+  The path is canonicalized at startup.
 - Filesystem access is limited to the collection's directory. `import_apkg` reads only a
   file inside it. `export_apkg` writes only inside it and fails if the target exists.
   Canonicalize before opening, follow symlinks, and reject paths outside the directory.
