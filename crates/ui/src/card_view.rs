@@ -1263,6 +1263,7 @@ mod tests {
             field_tags: Vec::new(),
             template_ordinals: vec![0],
             raw_config: None,
+            raw_json: None,
         }
     }
 

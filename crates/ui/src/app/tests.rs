@@ -2005,6 +2005,7 @@ fn draft_validation_blocks_empty_and_cloze_without_marker() {
         field_tags: vec![],
         template_ordinals: vec![0],
         raw_config: None,
+        raw_json: None,
     };
     assert!(
         validate_draft(&deck, &model, &[String::new()]).contains_key("fields")

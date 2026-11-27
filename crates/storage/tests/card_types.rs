@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::slice;
 
 use ranki_model::NewNote;
 use ranki_model::NoteKind;
@@ -110,14 +111,33 @@ fn pb_length(value: u64) -> Vec<u8> {
 }
 
 fn pb_string(field: u32, text: &str) -> Vec<u8> {
-    let mut bytes = vec![
-        u8::try_from(field.saturating_mul(8).saturating_add(2)).expect("tag"),
-    ];
+    let mut bytes = Vec::new();
+    let mut tag = u64::from(field).saturating_mul(8).saturating_add(2);
+    while tag >= 0x80 {
+        bytes.push(u8::try_from(tag & 0x7f).expect("byte") | 0x80);
+        tag >>= 7;
+    }
+    bytes.push(u8::try_from(tag).expect("byte"));
     bytes.extend_from_slice(&pb_length(
         u64::try_from(text.len()).expect("length"),
     ));
     bytes.extend_from_slice(text.as_bytes());
     bytes
+}
+
+fn pb_bytes(field: u32, bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut tag = u64::from(field).saturating_mul(8).saturating_add(2);
+    while tag >= 0x80 {
+        out.push(u8::try_from(tag & 0x7f).expect("byte") | 0x80);
+        tag >>= 7;
+    }
+    out.push(u8::try_from(tag).expect("byte"));
+    out.extend_from_slice(&pb_length(
+        u64::try_from(bytes.len()).expect("length"),
+    ));
+    out.extend_from_slice(bytes);
+    out
 }
 
 #[expect(
@@ -371,6 +391,12 @@ fn schema18_models_keep_kind_stock_kind_tags_ords_and_raw_config() {
     let mut config = pb_varint(1, 1);
     config.extend(pb_varint(9, 5));
     config.extend(pb_string(3, ".cloze { color: blue; }"));
+    let unknown = b"future".to_vec();
+    let mut req = pb_varint(1, 0);
+    req.extend(pb_varint(2, 1));
+    req.extend(pb_varint(3, 0));
+    config.extend(pb_bytes(8, &req));
+    config.extend(pb_string(255, "future"));
     insert_model(
         &conn,
         42,
@@ -393,7 +419,9 @@ fn schema18_models_keep_kind_stock_kind_tags_ords_and_raw_config() {
     assert_eq!(model.field_tags, [Some(0), Some(1)]);
     assert_eq!(model.templates[0].ord, 0);
     assert_eq!(model.css, ".cloze { color: blue; }");
-    assert_eq!(model.raw_config.as_deref(), Some(config.as_slice()));
+    assert_eq!(model.raw_config.as_deref(), Some(unknown.as_slice()));
+    let json = ranki_storage::models_to_json(slice::from_ref(model));
+    assert_eq!(json["42"]["req"], serde_json::json!([[0, "any", [0]]]));
 }
 
 #[test]
@@ -465,12 +493,25 @@ fn models_to_json_keeps_raw_config_for_export() {
     let conn = schema18(&path);
     let mut config = pb_varint(1, 0);
     config.extend(pb_string(3, ".card {}"));
+    let unknown = b"future".to_vec();
+    config.extend(pb_string(255, "future"));
     insert_model(
         &conn,
         7,
         "Basic",
         config.clone(),
-        &[("Front", Vec::new()), ("Back", Vec::new())],
+        &[
+            ("Front", {
+                let mut field = pb_varint(1, 1);
+                field.extend(pb_string(3, "Courier"));
+                field.extend(pb_varint(4, 14));
+                field.extend(pb_string(5, "Prompt"));
+                field.extend(pb_varint(10, 7));
+                field.extend(pb_string(255, "field-extra"));
+                field
+            }),
+            ("Back", Vec::new()),
+        ],
         &[("Card 1", pb_string(1, "{{Front}}"))],
     );
     drop(conn);
@@ -487,7 +528,20 @@ fn models_to_json_keeps_raw_config_for_export() {
             .get("_rankiRawConfig")
             .and_then(Value::as_str)
             .map(ranki_model::decode_hex),
-        Some(Some(config))
+        Some(Some(unknown))
+    );
+    assert_eq!(entry.get("css").and_then(Value::as_str), Some(".card {}"));
+    let front = entry.get("flds").and_then(Value::as_array).expect("fields");
+    assert_eq!(front[0]["sticky"], serde_json::json!(true));
+    assert_eq!(front[0]["font"], serde_json::json!("Courier"));
+    assert_eq!(front[0]["size"], serde_json::json!(14));
+    assert_eq!(front[0]["description"], serde_json::json!("Prompt"));
+    assert_eq!(front[0]["tag"], serde_json::json!(7));
+    assert_eq!(
+        front[0]["_rankiOther"]
+            .as_str()
+            .and_then(ranki_model::decode_hex),
+        Some(b"field-extra".to_vec())
     );
 }
 

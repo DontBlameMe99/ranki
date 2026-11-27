@@ -1,3 +1,8 @@
+#![expect(
+    clippy::excessive_nesting,
+    clippy::redundant_pub_crate,
+    reason = "protobuf decoding walks nested Anki messages"
+)]
 //! Anki's value encodings: ids, guids, field separators and checksums.
 
 use ranki_model::FIELD_SEPARATOR;
@@ -154,47 +159,6 @@ pub fn normal_deck_kind(config_id: i64) -> Vec<u8> {
     bytes
 }
 
-/// Builds a schema-18 `notetypes.config` blob: kind, CSS, stock kind.
-#[must_use]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the schema-18 config fields are written together"
-)]
-pub fn notetype_config(
-    kind: i32,
-    sort_field_index: u16,
-    stock_kind: Option<i32>,
-    css: &str,
-) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    varint_field(&mut bytes, 1, u64::try_from(kind).unwrap_or(0));
-    varint_field(&mut bytes, 2, u64::from(sort_field_index));
-    string_field(&mut bytes, 3, css);
-    if let Some(stock) = stock_kind {
-        varint_field(&mut bytes, 9, u64::try_from(stock).unwrap_or(0));
-    }
-    bytes
-}
-
-/// Builds a schema-18 `fields.config` blob holding Anki's field tag.
-#[must_use]
-pub fn field_config(tag: Option<u32>) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    if let Some(value) = tag {
-        varint_field(&mut bytes, 10, u64::from(value));
-    }
-    bytes
-}
-
-/// Builds a schema-18 `templates.config` blob: question and answer formats.
-#[must_use]
-pub fn template_config(question: &str, answer: &str) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    string_field(&mut bytes, 1, question);
-    string_field(&mut bytes, 2, answer);
-    bytes
-}
-
 fn varint_field(bytes: &mut Vec<u8>, field: u32, value: u64) {
     let tag = u64::from(field).checked_shl(3).unwrap_or(0);
     append_varint(bytes, tag);
@@ -208,7 +172,7 @@ fn string_field(bytes: &mut Vec<u8>, field: u32, value: &str) {
     bytes.extend_from_slice(value.as_bytes());
 }
 
-fn append_varint(bytes: &mut Vec<u8>, mut value: u64) {
+pub(crate) fn append_varint(bytes: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
         let byte = u8::try_from(value & 0x7f).unwrap_or(0) | 0x80;
         bytes.push(byte);
@@ -382,11 +346,6 @@ pub fn with_deck_kind_config_id(
     Some(rewritten)
 }
 
-fn protobuf_bytes(bytes: &[u8], wanted: u32) -> Option<Vec<u8>> {
-    let range = protobuf_field_range(bytes, wanted, 2)?;
-    Some(bytes.get(range)?.to_vec())
-}
-
 #[expect(
     clippy::excessive_nesting,
     reason = "protobuf wire types are handled together"
@@ -437,6 +396,285 @@ fn protobuf_field_range(
         }
     }
     None
+}
+
+/// Reads a nested message or `bytes` field from an Anki protobuf blob.
+#[must_use]
+pub fn protobuf_bytes(bytes: &[u8], wanted: u32) -> Option<Vec<u8>> {
+    let wanted_field = u64::from(wanted);
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let tag = read_varint(bytes, &mut pos)?;
+        let field = tag >> 3;
+        match (tag & 7, field == wanted_field) {
+            (2, true) => {
+                let length =
+                    usize::try_from(read_varint(bytes, &mut pos)?).ok()?;
+                let end = pos.checked_add(length)?;
+                let slice = bytes.get(pos..end)?;
+                return Some(slice.to_vec());
+            }
+            (2, false) => {
+                let length =
+                    usize::try_from(read_varint(bytes, &mut pos)?).ok()?;
+                pos = pos.checked_add(length)?;
+            }
+            (0, _) => {
+                let _ = read_varint(bytes, &mut pos)?;
+            }
+            (1, _) => pos = pos.checked_add(8)?,
+            (5, _) => pos = pos.checked_add(4)?,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Reads every nested message with the given field number.
+#[must_use]
+pub fn protobuf_messages(bytes: &[u8], wanted: u32) -> Vec<Vec<u8>> {
+    let wanted_field = u64::from(wanted);
+    let mut messages = Vec::new();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let Some(tag) = read_varint(bytes, &mut pos) else {
+            break;
+        };
+        let length = match (tag & 7, tag >> 3 == wanted_field) {
+            (2, true) => {
+                let Some(length) =
+                    usize::try_from(read_varint(bytes, &mut pos).unwrap_or(0))
+                        .ok()
+                else {
+                    break;
+                };
+                length
+            }
+            (2, false) => {
+                let Some(length) =
+                    usize::try_from(read_varint(bytes, &mut pos).unwrap_or(0))
+                        .ok()
+                else {
+                    break;
+                };
+                pos = pos.saturating_add(length);
+                continue;
+            }
+            (0, _) => {
+                if read_varint(bytes, &mut pos).is_none() {
+                    break;
+                }
+                continue;
+            }
+            (1, _) => {
+                pos = pos.saturating_add(8);
+                continue;
+            }
+            (5, _) => {
+                pos = pos.saturating_add(4);
+                continue;
+            }
+            _ => break,
+        };
+        let Some(message) = bytes.get(pos..pos.saturating_add(length)) else {
+            break;
+        };
+        messages.push(message.to_vec());
+        pos = pos.saturating_add(length);
+    }
+    messages
+}
+/// Reads every value of a repeated varint field, packed or unpacked.
+#[must_use]
+pub fn protobuf_varints(bytes: &[u8], wanted: u32) -> Vec<u64> {
+    let wanted_field = u64::from(wanted);
+    let mut values = Vec::new();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let Some(tag) = read_varint(bytes, &mut pos) else {
+            break;
+        };
+        match (tag & 7, tag >> 3 == wanted_field) {
+            (0, true) => {
+                let Some(value) = read_varint(bytes, &mut pos) else {
+                    break;
+                };
+                values.push(value);
+            }
+            (2, true) => {
+                let Some(length) =
+                    usize::try_from(read_varint(bytes, &mut pos).unwrap_or(0))
+                        .ok()
+                else {
+                    break;
+                };
+                let Some(raw) = bytes.get(pos..pos.saturating_add(length))
+                else {
+                    break;
+                };
+                let mut offset = 0usize;
+                while offset < raw.len() {
+                    let Some(value) = read_varint(raw, &mut offset) else {
+                        break;
+                    };
+                    values.push(value);
+                }
+                pos = pos.saturating_add(length);
+            }
+            (2, false) => {
+                let Some(length) =
+                    usize::try_from(read_varint(bytes, &mut pos).unwrap_or(0))
+                        .ok()
+                else {
+                    break;
+                };
+                pos = pos.saturating_add(length);
+            }
+            (0, false) => {
+                if read_varint(bytes, &mut pos).is_none() {
+                    break;
+                }
+            }
+            (1, _) => pos = pos.saturating_add(8),
+            (5, _) => pos = pos.saturating_add(4),
+            _ => break,
+        }
+        if pos > bytes.len() {
+            break;
+        }
+    }
+    values
+}
+
+/// Reads a 32-bit float field from an Anki protobuf blob.
+#[must_use]
+pub fn protobuf_f32(bytes: &[u8], wanted: u32) -> Option<f32> {
+    let wanted_field = u64::from(wanted);
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let tag = read_varint(bytes, &mut pos)?;
+        let field = tag >> 3;
+        match (tag & 7, field == wanted_field) {
+            (5, true) => {
+                let raw = bytes.get(pos..pos.saturating_add(4))?;
+                let array: [u8; 4] = raw.try_into().ok()?;
+                return Some(f32::from_le_bytes(array));
+            }
+            (5, false) => pos = pos.saturating_add(4),
+            (0, _) => {
+                let _ = read_varint(bytes, &mut pos)?;
+            }
+            (2, _) => {
+                let length =
+                    usize::try_from(read_varint(bytes, &mut pos)?).ok()?;
+                pos = pos.saturating_add(length);
+            }
+            (1, _) => pos = pos.saturating_add(8),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Reads every value of a repeated float field, packed or unpacked.
+#[must_use]
+pub fn protobuf_f32s(bytes: &[u8], wanted: u32) -> Vec<f32> {
+    let wanted_field = u64::from(wanted);
+    let mut values = Vec::new();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let Some(tag) = read_varint(bytes, &mut pos) else {
+            break;
+        };
+        let field = tag >> 3;
+        match (tag & 7, field == wanted_field) {
+            (5, true) => {
+                let Some(raw) = bytes.get(pos..pos.saturating_add(4)) else {
+                    break;
+                };
+                if let Ok(array) = raw.try_into() {
+                    values.push(f32::from_le_bytes(array));
+                }
+                pos = pos.saturating_add(4);
+            }
+            (2, true) => {
+                let Some(length) =
+                    usize::try_from(read_varint(bytes, &mut pos).unwrap_or(0))
+                        .ok()
+                else {
+                    break;
+                };
+                let Some(raw) = bytes.get(pos..pos.saturating_add(length))
+                else {
+                    break;
+                };
+                values.extend(
+                    raw.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|chunk| f32::from_le_bytes(*chunk)),
+                );
+                pos = pos.saturating_add(length);
+            }
+            (5, false) => pos = pos.saturating_add(4),
+            (0, _) => {
+                if read_varint(bytes, &mut pos).is_none() {
+                    break;
+                }
+            }
+            (2, false) => {
+                let Some(length) =
+                    usize::try_from(read_varint(bytes, &mut pos).unwrap_or(0))
+                        .ok()
+                else {
+                    break;
+                };
+                pos = pos.saturating_add(length);
+            }
+            (1, _) => pos = pos.saturating_add(8),
+            _ => break,
+        }
+        if pos > bytes.len() {
+            break;
+        }
+    }
+    values
+}
+
+/// Writes a protobuf varint field.
+pub(crate) fn put_varint(bytes: &mut Vec<u8>, field: u32, value: u64) {
+    varint_field(bytes, field, value);
+}
+
+/// Writes a protobuf length-delimited field.
+pub(crate) fn put_bytes(bytes: &mut Vec<u8>, field: u32, value: &[u8]) {
+    string_field(bytes, field, "");
+    bytes.truncate(bytes.len().saturating_sub(1));
+    append_varint(bytes, u64::try_from(value.len()).unwrap_or(0));
+    bytes.extend_from_slice(value);
+}
+
+/// Writes a protobuf fixed32 field, used for floats.
+pub(crate) fn put_f32(bytes: &mut Vec<u8>, field: u32, value: f32) {
+    let tag = u64::from(field)
+        .checked_shl(3)
+        .unwrap_or(0)
+        .checked_add(5)
+        .unwrap_or(5);
+    append_varint(bytes, tag);
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+/// Writes a repeated float field as a packed protobuf field.
+pub(crate) fn put_f32s(bytes: &mut Vec<u8>, field: u32, values: &[f32]) {
+    if values.is_empty() {
+        return;
+    }
+    let mut payload = Vec::with_capacity(values.len().saturating_mul(4));
+    for value in values {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+    put_bytes(bytes, field, &payload);
 }
 
 fn read_varint(bytes: &[u8], pos: &mut usize) -> Option<u64> {

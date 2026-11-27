@@ -120,6 +120,7 @@ fn basic() -> NoteModel {
         field_tags: vec![None, None],
         template_ordinals: vec![0],
         raw_config: None,
+        raw_json: None,
     }
 }
 
@@ -155,6 +156,7 @@ fn cloze() -> NoteModel {
         field_tags: vec![Some(0), Some(1)],
         template_ordinals: vec![0],
         raw_config: None,
+        raw_json: None,
     }
 }
 
@@ -182,6 +184,7 @@ fn image_occlusion() -> NoteModel {
         field_tags: vec![Some(0), Some(1), Some(2), Some(3), Some(4)],
         template_ordinals: vec![0],
         raw_config: None,
+        raw_json: None,
     }
 }
 
