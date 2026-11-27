@@ -446,9 +446,14 @@ impl Root {
                         .child("RECALL THE MEANING")
                 }))
                 .child(if let Some(card) = question {
-                    card_view::rendered_text(card, colors.text, question_size)
-                        .max_w(px(text_width))
-                        .into_any_element()
+                    card_view::rendered_text(
+                        card,
+                        colors,
+                        colors.text,
+                        question_size,
+                    )
+                    .max_w(px(text_width))
+                    .into_any_element()
                 } else {
                     div()
                         .text_size(px(84.))
@@ -473,6 +478,7 @@ impl Root {
                     .child(if let Some(card) = answer {
                         card_view::rendered_text(
                             card,
+                            colors,
                             colors.mauve,
                             answer_size,
                         )

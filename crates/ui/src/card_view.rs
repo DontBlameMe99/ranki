@@ -22,14 +22,17 @@ use crate::theme::{Palette, SPACE_GROUP, alpha};
 mod markup;
 mod math;
 
-#[cfg(test)]
-pub use markup::cloze_text;
 pub use markup::{
-    ClozeSegment, MaskOverlay, MathKind, MediaKind, MediaRef,
-    answer_only_media, math_segments, media_refs, occlusion_overlays,
+    CardBlock, ClozeSegment, CodeSpan, MaskOverlay, MathKind, MediaKind,
+    MediaRef, TextSpan, TextSpanKind, TokenKind, answer_only_media,
+    blocks_text, card_blocks, cloze_segments, math_segments, media_refs,
+    occlusion_overlays,
 };
-use markup::{ClozeSpan, cloze_spans, is_empty_html, styled_text};
-
+use markup::{
+    ClozeSpan, cloze_spans, is_empty_html, normalize_newlines, styled_text,
+};
+#[cfg(test)]
+pub use markup::{cloze_text, highlight_code};
 /// Side of the card being rendered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -62,6 +65,8 @@ pub struct TextRun {
     pub source: String,
     pub kind: MathKind,
     pub math: bool,
+    /// Inline code rendered in the monospace font.
+    pub code: bool,
 }
 
 /// Result of rendering a template for one card side.
@@ -69,6 +74,7 @@ pub struct TextRun {
 pub struct RenderedCard {
     pub text: String,
     pub runs: Vec<TextRun>,
+    pub blocks: Vec<CardBlock>,
     pub media: Vec<MediaRef>,
     pub clozes: Vec<ClozeSegment>,
     pub masks: Vec<MaskOverlay>,
@@ -378,7 +384,20 @@ pub fn render_card(
         (styled, Vec::new())
     };
     let runs = apply_math(normalize_runs(runs));
-    let text = runs.iter().map(|run| run.text.as_str()).collect::<String>();
+    let blocks = if model.is_cloze() {
+        let markup = cloze_segments(&rendered, ordinal, side)
+            .into_iter()
+            .map(|segment| segment.text)
+            .collect::<String>();
+        card_blocks(&markup)
+    } else {
+        card_blocks(&rendered)
+    };
+    let text = if blocks.is_empty() {
+        runs.iter().map(|run| run.text.as_str()).collect::<String>()
+    } else {
+        normalize_newlines(&blocks_text(&blocks))
+    };
     let masks = if model.is_image_occlusion() {
         note.fields
             .iter()
@@ -391,6 +410,7 @@ pub fn render_card(
     RenderedCard {
         text,
         runs,
+        blocks,
         media: media_refs(&rendered),
         clozes,
         masks,
@@ -554,6 +574,7 @@ fn apply_math(runs: Vec<TextRun>) -> Vec<TextRun> {
                     source: segment.source,
                     kind: segment.kind,
                     math,
+                    code: false,
                 });
             }
         }
@@ -579,6 +600,7 @@ fn split_lines(runs: &[TextRun]) -> Vec<Vec<TextRun>> {
                     source: run.source.clone(),
                     kind: run.kind,
                     math: run.math,
+                    code: false,
                 });
             }
         }
@@ -619,6 +641,9 @@ pub fn rendered_line(runs: &[TextRun], color: Rgba, size_px: f32) -> Div {
         .font_family(crate::theme::font_for_text(&plain));
     for run in runs {
         let mut part = div().text_color(run.foreground.unwrap_or(color));
+        if run.code {
+            part = part.font_family(crate::theme::mono_font_family());
+        }
         if let Some(background) = run.background {
             part = part.bg(background).px(px(2.)).rounded(px(4.));
         }
@@ -644,7 +669,12 @@ pub fn rendered_line(runs: &[TextRun], color: Rgba, size_px: f32) -> Div {
 
 /// Draws cloze and occlusion content as a compact text block.
 #[must_use]
-pub fn rendered_text(card: &RenderedCard, color: Rgba, size_px: f32) -> Div {
+pub fn rendered_text(
+    card: &RenderedCard,
+    colors: Palette,
+    color: Rgba,
+    size_px: f32,
+) -> Div {
     let mut block = div()
         .flex()
         .flex_col()
@@ -652,8 +682,68 @@ pub fn rendered_text(card: &RenderedCard, color: Rgba, size_px: f32) -> Div {
         .gap(px(SPACE_GROUP))
         .text_size(px(size_px))
         .text_color(color);
-    for line in text_lines(card) {
-        block = block.child(rendered_line(&line, color, size_px));
+    if card.blocks.is_empty() {
+        for line in text_lines(card) {
+            block = block.child(rendered_line(&line, color, size_px));
+        }
+        return block;
+    }
+    for content in &card.blocks {
+        match content {
+            CardBlock::Text(lines) => {
+                for line in lines {
+                    let mut row = div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .justify_center()
+                        .text_size(px(size_px));
+                    for span in &line.spans {
+                        match span.kind {
+                            TextSpanKind::Plain => {
+                                let runs = apply_math(vec![TextRun {
+                                    text: span.text.clone(),
+                                    foreground: span.foreground,
+                                    background: span.background,
+                                    source: String::new(),
+                                    kind: MathKind::Text,
+                                    math: false,
+                                    code: false,
+                                }]);
+                                row = row.child(rendered_line(
+                                    &runs, color, size_px,
+                                ));
+                            }
+                            TextSpanKind::Code => {
+                                let (ink, background) =
+                                    inline_code_style(span, colors.text);
+                                let mut code = div()
+                                    .font_family(
+                                        crate::theme::mono_font_family(),
+                                    )
+                                    .text_color(ink);
+                                if let Some(background) = background {
+                                    code = code
+                                        .bg(background)
+                                        .px(px(2.))
+                                        .rounded(px(4.));
+                                }
+                                row = row.child(code.child(span.text.clone()));
+                            }
+                        }
+                    }
+                    block = block.child(row);
+                }
+            }
+            CardBlock::Code { language, lines } => {
+                block = block.child(code_block(
+                    language.as_deref(),
+                    lines,
+                    colors,
+                    size_px,
+                ));
+            }
+        }
     }
     block
 }
@@ -680,6 +770,75 @@ pub fn preview_line(rendered: &RenderedCard, color: Rgba, size_px: f32) -> Div {
             .child(preview_text(rendered))
     } else {
         rendered_line(&runs, color, size_px)
+    }
+}
+
+fn code_block(
+    language: Option<&str>,
+    lines: &[Vec<CodeSpan>],
+    colors: Palette,
+    size_px: f32,
+) -> Div {
+    let code_size = (size_px * 0.68).clamp(13.0, 24.0);
+    let background = if colors.base.r > 0.5 {
+        colors.mantle
+    } else {
+        colors.crust
+    };
+    let mut block = div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        .p(px(SPACE_GROUP))
+        .rounded(px(10.))
+        .bg(background)
+        .border_1()
+        .border_color(colors.surface1)
+        .text_size(px(code_size));
+    if let Some(language) = language.filter(|value| !value.is_empty()) {
+        block = block.child(
+            div()
+                .text_size(px(10.))
+                .text_color(colors.overlay)
+                .child(language.to_owned()),
+        );
+    }
+    for line in lines {
+        let mut row = div()
+            .flex()
+            .whitespace_nowrap()
+            .font_family(crate::theme::mono_font_family());
+        if line.is_empty() {
+            row = row.child(" ");
+        }
+        for span in line {
+            row = row.child(
+                div()
+                    .text_color(token_color(span.kind, colors))
+                    .child(span.text.clone()),
+            );
+        }
+        block = block.child(row);
+    }
+    block
+}
+
+fn inline_code_style(span: &TextSpan, fallback: Rgba) -> (Rgba, Option<Rgba>) {
+    (span.foreground.unwrap_or(fallback), span.background)
+}
+
+fn token_color(kind: TokenKind, colors: Palette) -> Rgba {
+    match kind {
+        TokenKind::Plain => colors.text,
+        TokenKind::Comment => colors.overlay,
+        TokenKind::Keyword => colors.mauve,
+        TokenKind::Type => colors.blue,
+        TokenKind::Function => colors.teal,
+        TokenKind::String => colors.green,
+        TokenKind::Number => colors.peach,
+        TokenKind::Operator => colors.red,
+        TokenKind::Punctuation => colors.subtext,
     }
 }
 
@@ -1068,9 +1227,10 @@ pub fn preview_card(
 mod tests {
     use super::markup::{ClozeKind, cloze_segments, strip_tags, styled_text};
     use super::{
-        CardRequest, MathKind, MediaKind, MediaRef, Side, TemplateNode,
-        answer_only_media, cloze_text, media_refs, occlusion_overlays,
-        parse_template, preview_card, render_card,
+        CardBlock, CardRequest, CodeSpan, MathKind, MediaKind, MediaRef, Side,
+        TemplateNode, TextSpan, TextSpanKind, TokenKind, answer_only_media,
+        blocks_text, card_blocks, cloze_text, highlight_code, media_refs,
+        occlusion_overlays, parse_template, preview_card, render_card,
     };
     use ranki_model::{CardTemplate, Note, NoteKind};
 
@@ -1453,10 +1613,14 @@ mod tests {
             &note(&["Hello"]),
             CardRequest::question(0),
         );
-        let _ = super::rendered_text(&card, crate::theme::MOCHA.text, 84.0);
+        let _ = super::rendered_text(
+            &card,
+            crate::theme::MOCHA,
+            crate::theme::MOCHA.text,
+            84.0,
+        );
         let _ = crate::theme::MOCHA;
     }
-
     #[test]
     fn math_runs_stay_inline_with_surrounding_text() {
         let runs = super::apply_math(vec![super::TextRun {
@@ -1594,5 +1758,354 @@ mod tests {
         assert_eq!(answer.runs[1].text, " two");
         assert_eq!(answer.runs[1].foreground, Some(crate::theme::MOCHA.green));
         assert_eq!(answer.runs.len(), 2);
+    }
+
+    #[test]
+    fn html_code_block_keeps_language_indentation_and_blanks() {
+        let card = render_card(
+            &model(&["Front"], "{{Front}}", "{{Front}}"),
+            &note(&[
+                "<pre data-language=\"rust\"><code>fn main() {\n    println!(\"hi\");\n\n}</code></pre>",
+            ]),
+            CardRequest::question(0),
+        );
+        assert!(matches!(
+            card.blocks.first(),
+            Some(CardBlock::Code {
+                language: Some(language),
+                ..
+            }) if language == "rust"
+        ));
+        assert_eq!(
+            blocks_text(&card.blocks),
+            "fn main() {\n    println!(\"hi\");\n\n}"
+        );
+        let Some(CardBlock::Code { lines, .. }) = card.blocks.first() else {
+            return;
+        };
+        assert!(lines.iter().any(|line| {
+            line.iter().any(|span| {
+                span.kind == TokenKind::Keyword && span.text == "fn"
+            })
+        }));
+        assert!(lines.iter().any(|line| {
+            line.iter().any(|span| {
+                span.kind == TokenKind::String && span.text == "\"hi\""
+            })
+        }));
+    }
+
+    #[test]
+    fn answer_only_code_is_rendered_after_the_front() {
+        let card = render_card(
+            &model(
+                &["Front", "Back"],
+                "{{Front}}",
+                "{{FrontSide}}<hr id=answer>{{Back}}",
+            ),
+            &note(&[
+                "Question?",
+                "<pre data-language=\"python\">print(\"hi\")</pre>",
+            ]),
+            CardRequest::answer_only(0),
+        );
+        assert!(
+            card.blocks
+                .iter()
+                .any(|block| matches!(block, CardBlock::Code { .. }))
+        );
+        assert!(!card.text.contains("Question?"));
+    }
+
+    #[test]
+    fn fenced_code_is_a_block_without_fence_markers() {
+        let card = render_card(
+            &model(&["Front"], "{{Front}}", "{{Front}}"),
+            &note(&["```python\ndef add(a):\n    return a + 1 # note\n```"]),
+            CardRequest::question(0),
+        );
+        assert!(matches!(
+            card.blocks.first(),
+            Some(CardBlock::Code {
+                language: Some(language),
+                ..
+            }) if language == "python"
+        ));
+        assert!(!card.text.contains("```"));
+        assert!(card.text.contains("def add(a):"));
+    }
+
+    #[test]
+    fn inline_code_is_a_code_span() {
+        let blocks = card_blocks("Use `<b>` here.");
+        let Some(CardBlock::Text(lines)) = blocks.first() else {
+            return;
+        };
+        let spans: &[TextSpan] =
+            lines.first().map_or(&[], |line| line.spans.as_slice());
+        assert_eq!(spans.len(), 3);
+        assert_eq!(blocks_text(&blocks), "Use <b> here.");
+        assert!(spans.first().is_some_and(|span| span.text.ends_with(' ')));
+        assert!(spans.last().is_some_and(|span| span.text.starts_with(' ')));
+        assert_eq!(
+            spans.get(1).map(|span| span.kind),
+            Some(TextSpanKind::Code)
+        );
+        assert_eq!(spans.get(1).map(|span| span.text.as_str()), Some("<b>"));
+    }
+
+    #[test]
+    fn code_tokens_are_colored_by_kind() {
+        let lines =
+            highlight_code("fn main() { let n = 42; // done", Some("rust"));
+        let spans: &[CodeSpan] = lines.first().map_or(&[], Vec::as_slice);
+        assert!(
+            spans.iter().any(
+                |span| span.kind == TokenKind::Keyword && span.text == "fn"
+            )
+        );
+        assert!(spans.iter().any(
+            |span| span.kind == TokenKind::Function && span.text == "main"
+        ));
+        assert!(spans.iter().any(|span| span.kind == TokenKind::Number && span.text == "42"));
+        assert!(
+            spans.iter().any(|span| span.kind == TokenKind::Comment
+                && span.text == "// done")
+        );
+    }
+    #[test]
+    fn cloze_across_inline_code_is_resolved() {
+        let mut form = ranki_model::StockModelKind::Cloze.definition();
+        form.id = 1;
+        let note = note(&["Use {{c1::`inline`}} here", ""]);
+        let question = render_card(&form, &note, CardRequest::question(0));
+        let answer = render_card(&form, &note, CardRequest::answer_only(0));
+        assert_eq!(question.text, "Use [...] here");
+        assert_eq!(answer.text, "Use inline here");
+        assert!(!answer.text.contains("{{c1::"));
+    }
+
+    #[test]
+    fn fenced_code_has_no_trailing_blank_row() {
+        let card = render_card(
+            &model(&["Front"], "{{Front}}", "{{Front}}"),
+            &note(&["```python\ndef add(a):\n    return a + 1\n```"]),
+            CardRequest::question(0),
+        );
+        let Some(CardBlock::Code { lines, .. }) = card.blocks.first() else {
+            return;
+        };
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn inline_code_decodes_entities() {
+        let blocks = card_blocks("Use `&lt;` here.");
+        let Some(CardBlock::Text(lines)) = blocks.first() else {
+            return;
+        };
+        let spans: &[TextSpan] =
+            lines.first().map_or(&[], |line| line.spans.as_slice());
+        assert_eq!(spans.get(1).map(|span| span.text.as_str()), Some("<"));
+    }
+
+    #[test]
+    fn triple_quoted_strings_are_one_string_span() {
+        let lines = highlight_code("\"\"\"hi\"\"\"", Some("python"));
+        let spans: &[CodeSpan] = lines.first().map_or(&[], Vec::as_slice);
+        assert!(spans.iter().all(|span| span.kind == TokenKind::String));
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.text.as_str())
+                .collect::<String>(),
+            "\"\"\"hi\"\"\""
+        );
+    }
+    #[test]
+    fn inline_code_can_contain_pre_tags() {
+        let blocks = card_blocks("Use `<pre>foo</pre>` here.");
+        assert!(
+            !blocks
+                .iter()
+                .any(|block| matches!(block, CardBlock::Code { .. }))
+        );
+        let Some(CardBlock::Text(lines)) = blocks.first() else {
+            return;
+        };
+        let spans: &[TextSpan] =
+            lines.first().map_or(&[], |line| line.spans.as_slice());
+        assert_eq!(
+            spans.get(1).map(|span| span.text.as_str()),
+            Some("<pre>foo</pre>")
+        );
+    }
+    #[test]
+    fn closed_block_comment_keeps_remaining_code() {
+        let lines =
+            highlight_code("let a = 1; /* note */ let b = 2;", Some("rust"));
+        let text = lines
+            .first()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.text.as_str())
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        assert_eq!(text, "let a = 1; /* note */ let b = 2;");
+    }
+
+    #[test]
+    fn hidden_markup_inside_inline_code_is_kept() {
+        let blocks = card_blocks("Use `<button>OK</button>` here.");
+        assert_eq!(blocks_text(&blocks), "Use <button>OK</button> here.");
+    }
+
+    #[test]
+    fn crlf_fenced_code_has_no_stray_markers() {
+        let blocks = card_blocks("```rust\r\nlet x = 1;\r\n```");
+        assert!(matches!(
+            blocks.first(),
+            Some(CardBlock::Code { lines, .. }) if lines.len() == 1
+        ));
+        assert_eq!(blocks_text(&blocks), "let x = 1;");
+    }
+
+    #[test]
+    fn invalid_closing_fence_stays_in_code() {
+        let blocks = card_blocks("```rust\nx\n```not-a-close\ny\n```");
+        let text = blocks_text(&blocks);
+        assert!(text.contains("```not-a-close"));
+        assert!(!text.contains("\ny\n```"));
+    }
+
+    #[test]
+    fn colored_cards_keep_styled_runs() {
+        let card = render_card(
+            &model(
+                &["Front"],
+                "<span style=\"color:#f38ba8\">Red</span> <pre><code>x</code></pre>",
+                "{{Front}}",
+            ),
+            &note(&["unused"]),
+            CardRequest::question(0),
+        );
+        assert!(
+            card.blocks
+                .iter()
+                .any(|block| matches!(block, CardBlock::Code { .. }))
+        );
+        assert_eq!(card.runs[0].foreground, Some(crate::theme::MOCHA.red));
+        let Some(CardBlock::Text(lines)) = card.blocks.first() else {
+            return;
+        };
+        assert_eq!(
+            lines
+                .first()
+                .and_then(|line| line.spans.first())
+                .map(|span| span.foreground),
+            Some(Some(crate::theme::MOCHA.red))
+        );
+    }
+    #[test]
+    fn hidden_elements_are_skipped_before_block_markers() {
+        let blocks = card_blocks(
+            "<script>const x = \"<pre>hidden</pre>\";</script>Visible",
+        );
+        assert_eq!(blocks_text(&blocks), "Visible");
+        assert!(
+            !blocks
+                .iter()
+                .any(|block| matches!(block, CardBlock::Code { .. }))
+        );
+    }
+    #[test]
+    fn styles_survive_inline_code_spans() {
+        let blocks = card_blocks(
+            "<span style=\"color:#f38ba8; background-color:#1e1e2e\">before `x` after</span>",
+        );
+        let Some(CardBlock::Text(lines)) = blocks.first() else {
+            return;
+        };
+        let spans = lines.first().map_or(&[][..], |line| line.spans.as_slice());
+        assert_eq!(spans.len(), 3);
+        assert_eq!(
+            spans.first().map(|span| &span.kind),
+            Some(&TextSpanKind::Plain)
+        );
+        assert_eq!(
+            spans.get(1).map(|span| &span.kind),
+            Some(&TextSpanKind::Code)
+        );
+        assert_eq!(
+            spans.get(2).map(|span| &span.kind),
+            Some(&TextSpanKind::Plain)
+        );
+        assert!(
+            spans
+                .iter()
+                .all(|span| span.foreground == Some(crate::theme::MOCHA.red))
+        );
+        assert!(
+            spans
+                .iter()
+                .all(|span| span.background == Some(crate::theme::MOCHA.base))
+        );
+    }
+    #[test]
+    fn inline_code_style_uses_span_colors_and_defaults() {
+        let colored = TextSpan {
+            text: "x".into(),
+            kind: TextSpanKind::Code,
+            foreground: Some(crate::theme::MOCHA.red),
+            background: Some(crate::theme::MOCHA.base),
+        };
+        assert_eq!(
+            super::inline_code_style(&colored, crate::theme::MOCHA.text),
+            (crate::theme::MOCHA.red, Some(crate::theme::MOCHA.base))
+        );
+        let plain = TextSpan {
+            text: "x".into(),
+            kind: TextSpanKind::Code,
+            foreground: None,
+            background: None,
+        };
+        assert_eq!(
+            super::inline_code_style(&plain, crate::theme::MOCHA.text),
+            (crate::theme::MOCHA.text, None)
+        );
+    }
+
+    #[test]
+    fn fenced_code_may_contain_hidden_elements() {
+        let blocks =
+            card_blocks("Example:\n```html\n<script>alert(1)</script>\n```\n");
+        assert!(
+            blocks
+                .iter()
+                .any(|block| matches!(block, CardBlock::Code { .. }))
+        );
+        let Some((language, lines)) =
+            blocks.iter().find_map(|block| match block {
+                CardBlock::Code { language, lines } => Some((language, lines)),
+                CardBlock::Text(_) => None,
+            })
+        else {
+            return;
+        };
+        assert_eq!(language.as_deref(), Some("html"));
+        assert_eq!(lines.len(), 1);
+        assert!(blocks_text(&blocks).contains("<script>alert(1)</script>"));
+    }
+    #[test]
+    fn inline_code_spans_are_skipped_before_block_markers() {
+        let blocks =
+            card_blocks("<code><pre>hello</pre><script>keep</script></code>");
+        assert!(
+            !blocks
+                .iter()
+                .any(|block| matches!(block, CardBlock::Code { .. }))
+        );
+        assert!(blocks_text(&blocks).contains("<script>keep</script>"));
     }
 }

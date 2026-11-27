@@ -23,6 +23,922 @@ pub enum MediaKind {
     Sound,
 }
 
+/// A rendered card is a sequence of text and code blocks.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CardBlock {
+    Text(Vec<CardLine>),
+    Code {
+        language: Option<String>,
+        lines: Vec<Vec<CodeSpan>>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CardLine {
+    pub spans: Vec<TextSpan>,
+}
+
+impl CardLine {
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.spans
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextSpan {
+    pub text: String,
+    pub kind: TextSpanKind,
+    pub foreground: Option<Rgba>,
+    pub background: Option<Rgba>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextSpanKind {
+    Plain,
+    Code,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeSpan {
+    pub text: String,
+    pub kind: TokenKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenKind {
+    Plain,
+    Comment,
+    Keyword,
+    Type,
+    Function,
+    String,
+    Number,
+    Operator,
+    Punctuation,
+}
+
+/// Flattens structured card content into the plain text used by previews.
+#[must_use]
+pub fn blocks_text(blocks: &[CardBlock]) -> String {
+    let mut output = String::new();
+    for (index, block) in blocks.iter().enumerate() {
+        if index > 0 {
+            output.push('\n');
+        }
+        let lines = match block {
+            CardBlock::Text(lines) => {
+                lines.iter().map(CardLine::text).collect::<Vec<_>>()
+            }
+            CardBlock::Code { lines, .. } => lines
+                .iter()
+                .map(|line| {
+                    line.iter()
+                        .map(|span| span.text.as_str())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>(),
+        };
+        output.push_str(&lines.join("\n"));
+    }
+    output
+}
+
+/// Parses Anki and fenced code blocks, leaving the rest as text spans.
+#[must_use]
+pub fn card_blocks(input: &str) -> Vec<CardBlock> {
+    let source = input;
+    let mut blocks = Vec::new();
+    let mut pending = String::new();
+    let mut cursor = 0usize;
+    while let Some(rest) = source.get(cursor..) {
+        let Some((at, fenced)) = next_block_marker(source, cursor) else {
+            pending.push_str(rest);
+            break;
+        };
+        pending.push_str(rest.get(..at).unwrap_or(""));
+        flush_text(&mut blocks, &pending);
+        pending.clear();
+        let start = cursor.saturating_add(at);
+        let parsed = if fenced {
+            parse_fence(source, start)
+        } else {
+            parse_pre(source, start)
+        };
+        if let Some((block, end)) = parsed {
+            blocks.push(block);
+            cursor = end;
+        } else if fenced {
+            pending.push_str("```");
+            cursor = start.saturating_add(3);
+        } else {
+            pending.push_str("<pre");
+            cursor = start.saturating_add(4);
+        }
+    }
+    flush_text(&mut blocks, &pending);
+    blocks
+}
+
+fn next_block_marker(input: &str, cursor: usize) -> Option<(usize, bool)> {
+    let rest = input.get(cursor..)?;
+    let mut offset = 0usize;
+    while let Some(tail) = rest.get(offset..) {
+        let fence = tail.find("```").map(|at| (at, 0u8, ""));
+        let pre = tail.find("<pre").map(|at| (at, 1, ""));
+        let tick = tail.find('`').map(|at| (at, 2, ""));
+        let hidden = hidden_at(tail).map(|(at, tag)| (at, 3, tag));
+        let code_tag = tail.find("<code").map(|at| (at, 4, ""));
+        let (at, kind, marker) = [fence, pre, tick, hidden, code_tag]
+            .into_iter()
+            .flatten()
+            .min_by_key(|(at, kind, _)| (*at, *kind))?;
+        match kind {
+            0 => return Some((offset.saturating_add(at), true)),
+            1 => return Some((offset.saturating_add(at), false)),
+            2 => {
+                let after = tail.get(at.saturating_add(1)..)?;
+                if let Some(end) = after.find('`') {
+                    offset = offset
+                        .saturating_add(at)
+                        .saturating_add(end)
+                        .saturating_add(2);
+                } else {
+                    break;
+                }
+            }
+            4 => {
+                let after = tail.get(at.saturating_add("<code".len())..)?;
+                if let Some(end) = after.find("</code>") {
+                    offset = offset
+                        .saturating_add(at)
+                        .saturating_add("<code".len())
+                        .saturating_add(end)
+                        .saturating_add("</code>".len());
+                } else {
+                    break;
+                }
+            }
+            _ => {
+                let closing = hidden_closing(marker)?;
+                if let Some(end) =
+                    tail.get(at..).and_then(|hidden| hidden.find(closing))
+                {
+                    offset = offset
+                        .saturating_add(at)
+                        .saturating_add(end)
+                        .saturating_add(closing.len());
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    None
+}
+
+fn hidden_at(rest: &str) -> Option<(usize, &'static str)> {
+    ["<script", "<style", "<button"]
+        .into_iter()
+        .filter_map(|tag| rest.find(tag).map(|at| (at, tag)))
+        .min_by_key(|(at, _)| *at)
+}
+
+fn earliest(
+    first: Option<(usize, bool)>,
+    second: Option<(usize, bool)>,
+) -> Option<(usize, bool)> {
+    match (first, second) {
+        (Some(left), Some(right)) => {
+            Some(if left.0 <= right.0 { left } else { right })
+        }
+        (Some(found), None) | (None, Some(found)) => Some(found),
+        (None, None) => None,
+    }
+}
+
+fn flush_text(blocks: &mut Vec<CardBlock>, text: &str) {
+    let mut lines = Vec::new();
+    let mut plain = String::new();
+    let mut cursor = 0usize;
+    while let Some(rest) = text.get(cursor..) {
+        let hidden = hidden_at(rest);
+        let tag = rest.find("<code").map(|at| (at, false));
+        let tick = rest.find('`').map(|at| (at, true));
+        let code = earliest(tag, tick);
+        if let Some((at, marker)) = hidden
+            && code.is_none_or(|(code_at, _)| at <= code_at)
+        {
+            plain.push_str(rest.get(..at).unwrap_or(""));
+            let tail = rest.get(at..).unwrap_or("");
+            let closing = hidden_closing(marker).unwrap_or("");
+            if let Some(end) = tail.find(closing) {
+                cursor = cursor
+                    .saturating_add(at)
+                    .saturating_add(end)
+                    .saturating_add(closing.len());
+            } else {
+                break;
+            }
+            continue;
+        }
+        let Some((at, backtick)) = code else {
+            plain.push_str(rest);
+            break;
+        };
+        plain.push_str(rest.get(..at).unwrap_or(""));
+        let start = cursor.saturating_add(at);
+        if backtick {
+            let after = text.get(start.saturating_add(1)..).unwrap_or("");
+            if let Some(end) = after.find('`') {
+                plain.push_str(
+                    rest.get(at..at.saturating_add(end).saturating_add(2))
+                        .unwrap_or(""),
+                );
+                cursor = start.saturating_add(end).saturating_add(2);
+            } else {
+                plain.push('`');
+                cursor = start.saturating_add(1);
+            }
+        } else {
+            let after = text.get(start..).unwrap_or("");
+            let Some(tag_end) = after.find('>') else {
+                plain.push_str("<code");
+                cursor = start.saturating_add(5);
+                continue;
+            };
+            let body_start = start.saturating_add(tag_end).saturating_add(1);
+            let body = text.get(body_start..).unwrap_or("");
+            if let Some(end) = body.find("</code>") {
+                let code_end = body_start
+                    .saturating_add(end)
+                    .saturating_add("</code>".len());
+                plain.push_str(text.get(start..code_end).unwrap_or(""));
+                cursor = code_end;
+            } else {
+                plain.push_str(after.get(..=tag_end).unwrap_or(""));
+                cursor = body_start;
+            }
+        }
+    }
+    push_spans(&mut lines, &plain, TextSpanKind::Plain);
+    if !lines.is_empty() {
+        blocks.push(CardBlock::Text(lines));
+    }
+}
+
+fn hidden_closing(rest: &str) -> Option<&'static str> {
+    if rest.starts_with("<script") {
+        Some("</script>")
+    } else if rest.starts_with("<style") {
+        Some("</style>")
+    } else if rest.starts_with("<button") {
+        Some("</button>")
+    } else {
+        None
+    }
+}
+
+fn push_spans(lines: &mut Vec<CardLine>, text: &str, kind: TextSpanKind) {
+    match kind {
+        TextSpanKind::Plain => {
+            for run in styled_text(text) {
+                let kind = if run.code {
+                    TextSpanKind::Code
+                } else {
+                    TextSpanKind::Plain
+                };
+                push_parts(
+                    lines,
+                    &run.text,
+                    kind,
+                    run.foreground,
+                    run.background,
+                );
+            }
+        }
+        TextSpanKind::Code => {
+            push_parts(lines, text, kind, None, None);
+        }
+    }
+}
+
+fn push_parts(
+    lines: &mut Vec<CardLine>,
+    text: &str,
+    kind: TextSpanKind,
+    foreground: Option<Rgba>,
+    background: Option<Rgba>,
+) {
+    let mut parts = text.split('\n');
+    let first = parts.next().unwrap_or("");
+    append_span(lines, first, kind, foreground, background);
+    for part in parts {
+        lines.push(CardLine { spans: Vec::new() });
+        append_span(lines, part, kind, foreground, background);
+    }
+}
+
+fn append_span(
+    lines: &mut Vec<CardLine>,
+    text: &str,
+    kind: TextSpanKind,
+    foreground: Option<Rgba>,
+    background: Option<Rgba>,
+) {
+    if text.is_empty() {
+        return;
+    }
+    if lines.is_empty() {
+        lines.push(CardLine { spans: Vec::new() });
+    }
+    if let Some(line) = lines.last_mut() {
+        line.spans.push(TextSpan {
+            text: text.to_owned(),
+            kind,
+            foreground,
+            background,
+        });
+    }
+}
+
+fn parse_pre(input: &str, start: usize) -> Option<(CardBlock, usize)> {
+    let rest = input.get(start..)?;
+    let tag_end = rest.find('>')?;
+    let open_tag = rest.get(..=tag_end)?;
+    let body = rest.get(tag_end.saturating_add(1)..)?;
+    let close = body.find("</pre>")?;
+    let end = start
+        .saturating_add(tag_end)
+        .saturating_add(1)
+        .saturating_add(close)
+        .saturating_add("</pre>".len());
+    let mut inner = body.get(..close)?;
+    let mut language = language_from_tag(open_tag);
+    if let Some(code_at) = inner.find("<code") {
+        let code = inner.get(code_at..)?;
+        if let Some(code_end) = code.find('>') {
+            language =
+                language.or_else(|| language_from_tag(code.get(..=code_end)?));
+            let source = code.get(code_end.saturating_add(1)..)?;
+            inner = source.get(..source.find("</code>")?).unwrap_or(source);
+        }
+    }
+    let raw =
+        decode_entities(&inner.replace("<br>", "\n").replace("<br/>", "\n"));
+    let source = raw.strip_suffix('\n').unwrap_or(&raw);
+    let lines = highlight_code(source, language.as_deref());
+    Some((CardBlock::Code { language, lines }, end))
+}
+
+fn parse_fence(input: &str, start: usize) -> Option<(CardBlock, usize)> {
+    let marker_len = input
+        .get(start..)
+        .map_or(3, |tail| tail.chars().take_while(|c| *c == '`').count())
+        .max(3);
+    let rest = input.get(start.saturating_add(marker_len)..)?;
+    let info_end = rest.find('\n')?;
+    let language = language_from_info(rest.get(..info_end)?);
+    let body_start = start
+        .saturating_add(marker_len)
+        .saturating_add(info_end)
+        .saturating_add(1);
+    let body = input.get(body_start..)?;
+    let mut offset = 0usize;
+    let close = body.split_inclusive('\n').find_map(|line| {
+        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+        let count = trimmed.chars().take_while(|c| *c == '`').count();
+        let found = (count >= marker_len
+            && trimmed
+                .get(count..)
+                .is_some_and(|tail| tail.trim().is_empty()))
+        .then_some(offset);
+        offset = offset.saturating_add(line.len());
+        found
+    })?;
+    let raw = body.get(..close)?;
+    let source = raw
+        .strip_suffix("\r\n")
+        .or_else(|| raw.strip_suffix('\n'))
+        .unwrap_or(raw);
+    let tail = body.get(close..)?;
+    let end = body_start.saturating_add(close).saturating_add(
+        tail.find('\n')
+            .map_or(tail.len(), |at| at.saturating_add(1)),
+    );
+    let lines = highlight_code(&decode_entities(source), language.as_deref());
+    Some((CardBlock::Code { language, lines }, end))
+}
+
+fn language_from_info(info: &str) -> Option<String> {
+    let token = info.split_whitespace().next()?;
+    let token = token
+        .trim_start_matches('.')
+        .trim_matches(',')
+        .to_ascii_lowercase();
+    (!token.is_empty()).then_some(token)
+}
+
+fn language_from_tag(tag: &str) -> Option<String> {
+    let lowered = tag.to_ascii_lowercase();
+    if let Some(language) = attribute_value(&lowered, "data-language") {
+        return Some(language);
+    }
+    let classes = attribute_value(&lowered, "class")?;
+    classes
+        .split_whitespace()
+        .map(|token| token.trim_start_matches("language-"))
+        .find(|token| !token.is_empty() && !matches!(*token, "code" | "hljs"))
+        .map(str::to_owned)
+}
+
+fn attribute_value(tag: &str, name: &str) -> Option<String> {
+    let key = format!("{name}=");
+    let at = tag.find(&key)?;
+    let tail = tag.get(at.saturating_add(key.len())..)?;
+    let quote = tail.chars().next();
+    if quote == Some('"') || quote == Some('\'') {
+        let mark = quote.unwrap_or('"');
+        let inner = tail.get(1..)?;
+        return inner
+            .find(mark)
+            .and_then(|end| inner.get(..end))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+    }
+    tail.split_whitespace()
+        .next()
+        .map(str::to_owned)
+        .filter(|value| !value.is_empty())
+}
+
+#[must_use]
+pub fn highlight_code(
+    code: &str,
+    language: Option<&str>,
+) -> Vec<Vec<CodeSpan>> {
+    code.split('\n')
+        .map(|line| highlight_line(line, language))
+        .collect()
+}
+
+#[must_use]
+pub fn highlight_line(line: &str, language: Option<&str>) -> Vec<CodeSpan> {
+    let syntax = Syntax::from_language(language);
+    let chars = line.char_indices().collect::<Vec<_>>();
+    let mut spans = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let (_, current) = chars[index];
+        if let Some(closing) = syntax.comment_at(&chars, index) {
+            let tail = chars
+                .get(index..)
+                .unwrap_or(&[])
+                .iter()
+                .map(|(_, c)| *c)
+                .collect::<String>();
+            let (end, closed) = match closing {
+                Comment::Line => (tail.len(), false),
+                Comment::Block(mark) => {
+                    tail.find(mark).map_or((tail.len(), false), |at| {
+                        (at.saturating_add(mark.len()), true)
+                    })
+                }
+            };
+            push_span(
+                &mut spans,
+                TokenKind::Comment,
+                tail.get(..end).unwrap_or(""),
+            );
+            index = if closed {
+                index.saturating_add(
+                    tail.get(..end).map_or(0, |part| part.chars().count()),
+                )
+            } else {
+                chars.len()
+            };
+            continue;
+        }
+        if current == '"'
+            || current == '\''
+            || (current == '`' && syntax.has_backticks())
+        {
+            let end = string_end(&chars, index, current, syntax);
+            let text = slice(&chars, line, index, end);
+            push_span(&mut spans, TokenKind::String, text);
+            index = end;
+            continue;
+        }
+        if current.is_ascii_digit() {
+            let mut end = index.saturating_add(1);
+            while let Some((_, character)) = chars.get(end) {
+                if character.is_ascii_alphanumeric()
+                    || matches!(character, '_' | '.')
+                {
+                    end = end.saturating_add(1);
+                } else {
+                    break;
+                }
+            }
+            push_span(
+                &mut spans,
+                TokenKind::Number,
+                slice(&chars, line, index, end),
+            );
+            index = end;
+            continue;
+        }
+        if current.is_alphabetic() || current == '_' {
+            let mut end = index.saturating_add(1);
+            while let Some((_, character)) = chars.get(end) {
+                if character.is_alphanumeric() || *character == '_' {
+                    end = end.saturating_add(1);
+                } else {
+                    break;
+                }
+            }
+            let word = slice(&chars, line, index, end);
+            let kind = if syntax.is_keyword(word) {
+                TokenKind::Keyword
+            } else if chars.get(end).is_some_and(|(_, c)| *c == '(') {
+                TokenKind::Function
+            } else if syntax.is_type(word) {
+                TokenKind::Type
+            } else {
+                TokenKind::Plain
+            };
+            push_span(&mut spans, kind, word);
+            index = end;
+            continue;
+        }
+        if is_operator(current) {
+            let mut end = index.saturating_add(1);
+            while let Some((_, character)) = chars.get(end) {
+                if is_operator(*character) {
+                    end = end.saturating_add(1);
+                } else {
+                    break;
+                }
+            }
+            push_span(
+                &mut spans,
+                TokenKind::Operator,
+                slice(&chars, line, index, end),
+            );
+            index = end;
+            continue;
+        }
+        let kind = if current.is_whitespace() {
+            TokenKind::Plain
+        } else {
+            TokenKind::Punctuation
+        };
+        push_span(
+            &mut spans,
+            kind,
+            slice(&chars, line, index, index.saturating_add(1)),
+        );
+        index = index.saturating_add(1);
+    }
+    spans
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Comment {
+    Line,
+    Block(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Syntax {
+    Rust,
+    Python,
+    Javascript,
+    Shell,
+    Json,
+    Sql,
+    CStyle,
+    Css,
+    Html,
+    Generic,
+}
+
+impl Syntax {
+    fn from_language(language: Option<&str>) -> Self {
+        match language.unwrap_or("").to_ascii_lowercase().as_str() {
+            "rs" | "rust" => Self::Rust,
+            "py" | "python" | "python3" => Self::Python,
+            "js" | "jsx" | "javascript" | "ts" | "tsx" | "typescript" => {
+                Self::Javascript
+            }
+            "sh" | "bash" | "zsh" | "shell" | "console" => Self::Shell,
+            "json" | "jsonc" => Self::Json,
+            "sql" => Self::Sql,
+            "c" | "cc" | "cpp" | "c++" | "h" | "hpp" | "java" | "go" | "cs"
+            | "csharp" => Self::CStyle,
+            "css" | "scss" => Self::Css,
+            "html" | "xml" => Self::Html,
+            _ => Self::Generic,
+        }
+    }
+
+    const fn comment_prefixes(self) -> &'static [&'static str] {
+        match self {
+            Self::Python | Self::Shell => &["#"],
+            Self::Sql => &["--", "/*"],
+            Self::Json => &[],
+            Self::Html => &["<!--"],
+            Self::Css
+            | Self::CStyle
+            | Self::Rust
+            | Self::Javascript
+            | Self::Generic => &["//", "/*"],
+        }
+    }
+
+    fn comment_at(
+        self,
+        chars: &[(usize, char)],
+        index: usize,
+    ) -> Option<Comment> {
+        self.comment_prefixes().iter().find_map(|prefix| {
+            let found = prefix.chars().enumerate().all(|(offset, expected)| {
+                chars
+                    .get(index.saturating_add(offset))
+                    .is_some_and(|(_, c)| *c == expected)
+            });
+            let comment = match *prefix {
+                "/*" => Comment::Block("*/"),
+                "<!--" => Comment::Block("-->"),
+                _ => Comment::Line,
+            };
+            found.then_some(comment)
+        })
+    }
+
+    const fn has_backticks(self) -> bool {
+        matches!(self, Self::Javascript | Self::Shell | Self::Generic)
+    }
+
+    fn is_keyword(self, word: &str) -> bool {
+        let keywords = match self {
+            Self::Rust => RUST_KEYWORDS,
+            Self::Python => PYTHON_KEYWORDS,
+            Self::Javascript => JAVASCRIPT_KEYWORDS,
+            Self::Shell => SHELL_KEYWORDS,
+            Self::Json => JSON_KEYWORDS,
+            Self::Sql => SQL_KEYWORDS,
+            Self::CStyle => CSTYLE_KEYWORDS,
+            Self::Css | Self::Html | Self::Generic => COMMON_KEYWORDS,
+        };
+        keywords
+            .iter()
+            .any(|keyword| keyword.eq_ignore_ascii_case(word))
+    }
+
+    fn is_type(self, word: &str) -> bool {
+        let types = match self {
+            Self::Rust => RUST_TYPES,
+            Self::Python => PYTHON_TYPES,
+            Self::Javascript => JAVASCRIPT_TYPES,
+            Self::CStyle => CSTYLE_TYPES,
+            Self::Sql => SQL_TYPES,
+            Self::Json
+            | Self::Shell
+            | Self::Css
+            | Self::Html
+            | Self::Generic => COMMON_TYPES,
+        };
+        types
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(word))
+            || word.chars().next().is_some_and(char::is_uppercase)
+    }
+}
+
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn",
+    "else", "enum", "false", "fn", "for", "if", "impl", "in", "let", "loop",
+    "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self",
+    "static", "struct", "super", "trait", "true", "type", "unsafe", "use",
+    "where", "while",
+];
+const PYTHON_KEYWORDS: &[&str] = &[
+    "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "False", "finally", "for", "from",
+    "global", "if", "import", "in", "is", "lambda", "None", "nonlocal", "not",
+    "or", "pass", "raise", "return", "True", "try", "while", "with", "yield",
+];
+const JAVASCRIPT_KEYWORDS: &[&str] = &[
+    "async",
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "delete",
+    "else",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "from",
+    "function",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "interface",
+    "let",
+    "new",
+    "null",
+    "of",
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "return",
+    "static",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "type",
+    "typeof",
+    "undefined",
+    "var",
+    "while",
+];
+const SHELL_KEYWORDS: &[&str] = &[
+    "case", "cd", "do", "done", "echo", "elif", "else", "esac", "export", "fi",
+    "for", "function", "if", "in", "local", "return", "set", "source", "then",
+    "while",
+];
+const JSON_KEYWORDS: &[&str] = &["false", "null", "true"];
+const SQL_KEYWORDS: &[&str] = &[
+    "and", "as", "by", "create", "delete", "drop", "false", "from", "group",
+    "insert", "into", "join", "limit", "not", "null", "on", "or", "order",
+    "select", "set", "table", "true", "update", "values", "where",
+];
+const CSTYLE_KEYWORDS: &[&str] = &[
+    "bool",
+    "break",
+    "case",
+    "char",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "defer",
+    "delete",
+    "double",
+    "else",
+    "false",
+    "final",
+    "float",
+    "for",
+    "func",
+    "go",
+    "if",
+    "include",
+    "int",
+    "make",
+    "map",
+    "namespace",
+    "new",
+    "nil",
+    "private",
+    "public",
+    "range",
+    "return",
+    "static",
+    "struct",
+    "switch",
+    "template",
+    "true",
+    "void",
+    "while",
+];
+const COMMON_KEYWORDS: &[&str] = &[
+    "and", "break", "class", "const", "continue", "else", "false", "fn", "for",
+    "from", "function", "if", "import", "in", "let", "new", "not", "null",
+    "or", "return", "true", "while",
+];
+const RUST_TYPES: &[&str] = &[
+    "bool", "char", "f32", "f64", "i16", "i32", "i64", "isize", "Option",
+    "Result", "str", "String", "u16", "u32", "u64", "usize", "Vec",
+];
+const PYTHON_TYPES: &[&str] = &[
+    "bool", "bytes", "dict", "float", "int", "list", "object", "set", "str",
+    "tuple",
+];
+const JAVASCRIPT_TYPES: &[&str] = &[
+    "Array", "Date", "Map", "number", "object", "Promise", "RegExp", "Set",
+    "string", "boolean",
+];
+const CSTYLE_TYPES: &[&str] = &[
+    "bool", "byte", "char", "double", "float", "int", "long", "short",
+    "size_t", "string", "uchar", "uint", "void",
+];
+const SQL_TYPES: &[&str] = &["INTEGER", "REAL", "TEXT", "BLOB"];
+const COMMON_TYPES: &[&str] = &["bool", "float", "int", "str", "string"];
+
+fn slice<'a>(
+    chars: &[(usize, char)],
+    line: &'a str,
+    start: usize,
+    end: usize,
+) -> &'a str {
+    let from = chars.get(start).map_or(0, |(at, _)| *at);
+    let to = chars.get(end).map_or(line.len(), |(at, _)| *at);
+    line.get(from..to).unwrap_or("")
+}
+
+fn string_end(
+    chars: &[(usize, char)],
+    start: usize,
+    quote: char,
+    syntax: Syntax,
+) -> usize {
+    let mut end = start.saturating_add(1);
+    let mut escaped = false;
+    let mut triple = false;
+    if syntax == Syntax::Python
+        && chars.get(end).is_some_and(|(_, c)| *c == quote)
+        && chars
+            .get(end.saturating_add(1))
+            .is_some_and(|(_, c)| *c == quote)
+    {
+        triple = true;
+        end = end.saturating_add(2);
+    }
+    let limit = if triple { 3 } else { 1 };
+    while let Some((_, character)) = chars.get(end) {
+        if escaped {
+            escaped = false;
+        } else if *character == '\\' {
+            escaped = true;
+        } else if *character == quote {
+            let mut close = end.saturating_add(1);
+            let mut count: usize = 1;
+            while count < limit
+                && chars.get(close).is_some_and(|(_, c)| *c == quote)
+            {
+                close = close.saturating_add(1);
+                count = count.saturating_add(1);
+            }
+            if count == limit {
+                return close;
+            }
+        }
+        end = end.saturating_add(1);
+    }
+    end
+}
+
+fn push_span(spans: &mut Vec<CodeSpan>, kind: TokenKind, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = spans.last_mut()
+        && last.kind == kind
+    {
+        last.text.push_str(text);
+        return;
+    }
+    spans.push(CodeSpan {
+        text: text.to_owned(),
+        kind,
+    });
+}
+
+fn is_operator(character: char) -> bool {
+    matches!(
+        character,
+        '+' | '-'
+            | '*'
+            | '/'
+            | '%'
+            | '='
+            | '<'
+            | '>'
+            | '!'
+            | '&'
+            | '|'
+            | '^'
+            | '~'
+            | '?'
+    )
+}
 /// Media references that appear on the answer but not on the question.
 #[must_use]
 pub fn answer_only_media(
@@ -523,6 +1439,36 @@ pub(super) fn styled_text(input: &str) -> Vec<TextRun> {
             }
             continue;
         }
+        if rest.starts_with("<code")
+            && let Some(tag_end) = rest.find('>')
+        {
+            let body_start = tag_end.saturating_add(1);
+            if let Some(end) =
+                rest.get(body_start..).and_then(|tail| tail.find("</code>"))
+            {
+                let body = rest
+                    .get(body_start..body_start.saturating_add(end))
+                    .unwrap_or("");
+                push_text(&mut runs, body, style, true);
+                cursor = cursor
+                    .saturating_add(body_start)
+                    .saturating_add(end)
+                    .saturating_add("</code>".len());
+                continue;
+            }
+        }
+        if rest.starts_with('`')
+            && let Some(end) = rest.get(1..).and_then(|tail| tail.find('`'))
+        {
+            push_text(
+                &mut runs,
+                rest.get(1..end.saturating_add(1)).unwrap_or(""),
+                style,
+                true,
+            );
+            cursor = cursor.saturating_add(end).saturating_add(2);
+            continue;
+        }
         if rest.starts_with('<')
             && rest
                 .get(1..)
@@ -540,7 +1486,7 @@ pub(super) fn styled_text(input: &str) -> Vec<TextRun> {
                 || tag.starts_with("</div")
                 || tag.starts_with("</p")
             {
-                push_text(&mut runs, "\n", style);
+                push_text(&mut runs, "\n", style, false);
             }
             let lower = tag.to_ascii_lowercase();
             if lower.starts_with("</span") || lower.starts_with("</font") {
@@ -558,7 +1504,7 @@ pub(super) fn styled_text(input: &str) -> Vec<TextRun> {
             break;
         };
         let mut encoded = [0u8; 4];
-        push_text(&mut runs, character.encode_utf8(&mut encoded), style);
+        push_text(&mut runs, character.encode_utf8(&mut encoded), style, false);
         cursor = cursor.saturating_add(character.len_utf8());
     }
     for run in &mut runs {
@@ -573,13 +1519,14 @@ struct Style {
     background: Option<Rgba>,
 }
 
-fn push_text(runs: &mut Vec<TextRun>, text: &str, style: Style) {
+fn push_text(runs: &mut Vec<TextRun>, text: &str, style: Style, code: bool) {
     if text.is_empty() {
         return;
     }
     if let Some(last) = runs.last_mut()
         && last.foreground == style.foreground
         && last.background == style.background
+        && last.code == code
     {
         last.text.push_str(text);
     } else {
@@ -588,6 +1535,7 @@ fn push_text(runs: &mut Vec<TextRun>, text: &str, style: Style) {
             foreground: style.foreground,
             background: style.background,
             math: false,
+            code,
             ..Default::default()
         });
     }
@@ -877,7 +1825,6 @@ pub(super) fn cloze_spans(
 }
 
 /// Renders a cloze field for a one-based card number and side.
-#[cfg(test)]
 #[must_use]
 pub fn cloze_segments(
     text: &str,
