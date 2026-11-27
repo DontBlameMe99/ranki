@@ -1153,8 +1153,8 @@ impl Root {
             .find(|deck| deck.name == deck_name)
             .cloned()
         {
-            let collection = root.options.collection.clone();
-            let media_dir = root.options.media_dir.clone();
+            let collection = root.options.paths.collection.clone();
+            let media_dir = root.options.paths.media_dir.clone();
             let weak = cx.entity().downgrade();
             cx.defer(move |cx| {
                 let _ = weak.update(cx, |root, cx| {
