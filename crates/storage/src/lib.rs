@@ -22,17 +22,19 @@
 //! All values are bound as SQL parameters.
 
 mod anki;
+mod entities;
 mod options;
 mod records;
 mod reopening;
 mod schema;
 mod search;
+mod tags;
 
 use std::cell::OnceCell;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Display;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::slice;
@@ -49,17 +51,24 @@ pub use anki::encode_deck_name;
 pub use anki::normal_deck_kind;
 pub use anki::protobuf_floats;
 pub use anki::with_deck_kind_config_id;
+pub use anki::{
+    checksum, csum_value, html_to_text_line, legacy_checksum,
+    legacy_field_text, sort_field, strip_html,
+    strip_html_preserving_media_filenames,
+};
 pub use reopening::ReopeningCollection;
 
 pub use records::models_from_tables_with_prefix;
 pub use records::models_to_json;
 
+use ranki_model::AddNoteOptions;
 use ranki_model::Card;
 use ranki_model::DEFAULT_DECK_ID;
 use ranki_model::Deck;
 use ranki_model::DeckStats;
 use ranki_model::DeckSteps;
 use ranki_model::DeckTotals;
+use ranki_model::DuplicateScope;
 use ranki_model::Id;
 use ranki_model::NewNote;
 use ranki_model::Note;
@@ -72,6 +81,7 @@ use rusqlite::Connection;
 use rusqlite::OpenFlags;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
+use rusqlite::TransactionBehavior;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::params;
 use rusqlite::params_from_iter;
@@ -612,18 +622,7 @@ impl Store for Collection {
     }
 
     fn tags(&self) -> Result<Vec<String>, StoreError> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT tags FROM notes")
-            .map_err(backend)?;
-        let rows = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(backend)?;
-        let mut tags = BTreeSet::new();
-        for row in rows {
-            tags.extend(anki::decode_tags(&row.map_err(backend)?));
-        }
-        Ok(tags.into_iter().collect())
+        tags::all(&self.conn)
     }
 
     fn ensure_model(
@@ -786,6 +785,18 @@ impl Store for Collection {
     }
 
     fn add_note(&mut self, note: &NewNote) -> Result<Vec<Id>, StoreError> {
+        self.add_note_with_options(note, &AddNoteOptions::default())
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "note writes keep validation and card generation in one transaction"
+    )]
+    fn add_note_with_options(
+        &mut self,
+        note: &NewNote,
+        options: &AddNoteOptions,
+    ) -> Result<Vec<Id>, StoreError> {
         let model = self
             .model_list()?
             .into_iter()
@@ -799,15 +810,51 @@ impl Store for Collection {
         if !self.deck_subtree(note.deck_id)?.contains(&note.deck_id) {
             return Err(StoreError::NotFound(format!("deck {}", note.deck_id)));
         }
-        let id = fresh_id(&self.conn, "notes")?;
+        let normalize_text = normalize_note_text(&self.conn)?;
+        let mut fields = note.fields.clone();
+        for field in &mut fields {
+            anki::normalize_field(field, normalize_text);
+        }
+        let first = fields.first().map_or("", String::as_str);
+        let checksum = anki::checksum_with(first, normalize_text);
+        let original_first = note.fields.first().map_or("", String::as_str);
+        let legacy_sum = anki::legacy_checksum(original_first);
+        let stripped_first = anki::strip_html_preserving_media_filenames_with(
+            first,
+            normalize_text,
+        );
+        let legacy_first = anki::legacy_field_text(original_first);
+        if stripped_first.trim().is_empty() {
+            return Err(invalid("empty question"));
+        }
+        let transaction = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(backend)?;
+        if !options.allow_duplicate
+            && duplicate_exists(
+                &transaction,
+                note.model_id,
+                checksum,
+                legacy_sum,
+                &stripped_first,
+                &legacy_first,
+                normalize_text,
+                &options.duplicate_scope,
+            )?
+        {
+            return Err(invalid("duplicate"));
+        }
+        let id = fresh_id(&transaction, "notes")?;
         let guid = anki::guid(id)?;
         let modified = anki::now_secs()?;
-        let first = note.fields.first().map_or("", String::as_str);
-        let sort_field =
-            anki::sort_field(&note.fields, usize::from(model.sort_field_index));
-        let checksum = anki::checksum(first);
-        let transaction = self.conn.transaction().map_err(backend)?;
+        let sort_field = anki::sort_field_with(
+            &fields,
+            usize::from(model.sort_field_index),
+            normalize_text,
+        );
         let usn = update_col(&transaction, false)?;
+        let tags = tags::canonify(&note.tags, &transaction, usn)?;
         let next_position = next_position(&transaction)?;
         transaction
             .execute(
@@ -819,14 +866,14 @@ impl Store for Collection {
                     note.model_id,
                     modified,
                     usn,
-                    anki::encode_tags(&note.tags),
-                    anki::encode_fields(&note.fields),
+                    anki::encode_tags(&tags),
+                    anki::encode_fields(&fields),
                     sort_field,
                     anki::csum_value(checksum),
                 ],
             )
             .map_err(backend)?;
-        let ordinals = model.card_ordinals(&note.fields);
+        let ordinals = model.card_ordinals(&fields);
         let mut cards: Vec<Id> = Vec::with_capacity(ordinals.len());
         for (offset, ordinal) in ordinals.into_iter().enumerate() {
             let card_id = fresh_id(&transaction, "cards")?;
@@ -860,6 +907,10 @@ impl Store for Collection {
         Ok(cards)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "note updates keep validation and writes in one transaction"
+    )]
     fn update_note(
         &mut self,
         note: &Note,
@@ -878,6 +929,12 @@ impl Store for Collection {
         if !self.deck_subtree(deck_id)?.contains(&deck_id) {
             return Err(StoreError::NotFound(format!("deck {deck_id}")));
         }
+        let normalize_text = normalize_note_text(&self.conn)?;
+        let mut fields = note.fields.clone();
+        for field in &mut fields {
+            anki::normalize_field(field, normalize_text);
+        }
+        let first = fields.first().map_or("", String::as_str);
         let transaction = self.conn.transaction().map_err(backend)?;
         let exists: bool = transaction
             .query_row(
@@ -889,7 +946,7 @@ impl Store for Collection {
         if !exists {
             return Err(StoreError::NotFound(format!("note {}", note.id)));
         }
-        let mut expected = model.card_ordinals(&note.fields);
+        let mut expected = model.card_ordinals(&fields);
         expected.sort_unstable();
         let mut statement = transaction
             .prepare("SELECT ord FROM cards WHERE nid = ?1 ORDER BY ord")
@@ -909,25 +966,26 @@ impl Store for Collection {
         }
         drop(statement);
         let usn = update_col(&transaction, false)?;
+        let tags = tags::canonify(&note.tags, &transaction, usn)?;
         let modified = anki::now_secs()?;
-        let first = note.fields.first().map_or("", String::as_str);
-        let sort_field =
-            anki::sort_field(&note.fields, usize::from(model.sort_field_index));
-        let checksum = anki::checksum(first);
+        let sort_field = anki::sort_field_with(
+            &fields,
+            usize::from(model.sort_field_index),
+            normalize_text,
+        );
+        let checksum = anki::checksum_with(first, normalize_text);
         transaction
             .execute(
                 "UPDATE notes SET mid = ?1, mod = ?2, usn = ?3, tags = ?4, flds = ?5, \
-                 sfld = ?6, csum = ?7, flags = ?8, data = ?9 WHERE id = ?10",
+                 sfld = ?6, csum = ?7 WHERE id = ?8",
                 params![
                     note.model_id,
                     modified,
                     usn,
-                    anki::encode_tags(&note.tags),
-                    anki::encode_fields(&note.fields),
+                    anki::encode_tags(&tags),
+                    anki::encode_fields(&fields),
                     sort_field,
                     anki::csum_value(checksum),
-                    note.flags,
-                    note.data,
                     note.id,
                 ],
             )
@@ -1327,7 +1385,7 @@ fn minutes_to_seconds(minutes: f64) -> Option<u32> {
 /// Returns an error when SQLite cannot install the collation.
 pub fn register_collations(conn: &Connection) -> Result<(), StoreError> {
     conn.create_collation("unicase", |left, right| {
-        left.to_lowercase().cmp(&right.to_lowercase())
+        unicase::UniCase::new(left).cmp(&unicase::UniCase::new(right))
     })
     .map_err(backend)
 }
@@ -1360,6 +1418,96 @@ fn fnv_hash(first: i64, second: i64) -> i64 {
         }
     }
     i64::from_ne_bytes(hash.to_ne_bytes())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the duplicate check needs both checksums, both field texts, and scope inputs"
+)]
+fn duplicate_exists(
+    conn: &Connection,
+    model_id: Id,
+    checksum: i32,
+    legacy_sum: i32,
+    first_field: &str,
+    legacy_first: &str,
+    normalize_text: bool,
+    scope: &DuplicateScope,
+) -> Result<bool, StoreError> {
+    let mut sql = String::from(
+        "SELECT id, flds FROM notes WHERE (csum = ?1 OR csum = ?2)",
+    );
+    let mut parameters = vec![
+        SqlValue::Integer(anki::csum_value(checksum)),
+        SqlValue::Integer(anki::csum_value(legacy_sum)),
+    ];
+    if !scope.check_all_models {
+        let _ = write!(sql, " AND mid = ?3");
+        parameters.push(SqlValue::Integer(model_id));
+    }
+
+    let allowed_decks = if scope.use_deck {
+        let Some(deck_id) = scope.deck_id else {
+            return Ok(false);
+        };
+        if scope.check_children {
+            let decks = deck_list_from(conn)?;
+            let Some(name) = decks.iter().find(|deck| deck.id == deck_id)
+            else {
+                return Ok(false);
+            };
+            deck_subtree_ids(&decks, &name.name)
+        } else {
+            vec![deck_id]
+        }
+    } else {
+        Vec::new()
+    };
+
+    let mut statement = conn.prepare(&sql).map_err(backend)?;
+    let rows = statement
+        .query_map(params_from_iter(parameters), |row| {
+            Ok((row.get::<_, Id>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(backend)?;
+    for row in rows {
+        let (id, fields) = row.map_err(backend)?;
+        let note_fields = anki::decode_fields(&fields);
+        let other = note_fields.first().map_or("", String::as_str);
+        let current = anki::strip_html_preserving_media_filenames_with(
+            other,
+            normalize_text,
+        );
+        if current != first_field
+            && anki::legacy_field_text(other) != legacy_first
+        {
+            continue;
+        }
+        if scope.use_deck && !note_has_card_in(conn, id, &allowed_decks)? {
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn note_has_card_in(
+    conn: &Connection,
+    note_id: Id,
+    deck_ids: &[Id],
+) -> Result<bool, StoreError> {
+    let mut statement = conn
+        .prepare("SELECT did FROM cards WHERE nid = ?1")
+        .map_err(backend)?;
+    let rows = statement
+        .query_map([note_id], |row| row.get::<_, Id>(0))
+        .map_err(backend)?;
+    for row in rows {
+        if deck_ids.contains(&row.map_err(backend)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn backend(error: impl Display) -> StoreError {
@@ -2131,6 +2279,28 @@ fn parse_conf(conf: &str) -> Result<Json, StoreError> {
     serde_json::from_str(conf).map_err(|error| invalid(error.to_string()))
 }
 
+/// Anki's `normalize_note_text` preference, enabled by default.
+fn normalize_note_text(conn: &Connection) -> Result<bool, StoreError> {
+    if records::table_exists(conn, "config")? {
+        let raw: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT val FROM config WHERE key = 'normalize_note_text'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(backend)?;
+        return Ok(raw
+            .and_then(|value| serde_json::from_slice(&value).ok())
+            .unwrap_or(true));
+    }
+    let col = records::read_col(conn)?;
+    let config = parse_conf(&col.conf)?;
+    Ok(config
+        .get("normalize_note_text")
+        .and_then(Json::as_bool)
+        .unwrap_or(true))
+}
 /// Reads a decimal position stored as UTF-8 bytes in the config table.
 fn parse_position(bytes: &[u8]) -> Option<i64> {
     str::from_utf8(bytes).ok()?.parse().ok()

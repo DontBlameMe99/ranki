@@ -1,12 +1,21 @@
 //! AnkiConnect-compatible JSON-RPC server.
 
 use std::fmt;
+use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
+use std::path::PathBuf;
+use std::process;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use unicode_normalization::UnicodeNormalization;
 
 use ranki_core::FsrsScheduler;
+use ranki_model::AddNoteOptions;
 use ranki_model::CardQueue;
 use ranki_model::CardType;
 use ranki_model::Deck;
+use ranki_model::DuplicateScope;
 use ranki_model::Id;
 use ranki_model::Note;
 use ranki_model::NoteModel;
@@ -29,6 +38,7 @@ use crate::answer_card;
 use crate::error::{ErrorCode, InterfaceError};
 use crate::save_card;
 const API_VERSION: u32 = 6;
+static MEDIA_STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const EMPTY_PARAMS: Value = Value::Null;
 
 #[derive(Debug)]
@@ -114,9 +124,14 @@ impl RpcResponse {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the HTTP entry point takes its collection, media directory, port, and scheduler"
+)]
 pub fn serve(
     path: &Path,
     port: u16,
+    media_dir: &Path,
     scheduler: &FsrsScheduler,
 ) -> CliResult<()> {
     let address = ("127.0.0.1", port);
@@ -130,7 +145,8 @@ pub fn serve(
                 CliError::Message(String::from("invalid HTTP header"))
             })?;
     for mut request in server.incoming_requests() {
-        let response = read_and_dispatch(&mut store, &mut request, scheduler);
+        let response =
+            read_and_dispatch(&mut store, media_dir, &mut request, scheduler);
         let body = serde_json::to_string(&response)?;
         request
             .respond(Response::from_string(body).with_header(header.clone()))?;
@@ -138,8 +154,13 @@ pub fn serve(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "request dispatch shares the server's explicit inputs"
+)]
 fn read_and_dispatch(
     store: &mut Collection,
+    media_dir: &Path,
     request: &mut Request,
     scheduler: &FsrsScheduler,
 ) -> RpcResponse {
@@ -147,11 +168,16 @@ fn read_and_dispatch(
     if let Err(error) = request.as_reader().read_to_end(&mut body) {
         return RpcResponse::error(format!("cannot read request: {error}"));
     }
-    handle_body(store, &body, scheduler)
+    handle_body(store, media_dir, &body, scheduler)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "request dispatch shares the server's explicit inputs"
+)]
 fn handle_body(
     store: &mut Collection,
+    media_dir: &Path,
     body: &[u8],
     scheduler: &FsrsScheduler,
 ) -> RpcResponse {
@@ -168,7 +194,7 @@ fn handle_body(
         ));
     }
     let params = request.params.as_ref().unwrap_or(&EMPTY_PARAMS);
-    match dispatch(store, &request.action, params, scheduler) {
+    match dispatch(store, media_dir, &request.action, params, scheduler) {
         Ok(result) => RpcResponse::ok(result),
         Err(error) => RpcResponse::error(error),
     }
@@ -180,6 +206,7 @@ fn handle_body(
 )]
 fn dispatch(
     store: &mut Collection,
+    media_dir: &Path,
     action: &str,
     params: &Value,
     scheduler: &FsrsScheduler,
@@ -193,7 +220,7 @@ fn dispatch(
             store.models()?.iter().map(|model| model.name.as_str())
         ))),
         "modelFieldNames" => model_field_names(store, params),
-        "addNote" => add_note(store, params),
+        "addNote" => add_note(store, media_dir, params),
         "findCards" => {
             Ok(json!(store.find_cards(param_str(params, "query")?)?))
         }
@@ -278,7 +305,15 @@ fn model_field_names(
     Ok(json!(model.fields))
 }
 
-fn add_note(store: &mut Collection, params: &Value) -> Result<Value, RpcError> {
+#[expect(
+    clippy::too_many_lines,
+    reason = "addNote validates fields and coordinates staged media with the store"
+)]
+fn add_note(
+    store: &mut Collection,
+    media_dir: &Path,
+    params: &Value,
+) -> Result<Value, RpcError> {
     let note = member(params, "note")?;
     let deck_name = member(note, "deckName")?
         .as_str()
@@ -306,7 +341,7 @@ fn add_note(store: &mut Collection, params: &Value) -> Result<Value, RpcError> {
             return Err(format!("unknown field: {key}").into());
         }
     }
-    let ordered: Vec<String> = model
+    let mut ordered: Vec<String> = model
         .fields
         .iter()
         .map(|name| {
@@ -318,16 +353,45 @@ fn add_note(store: &mut Collection, params: &Value) -> Result<Value, RpcError> {
                 .to_owned()
         })
         .collect();
+    let options = note_options(note, &decks, deck.id)?;
+    let media = prepare_media(note, &model.fields)?;
+    apply_media(&media, &mut ordered);
     if ordered.first().is_none_or(|value| value.trim().is_empty()) {
         return Err("empty question".into());
     }
     let tags = note_tags(note)?;
-    let ids = store.add_note(&ranki_model::NewNote {
-        model_id: model.id,
-        deck_id: deck.id,
-        fields: ordered,
-        tags,
-    })?;
+    let (stage, staged) = stage_media(&media, media_dir)?;
+    let published = match publish_media(&media, &staged, &stage, media_dir) {
+        Ok(published) => published,
+        Err(error) => {
+            cleanup_stage(&stage);
+            return Err(error);
+        }
+    };
+    let ids = match store.add_note_with_options(
+        &ranki_model::NewNote {
+            model_id: model.id,
+            deck_id: deck.id,
+            fields: ordered,
+            tags,
+        },
+        &options,
+    ) {
+        Ok(ids) => ids,
+        Err(error) => {
+            let rollback = rollback_media(&published)
+                .err()
+                .map(|detail| format!("; media rollback failed: {detail}"))
+                .unwrap_or_default();
+            return Err(format!("{error}{rollback}").into());
+        }
+    };
+    if let Err(error) = finish_media(&published) {
+        return Err(format!(
+            "{error}; note was created but media cleanup failed"
+        )
+        .into());
+    }
     let Some(card_id) = ids.first().copied() else {
         return Ok(Value::Null);
     };
@@ -335,6 +399,366 @@ fn add_note(store: &mut Collection, params: &Value) -> Result<Value, RpcError> {
         .card(card_id)?
         .map_or(Value::Null, |card| json!(card.note_id));
     Ok(note_id)
+}
+
+fn note_options(
+    note: &Value,
+    decks: &[Deck],
+    deck_id: Id,
+) -> Result<AddNoteOptions, RpcError> {
+    let Some(options) = note.get("options") else {
+        return Ok(AddNoteOptions::default());
+    };
+    let object = options.as_object().ok_or("invalid parameter: options")?;
+    let allow_duplicate = match object.get("allowDuplicate") {
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(
+                "option parameter \"allowDuplicate\" must be boolean".into()
+            );
+        }
+        None => false,
+    };
+    let mut duplicate_scope = DuplicateScope::new_collection();
+    if object
+        .get("duplicateScope")
+        .and_then(Value::as_str)
+        .unwrap_or("collection")
+        == "deck"
+    {
+        duplicate_scope.use_deck = true;
+        duplicate_scope.deck_id = Some(deck_id);
+    }
+    if let Some(scoped) = object.get("duplicateScopeOptions") {
+        let scoped_options = scoped
+            .as_object()
+            .ok_or("invalid parameter: duplicateScopeOptions")?;
+        if let Some(name) =
+            scoped_options.get("deckName").and_then(Value::as_str)
+        {
+            duplicate_scope.deck_id =
+                find_deck(decks, name).map(|deck| deck.id);
+        }
+        match scoped_options.get("checkChildren") {
+            Some(Value::Bool(value)) => duplicate_scope.check_children = *value,
+            Some(_) => {
+                return Err(
+                    "option parameter \"duplicateScopeOptions.checkChildren\" must be boolean"
+                        .into(),
+                );
+            }
+            None => {}
+        }
+        match scoped_options.get("checkAllModels") {
+            Some(Value::Bool(value)) => {
+                duplicate_scope.check_all_models = *value;
+            }
+            Some(_) => {
+                return Err(
+                    "option parameter \"duplicateScopeOptions.checkAllModels\" must be boolean"
+                        .into(),
+                );
+            }
+            None => {}
+        }
+    }
+    Ok(AddNoteOptions {
+        allow_duplicate,
+        duplicate_scope,
+    })
+}
+
+struct MediaAttachment {
+    filename: String,
+    bytes: Vec<u8>,
+    marker: String,
+    field_indices: Vec<usize>,
+}
+
+#[expect(
+    clippy::excessive_nesting,
+    reason = "media attachment parsing mirrors AnkiConnect's nested option shape"
+)]
+fn prepare_media(
+    note: &Value,
+    field_names: &[String],
+) -> Result<Vec<MediaAttachment>, RpcError> {
+    let mut attachments = Vec::new();
+    for (key, is_picture) in
+        [("audio", false), ("video", false), ("picture", true)]
+    {
+        let Some(value) = note.get(key) else {
+            continue;
+        };
+        let entries: Vec<&Value> = value
+            .as_array()
+            .map_or_else(|| vec![value], |array| array.iter().collect());
+        for entry in entries {
+            let filename = param_str(entry, "filename")?;
+            let targets = entry
+                .get("fields")
+                .and_then(Value::as_array)
+                .ok_or("invalid parameter: media fields")?;
+            if targets.is_empty() {
+                continue;
+            }
+            let bytes = if let Some(data) =
+                entry.get("data").and_then(Value::as_str)
+            {
+                decode_base64(data)?
+            } else if let Some(path) = entry.get("path").and_then(Value::as_str)
+            {
+                fs::read(path)
+                    .map_err(|error| format!("cannot read media: {error}"))?
+            } else {
+                return Err(
+                    "media requires a \"data\" or \"path\" field".into()
+                );
+            };
+            let safe_filename = safe_media_filename(filename)?;
+            let marker = if is_picture {
+                format!(
+                    "<img src=\"{}\">",
+                    escape_html_attribute(&safe_filename)
+                )
+            } else {
+                format!("[sound:{safe_filename}]")
+            };
+            let mut field_indices = Vec::new();
+            for target in targets {
+                let name =
+                    target.as_str().ok_or("invalid parameter: media field")?;
+                if let Some(index) = field_names
+                    .iter()
+                    .position(|field| field.eq_ignore_ascii_case(name))
+                {
+                    field_indices.push(index);
+                }
+            }
+            attachments.push(MediaAttachment {
+                filename: safe_filename,
+                bytes,
+                marker,
+                field_indices,
+            });
+        }
+    }
+    Ok(attachments)
+}
+
+#[expect(
+    clippy::excessive_nesting,
+    reason = "each attachment may target several fields"
+)]
+fn apply_media(attachments: &[MediaAttachment], fields: &mut [String]) {
+    for attachment in attachments {
+        for index in &attachment.field_indices {
+            if let Some(value) = fields.get_mut(*index) {
+                value.push_str(&attachment.marker);
+            }
+        }
+    }
+}
+
+fn create_stage_dir(media_dir: &Path) -> Result<PathBuf, RpcError> {
+    loop {
+        let sequence = MEDIA_STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = media_dir
+            .join(format!(".ranki-stage-{}-{sequence}", process::id()));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(format!(
+                    "cannot create media staging directory: {error}"
+                )
+                .into());
+            }
+        }
+    }
+}
+
+fn stage_media(
+    attachments: &[MediaAttachment],
+    media_dir: &Path,
+) -> Result<(PathBuf, Vec<PathBuf>), RpcError> {
+    if attachments.is_empty() {
+        return Ok((PathBuf::new(), Vec::new()));
+    }
+    fs::create_dir_all(media_dir)
+        .map_err(|error| format!("cannot create media directory: {error}"))?;
+    let stage = create_stage_dir(media_dir)?;
+    let mut staged = Vec::new();
+    for (index, attachment) in attachments.iter().enumerate() {
+        let path = stage.join(index.to_string());
+        if let Err(error) = fs::write(&path, &attachment.bytes) {
+            cleanup_stage(&stage);
+            return Err(format!("cannot stage media: {error}").into());
+        }
+        staged.push(path);
+    }
+    Ok((stage, staged))
+}
+
+struct PublishedMedia {
+    stage: PathBuf,
+    backups: Vec<(PathBuf, Option<PathBuf>)>,
+}
+
+#[expect(
+    clippy::excessive_nesting,
+    reason = "media publication backs up each existing target before replacing it"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "publication needs attachments, staged files, and both directories"
+)]
+fn publish_media(
+    attachments: &[MediaAttachment],
+    staged: &[PathBuf],
+    stage: &Path,
+    media_dir: &Path,
+) -> Result<PublishedMedia, RpcError> {
+    let mut published = PublishedMedia {
+        stage: stage.to_path_buf(),
+        backups: Vec::new(),
+    };
+    for (index, (attachment, path)) in
+        attachments.iter().zip(staged).enumerate()
+    {
+        let target = media_dir.join(&attachment.filename);
+        if target.is_dir() {
+            let detail = rollback_media(&published).err().unwrap_or_default();
+            return Err(format!(
+                "cannot write media: target is a directory; {detail}"
+            )
+            .into());
+        }
+        let backup = if target.exists() {
+            let backup_path = stage.join(format!("backup-{index}"));
+            if let Err(error) = fs::rename(&target, &backup_path) {
+                let detail =
+                    rollback_media(&published).err().unwrap_or_default();
+                return Err(
+                    format!("cannot back up media: {error}; {detail}").into()
+                );
+            }
+            Some(backup_path)
+        } else {
+            None
+        };
+        if let Err(error) = fs::rename(path, &target) {
+            if let Some(backup_path) = &backup {
+                let _ = fs::rename(backup_path, &target);
+            }
+            let detail = rollback_media(&published).err().unwrap_or_default();
+            return Err(format!("cannot write media: {error}; {detail}").into());
+        }
+        published.backups.push((target, backup));
+    }
+    Ok(published)
+}
+
+fn rollback_media(published: &PublishedMedia) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for (target, backup) in published.backups.iter().rev() {
+        if target.is_file()
+            && let Err(error) = fs::remove_file(target)
+        {
+            errors.push(format!("remove {}: {error}", target.display()));
+        }
+        if let Some(backup_path) = backup
+            && let Err(error) = fs::rename(backup_path, target)
+        {
+            errors.push(format!("restore {}: {error}", target.display()));
+        }
+    }
+    if let Err(error) = cleanup_stage_result(&published.stage) {
+        errors.push(error);
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn finish_media(published: &PublishedMedia) -> Result<(), RpcError> {
+    cleanup_stage_result(&published.stage).map_err(RpcError::from)
+}
+
+fn cleanup_stage(stage: &Path) {
+    let _ = cleanup_stage_result(stage);
+}
+
+fn cleanup_stage_result(stage: &Path) -> Result<(), String> {
+    if stage.as_os_str().is_empty() || !stage.exists() {
+        return Ok(());
+    }
+    fs::remove_dir_all(stage)
+        .map_err(|error| format!("remove {}: {error}", stage.display()))
+}
+
+fn safe_media_filename(filename: &str) -> Result<String, RpcError> {
+    let base = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
+    let stripped: String = base
+        .chars()
+        .filter(|character| {
+            !character.is_ascii_control()
+                && !matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+        })
+        .collect();
+    let safe: String = stripped.nfc().collect();
+    if safe.is_empty() || safe == "." || safe == ".." {
+        return Err(format!("invalid media filename: {filename}").into());
+    }
+    Ok(safe)
+}
+
+fn escape_html_attribute(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn decode_base64(input: &str) -> Result<Vec<u8>, RpcError> {
+    let mut output = Vec::new();
+    let mut accumulator = 0u32;
+    let mut bits = 0usize;
+    for byte in input.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte.saturating_sub(b'A'),
+            b'a'..=b'z' => byte.saturating_sub(b'a').saturating_add(26),
+            b'0'..=b'9' => byte.saturating_sub(b'0').saturating_add(52),
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            b' ' | b'\n' | b'\r' | b'\t' => continue,
+            _ => return Err("invalid base64 media data".into()),
+        };
+        accumulator = accumulator
+            .saturating_mul(64)
+            .saturating_add(u32::from(value));
+        bits = bits.saturating_add(6);
+        if bits >= 8 {
+            let shift = bits.saturating_sub(8);
+            let decoded = u8::try_from((accumulator >> shift) & 0xff)
+                .map_err(|_| RpcError::from("invalid base64 media data"))?;
+            output.push(decoded);
+            bits = shift;
+            accumulator &= (1u32 << bits).wrapping_sub(1);
+        }
+    }
+    Ok(output)
 }
 
 fn note_tags(note: &Value) -> Result<Vec<String>, RpcError> {
@@ -572,6 +996,8 @@ mod tests {
 
     use serde_json::Value;
     use serde_json::json;
+    use std::fs;
+    use std::path::Path;
     use tempfile::TempDir;
 
     use super::FsrsScheduler;
@@ -594,6 +1020,9 @@ mod tests {
         ranki_core::from_settings(&ranki_model::Settings::default())
     }
 
+    fn media() -> &'static Path {
+        Path::new("unused-media")
+    }
     #[expect(
         clippy::needless_pass_by_value,
         reason = "the helper builds a JSON-RPC envelope from an owned payload"
@@ -603,7 +1032,7 @@ mod tests {
             "action": action, "version": 6, "params": params,
         }))
         .unwrap();
-        let response = handle_body(store, &body, &scheduler());
+        let response = handle_body(store, media(), &body, &scheduler());
         assert_eq!(response.error, None);
         response.result
     }
@@ -623,6 +1052,27 @@ mod tests {
             .unwrap()
     }
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the helper builds an owned JSON-RPC envelope"
+    )]
+    fn call_media(
+        dir: &TempDir,
+        store: &mut Collection,
+        payload: Value,
+    ) -> RpcResponse {
+        let body = serde_json::to_vec(&json!({
+            "action": "addNote", "version": 6, "params": payload,
+        }))
+        .unwrap();
+        handle_body(
+            store,
+            &dir.path().join("collection.media"),
+            &body,
+            &scheduler(),
+        )
+    }
+
     #[test]
     fn version_returns_six() {
         let (_dir, mut store) = fixture();
@@ -640,7 +1090,8 @@ mod tests {
         let bytes: Vec<String> = bodies
             .iter()
             .map(|body| {
-                let response = handle_body(&mut store, body, &scheduler());
+                let response =
+                    handle_body(&mut store, media(), body, &scheduler());
                 serde_json::to_string(&response).unwrap()
             })
             .collect();
@@ -711,6 +1162,7 @@ mod tests {
         payload["fields"]["Missing"] = json!("x");
         let error = dispatch(
             &mut store,
+            media(),
             "addNote",
             &json!({"note": payload}),
             &scheduler(),
@@ -773,6 +1225,7 @@ mod tests {
         add_card(&mut store);
         let error = dispatch(
             &mut store,
+            media(),
             "answerCards",
             &json!({"answers": [{"cardId": 1, "ease": 9}]}),
             &scheduler(),
@@ -826,12 +1279,14 @@ mod tests {
         let (_dir, mut store) = fixture();
         let response = handle_body(
             &mut store,
+            media(),
             br#"{"action":"nope","version":6,"params":{}}"#,
             &scheduler(),
         );
         assert_eq!(response.result, Value::Null);
         assert_eq!(response.error.as_deref(), Some("unsupported action: nope"));
-        let response = handle_body(&mut store, b"not json", &scheduler());
+        let response =
+            handle_body(&mut store, media(), b"not json", &scheduler());
         assert!(response.error.unwrap_or_default().contains("invalid JSON"));
     }
 
@@ -854,8 +1309,9 @@ mod tests {
     #[test]
     fn transport_errors_keep_a_stable_code() {
         let (_dir, mut store) = fixture();
-        let error = dispatch(&mut store, "cardInfo", &json!({}), &scheduler())
-            .unwrap_err();
+        let error =
+            dispatch(&mut store, media(), "cardInfo", &json!({}), &scheduler())
+                .unwrap_err();
         assert_eq!(error.0.code(), ErrorCode::Unsupported);
 
         let response = RpcResponse::error(ranki_model::StoreError::NotFound(
@@ -919,7 +1375,7 @@ mod tests {
             ),
         ];
         for (body, expected) in cases {
-            let response = handle_body(&mut store, body, &scheduler());
+            let response = handle_body(&mut store, media(), body, &scheduler());
             assert_eq!(response.result, Value::Null);
             assert_eq!(response.error_code, expected, "{body:?}");
         }
@@ -932,7 +1388,7 @@ mod tests {
             "action": "version", "version": 7, "params": {},
         });
         let body = serde_json::to_vec(&request).unwrap();
-        let response = handle_body(&mut store, &body, &scheduler());
+        let response = handle_body(&mut store, media(), &body, &scheduler());
         assert_eq!(
             response.error.as_deref(),
             Some("unsupported protocol version: 7")
@@ -982,8 +1438,217 @@ mod tests {
         ];
         for (request, expected) in cases {
             let body = serde_json::to_vec(&request).unwrap();
-            let response = handle_body(&mut store, &body, &scheduler());
+            let response =
+                handle_body(&mut store, media(), &body, &scheduler());
             assert_eq!(response.error.as_deref(), Some(expected), "{request}");
         }
+    }
+    #[test]
+    fn add_note_rejects_duplicates_unless_explicitly_allowed() {
+        let (dir, mut store) = fixture();
+        add_card(&mut store);
+        let mut payload = note("Default");
+        let response = call_media(&dir, &mut store, json!({"note": payload}));
+        assert!(response.error.unwrap_or_default().contains("duplicate"));
+
+        payload["options"] = json!({"allowDuplicate": true});
+        let response = call_media(&dir, &mut store, json!({"note": payload}));
+        assert_eq!(response.error, None);
+        assert!(response.result.as_i64().is_some_and(|id| id > 0));
+    }
+
+    #[test]
+    fn add_note_supports_deck_duplicate_scope() {
+        let (dir, mut store) = fixture();
+        add_card(&mut store);
+        let other = call(&mut store, "createDeck", json!({"deck": "Other"}))
+            .as_i64()
+            .unwrap();
+        assert!(other > 0);
+
+        let mut scoped = note("Other");
+        scoped["options"] = json!({"duplicateScope": "deck"});
+        let response = call_media(&dir, &mut store, json!({"note": scoped}));
+        assert_eq!(response.error, None, "{response:?}");
+
+        let global = note("Other");
+        let response = call_media(&dir, &mut store, json!({"note": global}));
+        assert!(response.error.unwrap_or_default().contains("duplicate"));
+
+        let unknown = json!({
+            "duplicateScope": "global",
+        });
+        let mut unknown_payload = note("Other");
+        unknown_payload["options"] = unknown;
+        let response =
+            call_media(&dir, &mut store, json!({"note": unknown_payload}));
+        assert!(response.error.unwrap_or_default().contains("duplicate"));
+    }
+
+    #[test]
+    fn add_note_attaches_media_bytes_and_references() {
+        let (dir, mut store) = fixture();
+        let mut payload = note("Default");
+        payload["picture"] = json!({
+            "filename": "pic.png",
+            "fields": ["Front"],
+            "data": "cGl4ZWxz",
+        });
+        payload["audio"] = json!([{
+            "filename": "voice.mp3",
+            "fields": ["Back"],
+            "data": "YXVkaW8=",
+        }]);
+        let response = call_media(&dir, &mut store, json!({"note": payload}));
+        assert_eq!(response.error, None, "{response:?}");
+
+        let media = dir.path().join("collection.media");
+        assert_eq!(fs::read(media.join("pic.png")).unwrap(), b"pixels");
+        assert_eq!(fs::read(media.join("voice.mp3")).unwrap(), b"audio");
+
+        let card = store.find_cards("").expect("find")[0];
+        let saved_card = store.card(card).expect("card").expect("exists");
+        let saved = store
+            .note(saved_card.note_id)
+            .expect("note")
+            .expect("exists");
+        assert_eq!(saved.fields[0], "Question<img src=\"pic.png\">");
+        assert_eq!(saved.fields[1], "Answer[sound:voice.mp3]");
+    }
+
+    #[test]
+    fn add_note_escapes_and_normalizes_media_filenames() {
+        let (dir, mut store) = fixture();
+        let mut payload = note("Default");
+        payload["picture"] = json!({
+            "filename": "a&b'.png",
+            "fields": ["Front"],
+            "data": "cGl4ZWxz",
+        });
+        let response = call_media(&dir, &mut store, json!({"note": payload}));
+        assert_eq!(response.error, None, "{response:?}");
+        let media = dir.path().join("collection.media");
+        assert_eq!(fs::read(media.join("a&b'.png")).unwrap(), b"pixels");
+        let card = store.find_cards("").expect("find")[0];
+        let saved_card = store.card(card).expect("card").expect("exists");
+        let saved = store
+            .note(saved_card.note_id)
+            .expect("note")
+            .expect("exists");
+        assert_eq!(saved.fields[0], "Question<img src=\"a&amp;b&#39;.png\">");
+
+        let mut payload = note("Default");
+        payload["fields"]["Front"] = json!("Second");
+        payload["picture"] = json!({
+            "filename": "e\u{301}.png",
+            "fields": ["Front"],
+            "data": "cGl4ZWxz",
+        });
+        let response = call_media(&dir, &mut store, json!({"note": payload}));
+        assert_eq!(response.error, None, "{response:?}");
+        assert_eq!(fs::read(media.join("é.png")).unwrap(), b"pixels");
+        let card = store.find_cards("Second").expect("find")[0];
+        let saved_card = store.card(card).expect("card").expect("exists");
+        let saved = store
+            .note(saved_card.note_id)
+            .expect("note")
+            .expect("exists");
+        assert_eq!(saved.fields[0], "Second<img src=\"é.png\">");
+    }
+
+    #[test]
+    fn add_note_sanitizes_media_filenames() {
+        let (dir, mut store) = fixture();
+        let mut payload = note("Default");
+        payload["picture"] = json!({
+            "filename": "../bad:<name>.png",
+            "fields": ["Front"],
+            "data": "cGl4ZWxz",
+        });
+        let response = call_media(&dir, &mut store, json!({"note": payload}));
+        assert_eq!(response.error, None, "{response:?}");
+
+        let media = dir.path().join("collection.media");
+        assert_eq!(fs::read(media.join("badname.png")).unwrap(), b"pixels");
+        assert!(!dir.path().join("badname.png").exists());
+    }
+
+    #[test]
+    fn rejected_duplicate_leaves_no_media_behind() {
+        let (dir, mut store) = fixture();
+        add_card(&mut store);
+        let media = dir.path().join("collection.media");
+        fs::create_dir_all(&media).expect("media dir");
+        fs::write(media.join("duplicate.mp3"), b"old").expect("existing media");
+        let mut payload = note("Default");
+        payload["audio"] = json!({
+            "filename": "duplicate.mp3",
+            "fields": ["Back"],
+            "data": "YXVkaW8=",
+        });
+        let response = call_media(&dir, &mut store, json!({"note": payload}));
+        assert!(response.error.unwrap_or_default().contains("duplicate"));
+        assert_eq!(fs::read(media.join("duplicate.mp3")).unwrap(), b"old");
+        let staged: Vec<_> = fs::read_dir(&media)
+            .expect("media dir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_name().to_string_lossy().starts_with(".ranki-")
+            })
+            .collect();
+        assert!(staged.is_empty(), "{staged:?}");
+    }
+
+    #[test]
+    fn repeated_media_filename_keeps_the_last_attachment() {
+        let (dir, mut store) = fixture();
+        let mut payload = note("Default");
+        payload["picture"] = json!([
+            {"filename": "same.png", "fields": ["Front"], "data": "Zmlyc3Q="},
+            {"filename": "same.png", "fields": ["Front"], "data": "c2Vjb25k"},
+        ]);
+        let response = call_media(&dir, &mut store, json!({"note": payload}));
+        assert_eq!(response.error, None, "{response:?}");
+        let media = dir.path().join("collection.media");
+        assert_eq!(fs::read(media.join("same.png")).unwrap(), b"second");
+        assert_eq!(fs::read_dir(&media).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_media_rename_removes_staged_files() {
+        let (dir, mut store) = fixture();
+        let media = dir.path().join("collection.media");
+        fs::create_dir_all(media.join("collision.png"))
+            .expect("blocking directory");
+        let mut payload = note("Default");
+        payload["picture"] = json!({
+            "filename": "collision.png",
+            "fields": ["Front"],
+            "data": "cGl4ZWxz",
+        });
+        let response = call_media(&dir, &mut store, json!({"note": payload}));
+        assert!(
+            response
+                .error
+                .unwrap_or_default()
+                .contains("cannot write media")
+        );
+        let staged: Vec<_> = fs::read_dir(&media)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_name().to_string_lossy().starts_with(".ranki-")
+            })
+            .collect();
+        assert!(staged.is_empty(), "{staged:?}");
+    }
+    #[test]
+    fn media_filename_filters_invalid_characters_before_nfc() {
+        assert_eq!(
+            super::safe_media_filename("e\u{0001}\u{301}.png")
+                .ok()
+                .as_deref(),
+            Some("é.png")
+        );
     }
 }

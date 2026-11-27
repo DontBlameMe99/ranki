@@ -408,6 +408,52 @@ pub struct NewNote {
     pub tags: Vec<String>,
 }
 
+/// Options for the store's first-field duplicate check.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AddNoteOptions {
+    pub allow_duplicate: bool,
+    pub duplicate_scope: DuplicateScope,
+}
+
+/// Selects which existing notes take part in a duplicate check.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "AnkiConnect exposes three independent duplicate-scope flags"
+)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DuplicateScope {
+    /// Check only notes with cards in the selected deck.
+    pub use_deck: bool,
+    /// Deck to check. With `use_deck`, `None` matches no existing note.
+    pub deck_id: Option<Id>,
+    pub check_children: bool,
+    pub check_all_models: bool,
+}
+
+impl AddNoteOptions {
+    /// Creates options that permit a duplicate on the first field.
+    #[must_use]
+    pub const fn allowing_duplicates() -> Self {
+        Self {
+            allow_duplicate: true,
+            duplicate_scope: DuplicateScope::new_collection(),
+        }
+    }
+}
+
+impl DuplicateScope {
+    /// Creates the default collection-wide scope for the note's model.
+    #[must_use]
+    pub const fn new_collection() -> Self {
+        Self {
+            use_deck: false,
+            deck_id: None,
+            check_children: false,
+            check_all_models: false,
+        }
+    }
+}
+
 /// A card after scheduling, ready to be persisted together with its log entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewDecision {
@@ -585,6 +631,21 @@ pub trait Store {
     /// # Errors
     /// Returns [`StoreError`] if the note is invalid or the write fails.
     fn add_note(&mut self, note: &NewNote) -> Result<Vec<Id>, StoreError>;
+
+    /// Adds a note with explicit duplicate-check options.
+    ///
+    /// Stores that do not implement scoped checks fall back to [`Self::add_note`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the note is invalid or the write fails.
+    fn add_note_with_options(
+        &mut self,
+        note: &NewNote,
+        _options: &AddNoteOptions,
+    ) -> Result<Vec<Id>, StoreError> {
+        self.add_note(note)
+    }
 
     /// Replaces fields, tags, note type, and deck of an existing note.
     ///

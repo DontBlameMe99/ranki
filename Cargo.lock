@@ -5372,6 +5372,7 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -5452,6 +5453,8 @@ dependencies = [
  "serde_json",
  "sha1",
  "tempfile",
+ "unicase",
+ "unicode-normalization",
 ]
 
 [[package]]

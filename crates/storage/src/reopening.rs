@@ -7,6 +7,7 @@
 //! Anki can take the file while the store is idle.
 
 use crate::Collection;
+use ranki_model::AddNoteOptions;
 use ranki_model::Card;
 use ranki_model::Deck;
 use ranki_model::DeckStats;
@@ -109,6 +110,8 @@ impl Store for ReopeningCollection {
         rename_deck(id: Id, name: &str) -> Result<Deck, StoreError>;
         ensure_model(kind: StockModelKind) -> Result<NoteModel, StoreError>;
         add_note(note: &NewNote) -> Result<Vec<Id>, StoreError>;
+        add_note_with_options(note: &NewNote, options: &AddNoteOptions)
+            -> Result<Vec<Id>, StoreError>;
         update_note(note: &Note, deck_id: Id) -> Result<(), StoreError>;
         remove_card(id: Id) -> Result<(), StoreError>;
         apply_review(decision: &ReviewDecision) -> Result<Id, StoreError>;

@@ -372,7 +372,7 @@ fn run_with_sync(
         }
         Command::Check => check(collection_path),
         Command::Connect { port } => {
-            connect::serve(collection_path, port, &scheduler)
+            connect::serve(collection_path, port, media_dir, &scheduler)
         }
         Command::Sync {
             status,
