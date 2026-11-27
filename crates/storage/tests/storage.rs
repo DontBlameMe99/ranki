@@ -2262,7 +2262,11 @@ fn legacy_checksums_still_detect_duplicates() {
             ],
         )
         .expect("write legacy checksum");
-    assert!(store.add_note(&note(&[raw, "back"], &[])).is_err());
+    assert!(
+        store
+            .add_note(&note(&["<img src=\"other.png\">y", "back"], &[]))
+            .is_err()
+    );
 }
 
 #[test]
