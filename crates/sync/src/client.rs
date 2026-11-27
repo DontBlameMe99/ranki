@@ -290,9 +290,9 @@ impl<T: SyncTransport> SyncClient<T> {
 
     /// Downloads the media referenced by the remote collection.
     ///
-    /// The media manifest is fetched from the start on every full download so
-    /// files from another account or a removed local copy are restored. Files
-    /// already present with the server's hash are left untouched.
+    /// The full manifest is fetched whenever media changes, so files from
+    /// another account or a removed local copy are restored. Files already
+    /// present with the server's hash are left untouched.
     #[expect(
         clippy::excessive_nesting,
         reason = "media batches keep request and extraction state local"
@@ -358,7 +358,17 @@ impl<T: SyncTransport> SyncClient<T> {
                 break;
             }
         }
+        self.state.last_media_usn = server_usn;
+        self.state.save(&self.state_path)?;
         Ok(())
+    }
+
+    /// Fetches media when the server has a newer media USN.
+    fn sync_media_if_changed(&mut self, status: &RemoteStatus) -> Result<()> {
+        if status.media_usn == self.state.last_media_usn {
+            return Ok(());
+        }
+        self.sync_media()
     }
 
     /// Run one safe automatic sync.
@@ -423,10 +433,12 @@ impl<T: SyncTransport> SyncClient<T> {
             self.state.failures = 0;
             self.state.last_success = Some(now_secs()?);
             self.state.save(&self.state_path)?;
+            self.sync_media_if_changed(&status)?;
             return Ok(SyncOutcome::NoChanges);
         }
         if local_changed {
             self.full_upload()?;
+            self.sync_media_if_changed(&status)?;
             return Ok(SyncOutcome::Uploaded);
         }
         if status.mod_time < local.mod_time {
@@ -446,6 +458,7 @@ impl<T: SyncTransport> SyncClient<T> {
         match (status.empty, local.cards) {
             (_, 0) if status.empty => {
                 self.record_success()?;
+                self.sync_media_if_changed(status)?;
                 Ok(SyncOutcome::NoChanges)
             }
             (false, 0) => {

@@ -683,7 +683,7 @@ mod tests {
                     "ts": now,
                     "empty": true,
                     "cont": true,
-                    "media_usn": 1,
+                    "media_usn": 0,
                 }))
                 .unwrap(),
             );
