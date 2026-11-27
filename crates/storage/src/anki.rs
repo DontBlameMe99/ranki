@@ -5,6 +5,7 @@ use ranki_model::Id;
 use ranki_model::StoreError;
 use sha1::Digest;
 use sha1::Sha1;
+use std::ops::Range;
 use std::process;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -273,6 +274,166 @@ pub fn protobuf_varint(bytes: &[u8], wanted: u32) -> Option<u64> {
             (1, _) => pos = pos.checked_add(8)?,
             (5, _) => pos = pos.checked_add(4)?,
             _ => return None,
+        }
+    }
+    None
+}
+
+/// Reads Anki's repeated float fields, such as learning steps in a deck preset.
+#[expect(
+    clippy::excessive_nesting,
+    reason = "protobuf wire types are handled together"
+)]
+#[must_use]
+pub fn protobuf_floats(bytes: &[u8], wanted: u32) -> Vec<f32> {
+    let wanted_field = u64::from(wanted);
+    let mut result = Vec::new();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let Some(tag) = read_varint(bytes, &mut pos) else {
+            break;
+        };
+        let matched = tag >> 3 == wanted_field;
+        match tag & 7 {
+            0 => {
+                if read_varint(bytes, &mut pos).is_none() {
+                    break;
+                }
+            }
+            1 => {
+                let Some(next) = pos.checked_add(8) else {
+                    break;
+                };
+                pos = next;
+            }
+            2 => {
+                let Some(length) = read_varint(bytes, &mut pos)
+                    .and_then(|length| usize::try_from(length).ok())
+                else {
+                    break;
+                };
+                let Some(end) = pos.checked_add(length) else {
+                    break;
+                };
+                let Some(slice) = bytes.get(pos..end) else {
+                    break;
+                };
+                if matched {
+                    push_floats(&mut result, slice);
+                }
+                pos = end;
+            }
+            5 => {
+                let Some(end) = pos.checked_add(4) else {
+                    break;
+                };
+                let Some(slice) = bytes.get(pos..end) else {
+                    break;
+                };
+                if matched {
+                    push_floats(&mut result, slice);
+                }
+                pos = end;
+            }
+            _ => break,
+        }
+    }
+    result
+}
+
+fn push_floats(result: &mut Vec<f32>, bytes: &[u8]) {
+    if !bytes.len().is_multiple_of(4) {
+        return;
+    }
+    let (chunks, _) = bytes.as_chunks::<4>();
+    for &[a, b, c, d] in chunks {
+        result.push(f32::from_le_bytes([a, b, c, d]));
+    }
+}
+
+/// Reads the preset id from a schema-18 deck's `kind` blob.
+#[must_use]
+pub fn deck_kind_config_id(kind: &[u8]) -> Option<i64> {
+    let normal = protobuf_bytes(kind, 1)?;
+    i64::try_from(protobuf_varint(&normal, 1)?).ok()
+}
+
+/// Replaces the preset id in a schema-18 deck's `kind` blob.
+#[must_use]
+pub fn with_deck_kind_config_id(
+    kind: &[u8],
+    config_id: i64,
+) -> Option<Vec<u8>> {
+    let range = protobuf_field_range(kind, 1, 2)?;
+    let mut normal = kind.get(range.clone())?.to_vec();
+    let value = protobuf_field_range(&normal, 1, 0)?;
+    let mut id = Vec::new();
+    append_varint(&mut id, u64::try_from(config_id).ok()?);
+    normal.splice(value, id);
+
+    let mut length_start = range.start.checked_sub(1)?;
+    while kind.get(length_start)? & 0x80 != 0 {
+        length_start = length_start.checked_sub(1)?;
+    }
+    let mut rewritten = kind.get(..length_start)?.to_vec();
+    append_varint(&mut rewritten, u64::try_from(normal.len()).ok()?);
+    rewritten.extend(normal);
+    rewritten.extend_from_slice(kind.get(range.end..)?);
+    Some(rewritten)
+}
+
+fn protobuf_bytes(bytes: &[u8], wanted: u32) -> Option<Vec<u8>> {
+    let range = protobuf_field_range(bytes, wanted, 2)?;
+    Some(bytes.get(range)?.to_vec())
+}
+
+#[expect(
+    clippy::excessive_nesting,
+    reason = "protobuf wire types are handled together"
+)]
+fn protobuf_field_range(
+    bytes: &[u8],
+    wanted: u32,
+    wire: u64,
+) -> Option<Range<usize>> {
+    let wanted_field = u64::from(wanted);
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let tag = read_varint(bytes, &mut pos)?;
+        let matched = tag >> 3 == wanted_field && tag & 7 == wire;
+        let mut start = pos;
+        match tag & 7 {
+            0 => {
+                let _ = read_varint(bytes, &mut pos)?;
+                if matched {
+                    return Some(start..pos);
+                }
+            }
+            1 => {
+                pos = pos.checked_add(8)?;
+                if matched {
+                    return Some(start..pos);
+                }
+            }
+            2 => {
+                let length =
+                    usize::try_from(read_varint(bytes, &mut pos)?).ok()?;
+                start = pos;
+                pos = pos.checked_add(length)?;
+                if matched {
+                    return Some(start..pos);
+                }
+            }
+            5 => {
+                pos = pos.checked_add(4)?;
+                if matched {
+                    return Some(start..pos);
+                }
+            }
+            _ => return None,
+        }
+        if pos > bytes.len() {
+            return None;
         }
     }
     None

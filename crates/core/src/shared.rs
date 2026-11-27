@@ -96,11 +96,6 @@ pub fn remaining_steps(left: u32, total: usize) -> usize {
     usize::try_from(left.min(cap)).unwrap_or(total)
 }
 
-/// Step presets are minutes, while Anki stores step delays in seconds.
-const fn minutes_to_seconds(minutes: u32) -> u32 {
-    minutes.saturating_mul(60)
-}
-
 fn half_sum(first: u64, second: u64) -> Option<u32> {
     #[expect(
         clippy::integer_division,
@@ -125,9 +120,9 @@ const fn maybe_round_in_days(seconds: u32) -> u32 {
 }
 
 fn first_step_hard_delay(steps: &[u32]) -> Option<u32> {
-    let first = minutes_to_seconds(steps.first().copied().unwrap_or(1));
+    let first = steps.first().copied().unwrap_or(60);
     let seconds = if let Some(second) = steps.get(1) {
-        half_sum(u64::from(first), u64::from(minutes_to_seconds(*second)))?
+        half_sum(u64::from(first), u64::from(*second))?
     } else {
         half_sum(u64::from(first).saturating_mul(3), 0)?
             .min(first.saturating_add(86_400))
@@ -147,22 +142,19 @@ pub fn step_delay_seconds(
     let index = steps.len().saturating_sub(remaining);
     match rating {
         Rating::Easy => None,
-        Rating::Again => steps.first().copied().map(minutes_to_seconds),
+        Rating::Again => steps.first().copied(),
         Rating::Good => {
             if remaining <= 1 {
                 None
             } else {
-                steps
-                    .get(index.saturating_add(1))
-                    .copied()
-                    .map(minutes_to_seconds)
+                steps.get(index.saturating_add(1)).copied()
             }
         }
         Rating::Hard => {
             if remaining >= steps.len() {
                 first_step_hard_delay(steps)
             } else {
-                steps.get(index).copied().map(minutes_to_seconds)
+                steps.get(index).copied()
             }
         }
     }

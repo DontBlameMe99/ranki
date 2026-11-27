@@ -10,6 +10,7 @@ use crate::Collection;
 use ranki_model::Card;
 use ranki_model::Deck;
 use ranki_model::DeckStats;
+use ranki_model::DeckSteps;
 use ranki_model::DeckTotals;
 use ranki_model::Id;
 use ranki_model::NewNote;
@@ -93,6 +94,7 @@ impl Store for ReopeningCollection {
         due_cards(deck_id: Option<Id>, limit: usize, now_secs: i64)
             -> Result<Vec<Card>, StoreError>;
         card(id: Id) -> Result<Option<Card>, StoreError>;
+        deck_steps(deck_id: Id) -> Result<DeckSteps, StoreError>;
         note(id: Id) -> Result<Option<Note>, StoreError>;
         review_history() -> Result<Vec<RevLog>, StoreError>;
         due_forecast(days: usize, now_secs: i64) -> Result<Vec<usize>, StoreError>;

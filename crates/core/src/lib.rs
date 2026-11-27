@@ -21,7 +21,7 @@ pub use optimizer::{
     should_auto_optimize,
 };
 
-use ranki_model::Settings;
+use ranki_model::{Card, Settings, Store};
 
 /// Builds the FSRS scheduler from resolved settings.
 ///
@@ -37,6 +37,19 @@ pub fn from_settings(settings: &Settings) -> FsrsScheduler {
         ..FsrsPreset::default()
     })
     .with_params(params)
+}
+
+/// Applies the card's deck preset to a scheduler.
+///
+/// A store without deck presets keeps the scheduler's default steps.
+#[must_use]
+pub fn scheduler_for_card<S: Store + ?Sized>(
+    scheduler: &FsrsScheduler,
+    store: &S,
+    card: &Card,
+) -> FsrsScheduler {
+    let steps = store.deck_steps(card.deck_id).unwrap_or_default();
+    scheduler.with_steps(&steps)
 }
 
 /// Length of a day in the Unix time scale used by Anki's day numbers.

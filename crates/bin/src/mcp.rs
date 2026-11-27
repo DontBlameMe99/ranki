@@ -803,7 +803,9 @@ impl RankiMcp {
             ToolError::call(format!("card not found: {}", input.card_id))
         })?;
         let collection_start_secs = store.collection_created()?;
-        let mut decision = self.scheduler.schedule(
+        let scheduler =
+            ranki_core::scheduler_for_card(&self.scheduler, &*store, &card);
+        let mut decision = scheduler.schedule(
             &card,
             Rating::from(input.rating),
             now,

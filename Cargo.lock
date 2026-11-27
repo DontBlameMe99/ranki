@@ -4621,6 +4621,8 @@ dependencies = [
 name = "ranki-sync"
 version = "0.1.0"
 dependencies = [
+ "ranki-model",
+ "ranki-storage",
  "rusqlite",
  "serde",
  "serde_json",

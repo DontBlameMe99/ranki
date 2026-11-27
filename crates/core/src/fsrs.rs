@@ -1,5 +1,5 @@
 use ranki_model::{
-    Card, CardQueue, CardType, Rating, RevLogKind, ReviewDecision,
+    Card, CardQueue, CardType, DeckSteps, Rating, RevLogKind, ReviewDecision,
 };
 use serde_json::{Map, Value};
 
@@ -216,8 +216,8 @@ pub fn interval_days_for_stability(
 pub struct FsrsPreset {
     pub desired_retention: f32,
     pub maximum_interval: i32,
-    pub learning_steps_minutes: Vec<u32>,
-    pub relearning_steps_minutes: Vec<u32>,
+    pub learning_steps_seconds: Vec<u32>,
+    pub relearning_steps_seconds: Vec<u32>,
     pub enable_fuzzing: bool,
 }
 
@@ -226,8 +226,8 @@ impl Default for FsrsPreset {
         Self {
             desired_retention: 0.9,
             maximum_interval: 36_500,
-            learning_steps_minutes: vec![1, 10],
-            relearning_steps_minutes: vec![10],
+            learning_steps_seconds: vec![60, 600],
+            relearning_steps_seconds: vec![600],
             enable_fuzzing: true,
         }
     }
@@ -284,6 +284,20 @@ impl FsrsScheduler {
     pub const fn with_params(mut self, params: FsrsParams) -> Self {
         self.params = params;
         self
+    }
+
+    /// Applies a deck's imported learning and relearning steps.
+    #[must_use]
+    pub fn with_steps(&self, steps: &DeckSteps) -> Self {
+        let mut preset = self.preset.clone();
+        preset.learning_steps_seconds.clone_from(&steps.learning);
+        preset
+            .relearning_steps_seconds
+            .clone_from(&steps.relearning);
+        Self {
+            preset,
+            params: self.params.clone(),
+        }
     }
     #[expect(
         clippy::too_many_arguments,
@@ -415,9 +429,9 @@ impl FsrsScheduler {
     ) -> ReviewOutcome {
         let relearning = ctx.card.card_type == CardType::Relearning;
         let steps = if relearning {
-            &self.preset.relearning_steps_minutes
+            &self.preset.relearning_steps_seconds
         } else {
-            &self.preset.learning_steps_minutes
+            &self.preset.learning_steps_seconds
         };
         step_outcome(
             ctx,
@@ -436,7 +450,7 @@ impl FsrsScheduler {
         ctx: &ReviewContext<'_>,
         prepared: Prepared,
     ) -> ReviewOutcome {
-        let steps = &self.preset.relearning_steps_minutes;
+        let steps = &self.preset.relearning_steps_seconds;
         if ctx.rating == Rating::Again && !steps.is_empty() {
             let mut outcome = step_outcome(
                 ctx,
@@ -585,16 +599,16 @@ impl FsrsScheduler {
     ) -> i32 {
         if ctx.card.card_type == CardType::Review
             && (ctx.rating != Rating::Again
-                || self.preset.relearning_steps_minutes.is_empty())
+                || self.preset.relearning_steps_seconds.is_empty())
         {
             return graduation;
         }
         let steps = if ctx.card.card_type == CardType::Review
             || ctx.card.card_type == CardType::Relearning
         {
-            &self.preset.relearning_steps_minutes
+            &self.preset.relearning_steps_seconds
         } else {
-            &self.preset.learning_steps_minutes
+            &self.preset.learning_steps_seconds
         };
         step_preview_interval(ctx, steps, graduation)
     }

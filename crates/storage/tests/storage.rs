@@ -14,6 +14,7 @@ use ranki_core::FsrsScheduler;
 use ranki_model::CardQueue;
 use ranki_model::CardType;
 use ranki_model::DeckStats;
+use ranki_model::DeckSteps;
 use ranki_model::NewNote;
 use ranki_model::Rating;
 use ranki_model::RevLog;
@@ -26,6 +27,7 @@ use ranki_storage::ReopeningCollection;
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
 use serde_json::Value;
+use serde_json::json;
 use sha1::Digest;
 use sha1::Sha1;
 use tempfile::TempDir;
@@ -1820,4 +1822,109 @@ fn polling_fails_fast_while_anki_holds_the_collection() {
     let started = Instant::now();
     assert!(store.collection_modified().is_err());
     assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn deck_steps_read_legacy_preset() {
+    let (_directory, path) = fixture();
+    let connection = Connection::open(&path).expect("open");
+    let dconf = json!({
+        "1": {
+            "id": 1,
+            "new": {"delays": [5.0, 20.0]},
+            "lapse": {"delays": [0.5]},
+        }
+    });
+    connection
+        .execute(
+            "UPDATE col SET decks = ?1, dconf = ?2 WHERE id = 1",
+            rusqlite::params![
+                json!({
+                    "1": {"id": 1, "conf": 1},
+                    "2": {"id": 2, "name": "Child", "conf": 0},
+                })
+                .to_string(),
+                dconf.to_string(),
+            ],
+        )
+        .expect("write preset");
+    drop(connection);
+
+    let store = Collection::open(&path).expect("open store");
+    assert_eq!(
+        store.deck_steps(1).expect("steps"),
+        DeckSteps {
+            learning: vec![300, 1_200],
+            relearning: vec![30],
+        }
+    );
+    let expected = DeckSteps {
+        learning: vec![300, 1_200],
+        relearning: vec![30],
+    };
+    assert_eq!(store.deck_steps(2).expect("child steps"), expected);
+}
+
+#[test]
+fn deck_kind_rewrite_updates_length_for_a_large_preset_id() {
+    let kind = ranki_storage::normal_deck_kind(2);
+    let rewritten =
+        ranki_storage::with_deck_kind_config_id(&kind, 702).unwrap();
+    assert_eq!(ranki_storage::deck_kind_config_id(&rewritten), Some(702));
+}
+
+#[test]
+fn deck_steps_read_schema18_preset() {
+    let (_directory, path) = fixture();
+    let connection = Connection::open(&path).expect("open");
+    connection
+        .execute_batch(
+            "UPDATE col SET decks = '{}', dconf = '{}' WHERE id = 1;
+             CREATE TABLE decks (id INTEGER PRIMARY KEY, name TEXT, mtime_secs INTEGER,
+                 usn INTEGER, common BLOB, kind BLOB);
+             CREATE TABLE deck_config (id INTEGER PRIMARY KEY, name TEXT, mtime_secs INTEGER,
+                 usn INTEGER, config BLOB);",
+        )
+        .expect("create tables");
+    let mut config = pb_floats(1, &[5.0, 20.0]);
+    config.extend(pb_floats(2, &[0.5]));
+    connection
+        .execute(
+            "INSERT INTO decks (id, name, mtime_secs, usn, common, kind)
+             VALUES (42, 'Custom', 0, 0, ?, ?)",
+            rusqlite::params![
+                Vec::<u8>::new(),
+                ranki_storage::normal_deck_kind(7),
+            ],
+        )
+        .expect("insert deck");
+    connection
+        .execute(
+            "INSERT INTO deck_config (id, name, mtime_secs, usn, config)
+             VALUES (7, 'Custom', 0, 0, ?)",
+            [config],
+        )
+        .expect("insert preset");
+    drop(connection);
+
+    let store = Collection::open(&path).expect("open store");
+    assert_eq!(
+        store.deck_steps(42).expect("steps"),
+        DeckSteps {
+            learning: vec![300, 1_200],
+            relearning: vec![30],
+        }
+    );
+}
+
+fn pb_floats(field: u32, values: &[f32]) -> Vec<u8> {
+    let mut bytes = vec![u8::try_from((field << 3) | 2).expect("tag")];
+    bytes.push(
+        u8::try_from(values.len().checked_mul(4).expect("packed length"))
+            .expect("packed length"),
+    );
+    for value in values {
+        bytes.extend(value.to_le_bytes());
+    }
+    bytes
 }

@@ -1,4 +1,4 @@
-use ranki_model::{Card, CardQueue, CardType, Rating, RevLogKind};
+use ranki_model::{Card, CardQueue, CardType, DeckSteps, Rating, RevLogKind};
 
 use super::{
     ANKI_DEFAULT_PARAMS, DEFAULT_DECAY, FsrsParams, FsrsPreset, FsrsScheduler,
@@ -43,8 +43,8 @@ fn fsrs_preset(fuzz: bool, retention: f32) -> FsrsPreset {
     FsrsPreset {
         desired_retention: retention,
         maximum_interval: 36_500,
-        learning_steps_minutes: vec![1, 10],
-        relearning_steps_minutes: vec![10],
+        learning_steps_seconds: vec![60, 600],
+        relearning_steps_seconds: vec![600],
         enable_fuzzing: fuzz,
     }
 }
@@ -132,6 +132,25 @@ fn fsrs_learning_steps_and_graduation() {
 }
 
 #[test]
+fn imported_deck_steps_drive_previews_and_answers() {
+    let scheduler =
+        FsrsScheduler::new(fsrs_preset(false, 0.9)).with_steps(&DeckSteps {
+            learning: vec![300, 1_200],
+            relearning: vec![180],
+        });
+    let card = new_card();
+    assert_eq!(scheduler.preview_all(&card, NOW, COLLECTION_START)[0], -300);
+    let first = scheduler.schedule(&card, Rating::Good, NOW, COLLECTION_START);
+    assert_eq!(first.card.due, NOW + 1_200);
+    let again = scheduler.schedule(
+        &first.card,
+        Rating::Again,
+        NOW + 1_200,
+        COLLECTION_START,
+    );
+    assert_eq!(again.card.due, NOW + 1_500);
+}
+#[test]
 fn fsrs_lapse_enters_relearning() {
     let scheduler = FsrsScheduler::new(fsrs_preset(false, 0.9));
     let decision =
@@ -192,8 +211,8 @@ fn extreme_inputs_do_not_panic() {
         fsrs_preset(true, 0.9),
         FsrsPreset {
             maximum_interval: i32::MIN,
-            learning_steps_minutes: vec![u32::MAX, 0],
-            relearning_steps_minutes: vec![u32::MAX],
+            learning_steps_seconds: vec![u32::MAX, 0],
+            relearning_steps_seconds: vec![u32::MAX],
             ..fsrs_preset(true, f32::NAN)
         },
     ];
@@ -541,7 +560,7 @@ fn new_card_good_uses_the_next_learning_step() {
 #[test]
 fn learning_again_resets_to_the_first_step() {
     let scheduler = FsrsScheduler::new(FsrsPreset {
-        learning_steps_minutes: vec![1, 20],
+        learning_steps_seconds: vec![60, 1_200],
         ..fsrs_preset(false, 0.9)
     });
     let first =
@@ -774,8 +793,8 @@ fn batch_previews_match_single_previews_and_scheduling() {
         FsrsScheduler::new(fsrs_preset(true, 0.9)),
         FsrsScheduler::new(FsrsPreset {
             maximum_interval: 7,
-            learning_steps_minutes: vec![],
-            relearning_steps_minutes: vec![],
+            learning_steps_seconds: vec![],
+            relearning_steps_seconds: vec![],
             ..fsrs_preset(true, 0.95)
         }),
     ];
