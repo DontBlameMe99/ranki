@@ -6,7 +6,7 @@ use gpui::{
     App, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
     Pixels, Point, SharedString, StatefulInteractiveElement, Styled,
-    StyledImage, Window, div, img, px, relative,
+    StyledImage, TextOverflow, Window, div, img, px, relative,
 };
 
 use crate::{
@@ -922,14 +922,30 @@ impl Root {
                 ))
                 .child(
                     div()
+                        .flex_1()
+                        .min_w(px(0.))
                         .flex()
                         .items_center()
                         .gap(px(SPACE_GROUP))
                         .child(icon("icon-book", 16., colors.subtext))
-                        .child(deck.name.replace("::", " › ")),
+                        .child(
+                            div()
+                                .debug_selector(|| {
+                                    "add-deck-picker-name".to_owned()
+                                })
+                                .w_full()
+                                .min_w(px(0.))
+                                .overflow_hidden()
+                                .text_overflow(TextOverflow::Truncate(
+                                    "...".into(),
+                                ))
+                                .child(deck.name.replace("::", " › ")),
+                        ),
                 )
                 .child(
                     div()
+                        .debug_selector(|| "add-deck-picker-due".to_owned())
+                        .flex_none()
                         .text_size(px(12.))
                         .text_color(colors.subtext)
                         .child(format!("{due} due")),

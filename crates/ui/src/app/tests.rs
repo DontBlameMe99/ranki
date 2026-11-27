@@ -601,6 +601,61 @@ fn deck_picker_floats_above_the_form(cx: &mut gpui::TestAppContext) {
     );
     assert!(popup.origin.y >= after.bottom());
 }
+
+#[gpui::test]
+fn long_deck_names_are_truncated_in_the_picker(cx: &mut gpui::TestAppContext) {
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: std::sync::Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+    cx.update_entity(&root, |root, cx| {
+        root.decks = vec![Deck {
+            id: 1,
+            name: String::from(
+                "rbbk::operating_systems_and_networking_fundamentals",
+            ),
+            description: String::new(),
+        }];
+        root.stats = vec![ranki_model::DeckStats::default()];
+        root.view = super::View::AddCard;
+        root.add.deck_picker = true;
+        root.add.deck_picker_anchor = point(px(270.), px(224.));
+        cx.notify();
+    });
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let popup = cx
+        .debug_bounds("add-deck-picker-popup")
+        .expect("deck picker popup bounds");
+    let name = cx
+        .debug_bounds("add-deck-picker-name")
+        .expect("deck picker name bounds");
+    let due = cx
+        .debug_bounds("add-deck-picker-due")
+        .expect("deck picker due bounds");
+
+    assert!(
+        name.origin.x + name.size.width <= due.origin.x,
+        "name overflowed into the due count"
+    );
+    assert!(
+        due.origin.x + due.size.width <= popup.origin.x + popup.size.width,
+        "due count overflowed the popup"
+    );
+}
 #[gpui::test]
 fn deck_picker_clicks_do_not_reach_the_editor(cx: &mut gpui::TestAppContext) {
     let (root, cx) = cx.add_window_view(|window, cx| {
