@@ -64,6 +64,8 @@ fn due_query_uses_the_queue_index_for_learning_cards() {
     let store = Collection::open(&path).expect("open");
     let _ = store.due_cards(None, 1, now_secs()).expect("due");
     let conn = read_only(&path);
+    // Learning cards are the one group the due index can order for. Reviews and
+    // interday learning sort on `fnvhash`, and new cards on template ordinal.
     let plan: Vec<String> = conn
         .prepare(
             "EXPLAIN QUERY PLAN SELECT id FROM cards WHERE queue = ?1 AND due <= ?2 \
@@ -269,7 +271,7 @@ fn review_and_day_learning_dues_use_days_since_collection_creation() {
         .into_iter()
         .map(|card| card.id)
         .collect();
-    assert_eq!(due_ids, [25, 23, 21]);
+    assert_eq!(due_ids, [25, 21, 23]);
     assert!(!due_ids.contains(&22));
     assert!(!due_ids.contains(&24));
 
@@ -545,7 +547,7 @@ fn due_cards_respects_queue_and_time_windows() {
         .into_iter()
         .map(|card| card.id)
         .collect();
-    assert_eq!(due_ids, [11, 15, 13, 10]);
+    assert_eq!(due_ids, [11, 13, 15, 10]);
     let limited = store.due_cards(None, 2, now).expect("due");
     assert_eq!(limited.len(), 2);
     assert_eq!(
@@ -1638,6 +1640,66 @@ fn due_cards_probe_keeps_priority_and_all_new_order() {
         .map(|card| card.id)
         .collect();
     assert_eq!(due, [30, 11]);
+}
+
+#[test]
+fn due_cards_order_same_day_reviews_like_anki() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let conn = Connection::open(&path).expect("open");
+    conn.execute("UPDATE col SET crt = ?1 WHERE id = 1", [now])
+        .expect("set crt");
+    // Anki breaks a shared due day with fnvhash(id, mod).
+    for (id, modified) in [
+        (101_i64, 1_700_000_000_i64),
+        (102, 1_700_000_000),
+        (103, 1_700_000_500),
+        (104, 1_699_999_999),
+        (105, 1_700_000_000),
+    ] {
+        conn.execute(
+            "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, \
+             lapses, left, odue, odid, flags, data) VALUES (?1, 1, 1, 0, ?2, 0, 2, 2, 0, 1, 2500, \
+             1, 0, 0, 0, 0, 0, '')",
+            [id, modified],
+        )
+        .expect("insert card");
+    }
+    drop(conn);
+    let store = Collection::open(&path).expect("open");
+    let order: Vec<_> = store
+        .due_cards(None, 10, now)
+        .expect("due")
+        .into_iter()
+        .map(|card| card.id)
+        .collect();
+    assert_eq!(order, [101, 103, 105, 104, 102]);
+}
+
+#[test]
+fn due_cards_order_new_cards_by_template_then_position() {
+    let (_directory, path) = fixture();
+    let now = now_secs();
+    let conn = Connection::open(&path).expect("open");
+    for (id, ord, position) in [(10_i64, 1_i64, 0_i64), (11, 0, 1), (12, 0, 0)]
+    {
+        conn.execute(
+            "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, \
+             lapses, left, odue, odid, flags, data) VALUES (?1, 1, 1, ?2, 0, 0, 0, 0, ?3, 0, 0, 0, \
+             0, 0, 0, 0, 0, '')",
+            [id, ord, position],
+        )
+        .expect("insert card");
+    }
+    drop(conn);
+    let store = Collection::open(&path).expect("open");
+    let order: Vec<_> = store
+        .due_cards(None, 10, now)
+        .expect("due")
+        .into_iter()
+        .map(|card| card.id)
+        .collect();
+    assert_eq!(order, [12, 11, 10]);
 }
 
 #[test]

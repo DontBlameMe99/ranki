@@ -2761,7 +2761,7 @@ fn tag_suggestions_open_while_typing_and_commit_a_tag(
 }
 
 #[test]
-fn learn_ahead_pulls_learning_cards_within_twenty_minutes() {
+fn learning_cards_wait_for_their_step_and_the_main_queue() {
     let now = 1_700_000_000;
     let card = |id, queue, due| Card {
         id,
@@ -2784,13 +2784,94 @@ fn learn_ahead_pulls_learning_cards_within_twenty_minutes() {
         data: String::new(),
     };
     let mut pending = VecDeque::new();
-    pending.push_back(card(1, CardQueue::Learning, (now + 10 * 60) * 1_000));
-    pending.push_back(card(2, CardQueue::Review, (now + 60) * 1_000));
-    pending.push_back(card(4, CardQueue::Learning, (now + 60) * 1_000));
-    pending.push_back(card(3, CardQueue::Learning, (now + 21 * 60) * 1_000));
-    let picked =
-        super::Root::due_learning_card(&pending, now + super::LEARN_AHEAD_SECS);
-    assert_eq!(picked.map(|card| card.id), Some(4));
+    // A review due stays behind whatever main queue holds it; only intraday
+    // learning cards are pulled forward by the learn-ahead window.
+    for entry in [
+        card(2, CardQueue::Review, 0),
+        card(1, CardQueue::Learning, now + 10 * 60),
+        card(4, CardQueue::Learning, now + 60),
+        card(3, CardQueue::Learning, now + 21 * 60),
+    ] {
+        super::Root::insert_pending(&mut pending, entry);
+    }
+    let step_due = |cutoff| {
+        super::Root::due_learning_card(&pending, cutoff).map(|card| card.id)
+    };
+    assert_eq!(step_due(now), None, "a step in the future is not due yet");
+    assert_eq!(step_due(now + 30), None);
+    assert_eq!(step_due(now + 60), Some(4));
+    assert_eq!(step_due(now + 10 * 60), Some(4));
+    assert_eq!(
+        step_due(now + super::LEARN_AHEAD_SECS),
+        Some(4),
+        "the learn-ahead window never overtakes an earlier step"
+    );
+    let ordered: Vec<_> = pending.iter().map(|card| card.id).collect();
+    assert_eq!(ordered, [2, 4, 1, 3]);
+}
+
+#[gpui::test]
+fn again_waits_behind_the_cards_already_due(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("collection.anki2");
+    let mut store =
+        ranki_storage::Collection::create(&path).expect("collection");
+    for front in ["First?", "Second?"] {
+        store
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![front.to_owned(), String::from("Answer!")],
+                tags: Vec::new(),
+            })
+            .expect("note");
+    }
+    let options = Options {
+        paths: ranki_model::DataPaths::new(dir.path()),
+        ..Options::default()
+    };
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(store),
+                options,
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update_entity(&root, super::Root::study_all);
+    let current = |cx: &mut gpui::TestAppContext| {
+        cx.read_entity(&root, |root, _| {
+            root.review.current.as_ref().map(|card| card.id)
+        })
+    };
+    let grade = |cx: &mut gpui::TestAppContext, rating| {
+        cx.update_entity(&root, |root, cx| {
+            root.review.phase = Phase::Answer;
+            root.review.last_grade_at = None;
+            root.grade(rating, cx);
+        });
+    };
+    let first = current(cx).expect("first card");
+
+    grade(cx, ranki_model::Rating::Again);
+    assert!(current(cx).is_some(), "the next card is ready");
+    assert_ne!(
+        current(cx),
+        Some(first),
+        "a step due in a minute must not come back before the waiting cards"
+    );
+    let pending = cx.read_entity(&root, |root, _| root.review.pending.len());
+    assert_eq!(pending, 1, "the answered card waits for its step");
+
+    grade(cx, ranki_model::Rating::Easy);
+    assert_eq!(
+        current(cx),
+        Some(first),
+        "the learn-ahead window brings the step back once nothing is left"
+    );
 }
 
 #[gpui::test]

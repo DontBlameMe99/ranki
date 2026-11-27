@@ -61,6 +61,7 @@ use rusqlite::Connection;
 use rusqlite::OpenFlags;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
+use rusqlite::functions::FunctionFlags;
 use rusqlite::params;
 use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
@@ -98,6 +99,7 @@ impl Collection {
         )
         .map_err(backend)?;
         register_collations(&conn)?;
+        register_functions(&conn)?;
         let transaction = conn.transaction().map_err(backend)?;
         for statement in schema::CREATE_STATEMENTS {
             transaction.execute(statement, []).map_err(backend)?;
@@ -145,6 +147,7 @@ impl Collection {
         )
         .map_err(backend)?;
         register_collations(&conn)?;
+        register_functions(&conn)?;
         if !records::table_exists(&conn, "col")? {
             return Err(invalid("not an Anki collection"));
         }
@@ -631,11 +634,15 @@ impl Store for Collection {
             })
             .map_err(backend)?;
         let mut cards = Vec::with_capacity(limit);
-        for (queue, due, present) in [
-            (1, now_secs, learning_now),
-            (3, today, learning_day),
-            (2, today, review),
-            (0, i64::MAX, true),
+        // Anki's default deck options gather intraday learning, then reviews,
+        // then interday learning, then new cards. Within reviews and interday
+        // learning it orders by due day, then by `fnvhash(id, mod)`. New cards
+        // follow template order, then position.
+        for (queue, due, present, order) in [
+            (1, now_secs, learning_now, "c.due, c.id"),
+            (2, today, review, "c.due, fnvhash(c.id, c.mod)"),
+            (3, today, learning_day, "c.due, fnvhash(c.id, c.mod)"),
+            (0, i64::MAX, true, "c.ord, c.due, c.id"),
         ] {
             if !present {
                 continue;
@@ -643,7 +650,7 @@ impl Store for Collection {
             let sql = format!(
                 "SELECT c.id, c.nid, c.did, c.ord, c.mod, c.usn, c.type, c.queue, c.due, c.ivl, \
                  c.factor, c.reps, c.lapses, c.left, c.odue, c.odid, c.flags, c.data FROM cards c \
-                 WHERE c.queue = ? AND c.due <= ? {deck_clause} ORDER BY c.due, c.id LIMIT ?"
+                 WHERE c.queue = ? AND c.due <= ? {deck_clause} ORDER BY {order} LIMIT ?"
             );
             let mut parameters =
                 vec![SqlValue::Integer(queue), SqlValue::Integer(due)];
@@ -1085,6 +1092,36 @@ pub fn register_collations(conn: &Connection) -> Result<(), StoreError> {
         left.to_lowercase().cmp(&right.to_lowercase())
     })
     .map_err(backend)
+}
+
+/// Registers Anki's `fnvhash` SQL function, which orders cards that share a
+/// due day. Anki hashes each integer argument's little-endian bytes.
+fn register_functions(conn: &Connection) -> Result<(), StoreError> {
+    conn.create_scalar_function(
+        "fnvhash",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let id: i64 = ctx.get(0)?;
+            let modified: i64 = ctx.get(1)?;
+            Ok(fnv_hash(id, modified))
+        },
+    )
+    .map_err(backend)
+}
+
+/// FNV-1a over both values, compared as Anki's signed `i64`.
+fn fnv_hash(first: i64, second: i64) -> i64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    for value in [first, second] {
+        for byte in value.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    }
+    i64::from_ne_bytes(hash.to_ne_bytes())
 }
 
 pub(crate) fn backend(error: impl Display) -> StoreError {

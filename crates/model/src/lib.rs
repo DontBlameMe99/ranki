@@ -144,7 +144,7 @@ pub struct Card {
     pub usn: i32,
     pub card_type: CardType,
     pub queue: CardQueue,
-    /// New cards: position. Learning cards: milliseconds. Review cards: day number.
+    /// New cards: position. Learning cards: Unix seconds. Review cards: day number.
     pub due: i64,
     pub interval: i32,
     pub factor: u32,

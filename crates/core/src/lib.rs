@@ -1,5 +1,5 @@
 //! Anki-compatible FSRS scheduling for cards.
-//! Step delays use Unix milliseconds, while review intervals use day numbers.
+//! Step delays use Unix seconds, while review intervals use day numbers.
 
 mod fsrs;
 mod optimizer;

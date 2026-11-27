@@ -1352,6 +1352,22 @@ impl Root {
         {
             root.study_deck(index, cx);
         }
+        if let Ok(rating) = env::var("RANKI_UI_DEV_GRADE")
+            && let Some(rating) = match rating.as_str() {
+                "again" => Some(Rating::Again),
+                "hard" => Some(Rating::Hard),
+                "good" => Some(Rating::Good),
+                "easy" => Some(Rating::Easy),
+                _ => None,
+            }
+            && root.review.current.is_some()
+        {
+            if root.review.phase != Phase::Answer {
+                root.reveal(cx);
+            }
+            root.review.last_grade_at = None;
+            root.grade(rating, cx);
+        }
         if let Ok(theme) = env::var("RANKI_UI_DEV_THEME") {
             let choice = match theme.as_str() {
                 "light" => Some(ThemeChoice::Light),
@@ -2509,7 +2525,7 @@ impl Root {
                 self.options.review_batch_size,
                 now,
             ) {
-                Ok(cards) => self.review.queue.extend(cards),
+                Ok(cards) => self.seed_session(cards),
                 Err(error) => {
                     self.review.load_error = Some(error.to_string());
                     self.show_toast(
@@ -2519,7 +2535,6 @@ impl Root {
                     );
                 }
             }
-            self.review.session_total = self.review.queue.len();
             self.previous_view = View::Decks;
             self.view = View::Review;
             self.ensure_current(cx);
@@ -2536,7 +2551,7 @@ impl Root {
             .store
             .due_cards(None, self.options.review_batch_size, now)
         {
-            Ok(cards) => self.review.queue.extend(cards),
+            Ok(cards) => self.seed_session(cards),
             Err(error) => {
                 self.review.load_error = Some(error.to_string());
                 self.show_toast(
@@ -2546,12 +2561,53 @@ impl Root {
                 );
             }
         }
-        self.review.session_total = self.review.queue.len();
         self.previous_view = View::Decks;
         self.view = View::Review;
         self.ensure_current(cx);
         cx.notify();
         self.persist_state(cx);
+    }
+
+    /// Splits a fetched batch the way Anki splits its queues. Intraday learning
+    /// cards wait in `pending` until their step is due, so an answer that comes
+    /// back in a minute does not jump ahead of the cards already waiting.
+    fn seed_session(&mut self, cards: Vec<Card>) {
+        for card in cards {
+            if card.queue == CardQueue::Learning {
+                Self::insert_pending(&mut self.review.pending, card);
+            } else {
+                self.review.queue.push_back(card);
+            }
+        }
+        self.review.session_total = self
+            .review
+            .queue
+            .len()
+            .saturating_add(self.review.pending.len());
+    }
+
+    /// Places a card in the intraday learning queue, ordered the way Anki sorts
+    /// it: previously-attempted cards first, then by due time.
+    fn insert_pending(pending: &mut VecDeque<Card>, card: Card) {
+        let key = |entry: &Card| (entry.reps == 0, entry.due);
+        let index = pending.partition_point(|entry| key(entry) < key(&card));
+        pending.insert(index, card);
+    }
+
+    /// Returns an answered learning card to the intraday queue. A step that is
+    /// already due while nothing else is waiting is pushed behind the card it
+    /// would have replaced, so it is not shown twice in a row.
+    fn requeue_learning(&mut self, mut card: Card) {
+        let cutoff = Self::now().saturating_add(LEARN_AHEAD_SECS);
+        if card.due <= cutoff
+            && self.review.queue.is_empty()
+            && let Some(next) = self.review.pending.front()
+            && next.due >= card.due
+            && next.due.saturating_add(1) < cutoff
+        {
+            card.due = next.due.saturating_add(1);
+        }
+        Self::insert_pending(&mut self.review.pending, card);
     }
 
     /// Restarts the session the summary just ended, with the same scope.
@@ -2601,24 +2657,20 @@ impl Root {
         }
     }
 
-    /// Picks the earliest learning card due by `cutoff_secs`.
+    /// Picks the earliest intraday learning card due by `cutoff_secs`.
     ///
-    /// Learning dues are Unix milliseconds; review dues are day numbers, so only
-    /// queued learning cards can be pulled forward.
+    /// Learning dues are Unix seconds and `pending` is kept in Anki's learning
+    /// order, so the first card inside the cutoff is the one to show. Day
+    /// learning and review dues are day numbers and never live here.
     fn due_learning_card(
         pending: &VecDeque<Card>,
         cutoff_secs: i64,
     ) -> Option<Card> {
-        let cutoff_ms = cutoff_secs.saturating_mul(1_000);
         pending
             .iter()
-            .filter(|card| {
-                matches!(
-                    card.queue,
-                    CardQueue::Learning | CardQueue::DayLearning
-                ) && card.due <= cutoff_ms
+            .find(|card| {
+                card.queue == CardQueue::Learning && card.due <= cutoff_secs
             })
-            .min_by_key(|card| card.due)
             .cloned()
     }
 
@@ -2886,10 +2938,7 @@ impl Root {
             .review
             .studied
             .saturating_add(self.review.focused_elapsed);
-        let requeued = matches!(
-            decision.card.queue,
-            CardQueue::Learning | CardQueue::DayLearning
-        );
+        let requeued = decision.card.queue == CardQueue::Learning;
         if !requeued {
             self.review.completed = self.review.completed.saturating_add(1);
         }
@@ -2902,7 +2951,7 @@ impl Root {
         });
         if requeued {
             let _ = self.review.seen.remove(&decision.card.id);
-            self.review.pending.push_back(decision.card);
+            self.requeue_learning(decision.card);
         }
         self.review.focused_elapsed = Duration::ZERO;
         self.review.current = None;
@@ -2958,7 +3007,14 @@ impl Root {
                     let _ = self.review.seen.remove(&current.id);
                     self.review.pending.retain(|card| card.id != current.id);
                     if current.id != entry.card.id {
-                        self.review.queue.push_front(current);
+                        if current.queue == CardQueue::Learning {
+                            Self::insert_pending(
+                                &mut self.review.pending,
+                                current,
+                            );
+                        } else {
+                            self.review.queue.push_front(current);
+                        }
                     }
                 }
                 self.review.pending.retain(|card| card.id != entry.card.id);
