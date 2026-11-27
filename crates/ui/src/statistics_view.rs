@@ -269,14 +269,9 @@ pub fn build_statistics(
     }
     stats.days = days;
 
-    let mut cursor = today;
-    if !per_day.contains_key(&cursor) {
-        cursor = cursor.saturating_sub(1);
-    }
-    while per_day.get(&cursor).is_some_and(|&count| count > 0) {
-        stats.streak += 1;
-        cursor = cursor.saturating_sub(1);
-    }
+    // A day with no reviews means there was nothing to study, so it does not
+    // interrupt the streak. Count the studied days up to today instead.
+    stats.streak = per_day.keys().filter(|&&day| day <= today).count();
     stats
 }
 
@@ -938,6 +933,17 @@ mod tests {
         assert_eq!(stats.reviews_today, 0);
         assert_eq!(stats.accuracy_percent(), None);
         assert_eq!(stats.streak, 2);
+    }
+
+    #[test]
+    fn idle_days_do_not_break_the_streak() {
+        let logs = [
+            log(0, Rating::Good, 100),
+            log(2, Rating::Good, 100),
+            log(3, Rating::Good, 100),
+        ];
+        let stats = build_statistics(&logs, START + 3 * 86_400, START);
+        assert_eq!(stats.streak, 3);
     }
 
     #[test]
