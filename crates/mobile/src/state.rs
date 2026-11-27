@@ -25,6 +25,7 @@ use ranki_sync::{
 
 use crate::card::sides;
 use crate::error::Result;
+use ranki_core::scheduler_for_card;
 
 const BROWSE_ROW_LIMIT: usize = 200;
 
@@ -195,11 +196,15 @@ impl AppState {
     ///
     /// Store failures are reported as toasts so the UI stays usable.
     ///
+    /// Local data still loads when sync state cannot be read.
+    ///
     /// # Errors
     ///
-    /// Returns an error when the sync state file cannot be read.
+    /// Always returns `Ok`; the result is kept for existing callers.
     pub fn refresh(&mut self) -> Result<()> {
-        self.load_sync_state()?;
+        if let Err(error) = self.load_sync_state() {
+            self.fail(format!("Sync state: {error}"));
+        }
         self.load_decks();
         self.load_models();
         self.refresh_browse();
@@ -301,7 +306,9 @@ impl AppState {
         }
         let now = now_secs();
         let start = self.store.collection_created().unwrap_or(0);
-        let decision = self.scheduler.schedule(&before, rating, now, start);
+        let scheduler =
+            scheduler_for_card(&self.scheduler, &self.store, &before);
+        let decision = scheduler.schedule(&before, rating, now, start);
         let log_id = match self.store.apply_review(&decision) {
             Ok(id) => id,
             Err(error) => {
@@ -373,7 +380,11 @@ impl AppState {
             return;
         }
         self.take_next_card();
-        if self.review.current.is_some() {
+        if self.review.current.is_some()
+            && self.review.note.is_some()
+            && self.review.model.is_some()
+            && self.review.phase != ReviewPhase::Summary
+        {
             self.review.phase = ReviewPhase::Question;
             self.review.summary.clear();
         }
@@ -513,6 +524,13 @@ impl AppState {
                 tags.push(tag.to_owned());
             }
         }
+        if model.is_cloze() && model.card_ordinals(&self.add.fields).is_empty()
+        {
+            self.fail(String::from(
+                "Cloze notes need a {{c1::...}} deletion before saving",
+            ));
+            return Ok(());
+        }
         let note = NewNote {
             model_id: model.id,
             deck_id: deck.id,
@@ -559,6 +577,7 @@ impl AppState {
             return Ok(());
         }
 
+        self.sync.conflict = false;
         self.sync.busy = true;
         self.sync.status = String::from("Signing in to AnkiWeb");
         let result = Self::login_and_sync(
@@ -902,7 +921,8 @@ impl AppState {
         }
         let now = now_secs();
         let start = self.store.collection_created().unwrap_or(0);
-        self.review.intervals = self.scheduler.preview_all(&card, now, start);
+        let scheduler = scheduler_for_card(&self.scheduler, &self.store, &card);
+        self.review.intervals = scheduler.preview_all(&card, now, start);
         self.review.note = note;
         self.review.model = model;
     }

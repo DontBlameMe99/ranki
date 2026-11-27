@@ -341,11 +341,23 @@ fn undo_does_not_duplicate_a_restored_current_card() {
     let before = fixture.state.review.current.clone().expect("current card");
     fixture.state.reveal();
     fixture.state.rate(Rating::Again).expect("rate card");
+    assert_eq!(
+        fixture.state.store.review_history().expect("history").len(),
+        1
+    );
     fixture.state.review.queue.clear();
     fixture.state.review.current = Some(before);
 
     fixture.state.undo().expect("undo review");
 
+    assert_eq!(
+        fixture
+            .state
+            .store
+            .review_history()
+            .expect("history after undo"),
+        Vec::new()
+    );
     assert_eq!(fixture.state.review.queue, Vec::new());
     assert!(fixture.state.review.current.is_some());
     drop(fixture.dir);

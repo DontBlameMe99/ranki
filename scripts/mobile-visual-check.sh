@@ -52,9 +52,10 @@ chmod +x "$dir/bin/ydotool" "$dir/bin/xdotool"
 
 repo="$PWD"
 target_dir="${CARGO_TARGET_DIR:-$repo/target}"
-nix develop --command env CARGO_TARGET_DIR="$target_dir" cargo build -p ranki -p ranki-mobile >/dev/null
-seed_bin="$target_dir/debug/ranki"
-mobile_bin="$target_dir/debug/ranki-mobile"
+host_target="$(nix develop --command rustc -vV | sed -n 's/^host: //p')"
+nix develop --command env CARGO_TARGET_DIR="$target_dir" cargo build --target "$host_target" -p ranki -p ranki-mobile >/dev/null
+seed_bin="$target_dir/$host_target/debug/ranki"
+mobile_bin="$target_dir/$host_target/debug/ranki-mobile"
 
 cat > "$config/ranki/config.toml" <<EOF
 [ui]

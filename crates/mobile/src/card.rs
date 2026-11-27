@@ -9,12 +9,14 @@ use std::{
     collections::{HashMap, VecDeque},
     fs,
     fs::File,
+    io::Cursor,
     io::Read,
     path::{Component, Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 
 use egui::{ColorImage, Context, Id, TextureHandle, TextureOptions, Ui};
-use image::GenericImageView;
+use image::{GenericImageView, Limits};
 use ranki_model::{Note, NoteModel, cloze_markers};
 
 /// Renders the question and answer text for one card ordinal.
@@ -692,8 +694,20 @@ fn show_text(ui: &mut Ui, text: &str) {
     }
 }
 
+fn media_cache_key(media_dir: &Path, name: &str) -> String {
+    let modified = media_path(media_dir, name)
+        .and_then(|path| fs::metadata(path).ok())
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos());
+    modified.map_or_else(
+        || format!("{}|{}", media_dir.display(), name),
+        |stamp| format!("{}|{}|{}", media_dir.display(), name, stamp),
+    )
+}
+
 fn show_image(ui: &mut Ui, media_dir: &Path, name: &str) {
-    let key = format!("{}|{}", media_dir.display(), name);
+    let key = media_cache_key(media_dir, name);
     let id = Id::new("ranki-mobile-card-images");
     let cached = ui
         .ctx()
@@ -735,7 +749,15 @@ fn load_image(
     if bytes.len() > MAX_MEDIA_BYTES {
         return None;
     }
-    let mut decoded = image::load_from_memory(&bytes).ok()?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_IMAGE_SIDE);
+    limits.max_alloc = Some(u64::try_from(MAX_MEDIA_BYTES).ok()?);
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    reader.limits(limits);
+    let mut decoded = reader.decode().ok()?;
     let (width, height) = decoded.dimensions();
     if width == 0 || height == 0 {
         return None;
