@@ -3355,11 +3355,29 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(card) = self.store.card(card_id).ok().flatten() else {
-            return;
+        let card = match self.store.card(card_id) {
+            Ok(Some(card)) => card,
+            Ok(None) => return,
+            Err(error) => {
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not load card: {error}"),
+                    cx,
+                );
+                return;
+            }
         };
-        let Some(note) = self.store.note(card.note_id).ok().flatten() else {
-            return;
+        let note = match self.store.note(card.note_id) {
+            Ok(Some(note)) => note,
+            Ok(None) => return,
+            Err(error) => {
+                self.show_toast(
+                    ToastKind::Error,
+                    format!("Could not load note: {error}"),
+                    cx,
+                );
+                return;
+            }
         };
         let Some(model_index) = self
             .models

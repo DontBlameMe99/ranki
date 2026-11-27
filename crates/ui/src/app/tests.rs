@@ -121,6 +121,7 @@ struct BrowseStore {
     notes: HashMap<Id, Note>,
     ids: Vec<Id>,
     card_reads: Arc<AtomicUsize>,
+    fail_reads: bool,
 }
 
 impl BrowseStore {
@@ -187,6 +188,9 @@ impl ranki_model::Store for BrowseStore {
 
     fn card(&self, id: Id) -> Result<Option<Card>, StoreError> {
         let _ = self.card_reads.fetch_add(1, Ordering::Relaxed);
+        if self.fail_reads {
+            return Err(StoreError::Backend(String::from("disk is on fire")));
+        }
         Ok(self.cards.get(&id).cloned())
     }
 
@@ -368,6 +372,7 @@ fn browse_loads_cards_past_the_first_page(cx: &mut gpui::TestAppContext) {
         notes: HashMap::new(),
         ids: Vec::new(),
         card_reads: Arc::new(AtomicUsize::new(0)),
+        fail_reads: false,
     };
     for (deck_id, count) in [(10, 201), (11, 1)] {
         for _ in 0..count {
@@ -418,6 +423,7 @@ fn browse_reads_only_the_cards_it_shows(cx: &mut gpui::TestAppContext) {
         notes: HashMap::new(),
         ids: Vec::new(),
         card_reads: Arc::clone(&reads),
+        fail_reads: false,
     };
     for _ in 0..2_000 {
         let _ = store.push_card(10);
@@ -4206,6 +4212,7 @@ fn editing_a_browse_card_saves_the_add_card_view(
         notes: HashMap::new(),
         ids: Vec::new(),
         card_reads: Arc::new(AtomicUsize::new(0)),
+        fail_reads: false,
     };
     let _ = store.push_card(10);
     let (root, cx) = cx.add_window_view(|window, cx| {
@@ -4232,6 +4239,50 @@ fn editing_a_browse_card_saves_the_add_card_view(
         .expect("recorded settings");
     assert_eq!(recorded.ui_state.view, ranki_model::UiView::AddCard);
     assert_eq!(recorded.ui_state.previous_view, ranki_model::UiView::Browse);
+}
+
+#[gpui::test]
+fn editing_a_card_reports_a_store_read_failure(cx: &mut gpui::TestAppContext) {
+    let mut store = BrowseStore {
+        decks: vec![Deck {
+            id: 10,
+            name: String::from("Default"),
+            description: String::new(),
+        }],
+        models: ranki_model::stock_models(),
+        cards: HashMap::new(),
+        notes: HashMap::new(),
+        ids: Vec::new(),
+        card_reads: Arc::new(AtomicUsize::new(0)),
+        fail_reads: true,
+    };
+    let _ = store.push_card(10);
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(store),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| {
+            root.start_card_edit(1, window, cx);
+        });
+    });
+
+    let toast = cx
+        .update(|_, app| root.read(app).toast.clone())
+        .expect("error toast");
+    assert!(matches!(toast.kind, super::ToastKind::Error));
+    assert_eq!(
+        toast.text,
+        "Could not load card: storage failure: disk is on fire"
+    );
+    assert!(cx.update(|_, app| root.read(app).card_edit.is_none()));
 }
 
 #[gpui::test]
