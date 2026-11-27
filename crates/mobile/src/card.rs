@@ -8,6 +8,8 @@
 use std::{
     collections::{HashMap, VecDeque},
     fs,
+    fs::File,
+    io::Read,
     path::{Component, Path, PathBuf},
 };
 
@@ -228,6 +230,9 @@ fn field_key(raw: &str) -> String {
         {
             field.trim().to_owned()
         }
+        Some((filter, field)) if filter.trim().eq_ignore_ascii_case("text") => {
+            format!("text:{}", field.trim())
+        }
         Some((field, _)) => field.trim().to_owned(),
         None => raw.trim().to_owned(),
     }
@@ -293,6 +298,12 @@ fn field_text(
         env.front_side.to_owned()
     } else if env.hide_occlusion && key.eq_ignore_ascii_case("Occlusion") {
         String::new()
+    } else if let Some((filter, name)) = key.split_once(':') {
+        if filter.trim().eq_ignore_ascii_case("text") {
+            strip_tags(fields.get(name.trim()).unwrap_or(""), false)
+        } else {
+            fields.get(key).unwrap_or("").to_owned()
+        }
     } else {
         fields.get(key).unwrap_or("").to_owned()
     }
@@ -328,6 +339,10 @@ fn expand_clozes(text: &str, ordinal: u16, question: bool) -> String {
 }
 
 fn strip_markup(input: &str, keep_images: bool) -> String {
+    normalize_newlines(&decode_entities(&strip_tags(input, keep_images)))
+}
+
+fn strip_tags(input: &str, keep_images: bool) -> String {
     let mut output = String::new();
     let mut cursor = 0usize;
     while let Some(rest) = input.get(cursor..) {
@@ -369,7 +384,7 @@ fn strip_markup(input: &str, keep_images: bool) -> String {
         output.push(character);
         cursor = cursor.saturating_add(character.len_utf8());
     }
-    normalize_newlines(&decode_entities(&output))
+    output
 }
 
 enum TagAction {
@@ -573,10 +588,10 @@ fn find_image_tag(text: &str) -> Option<usize> {
 
 fn attribute(tag: &str, name: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
-    let marker = format!("{name}=");
+    let needle = name.to_ascii_lowercase();
     let mut search = 0usize;
     loop {
-        let at = lower.get(search..)?.find(&marker)?;
+        let at = lower.get(search..)?.find(&needle)?;
         let start = search.saturating_add(at);
         let before = tag.get(search..start)?;
         if before
@@ -587,7 +602,16 @@ fn attribute(tag: &str, name: &str) -> Option<String> {
             search = start.saturating_add(1);
             continue;
         }
-        let tail = tag.get(start.saturating_add(marker.len())..)?;
+        let after_name = start.saturating_add(needle.len());
+        let remainder = lower.get(after_name..)?;
+        let spaces =
+            remainder.len().saturating_sub(remainder.trim_start().len());
+        let equals = after_name.saturating_add(spaces);
+        if lower.get(equals..equals.saturating_add(1)) != Some("=") {
+            search = start.saturating_add(1);
+            continue;
+        }
+        let tail = tag.get(equals.saturating_add(1)..)?;
         let trimmed = tail.trim_start();
         let quote = trimmed.chars().next();
         if quote == Some('"') || quote == Some('\'') {
@@ -663,9 +687,8 @@ impl MediaCache {
 }
 
 fn show_text(ui: &mut Ui, text: &str) {
-    let rendered = plain(text);
-    if !rendered.is_empty() {
-        ui.add(egui::Label::new(rendered).wrap());
+    if !text.trim().is_empty() {
+        ui.add(egui::Label::new(text.to_owned()).wrap());
     }
 }
 
@@ -705,7 +728,10 @@ fn load_image(
     name: &str,
 ) -> Option<TextureHandle> {
     let path = media_path(media_dir, name)?;
-    let bytes = fs::read(path).ok()?;
+    let file = File::open(path).ok()?;
+    let limit = u64::try_from(MAX_MEDIA_BYTES.saturating_add(1)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(limit).read_to_end(&mut bytes).ok()?;
     if bytes.len() > MAX_MEDIA_BYTES {
         return None;
     }

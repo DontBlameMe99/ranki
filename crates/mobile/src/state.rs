@@ -23,8 +23,10 @@ use ranki_sync::{
     SyncOutcome, SyncState, TransportConfig, clear_host_key,
 };
 
-use crate::card::{plain, sides};
+use crate::card::sides;
 use crate::error::Result;
+
+const BROWSE_ROW_LIMIT: usize = 200;
 
 /// Full-screen destination shown on a phone.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -43,6 +45,7 @@ pub enum ReviewPhase {
     #[default]
     Question,
     Answer,
+    Waiting,
     Summary,
 }
 
@@ -140,6 +143,7 @@ pub struct AppState {
     pub decks: Vec<DeckRow>,
     pub deck_query: String,
     pub selected_deck: Option<Id>,
+    pub review_scope: Option<Id>,
     pub review: ReviewState,
     pub add: AddState,
     pub browse: BrowseState,
@@ -167,6 +171,7 @@ impl AppState {
             decks: Vec::new(),
             deck_query,
             selected_deck,
+            review_scope: selected_deck,
             review: ReviewState::default(),
             add: AddState::default(),
             browse: BrowseState {
@@ -235,6 +240,7 @@ impl AppState {
             self.selected_deck = None;
             None
         };
+        self.review_scope = scope;
         self.screen = Screen::Review;
         self.review = ReviewState::default();
         self.review.phase = if dev_reveal() {
@@ -322,13 +328,55 @@ impl AppState {
         if self.review.current.is_none()
             && self.review.phase != ReviewPhase::Summary
         {
-            self.review.phase = ReviewPhase::Summary;
-            self.review.summary = format!(
-                "Reviewed {} cards. Session complete.",
-                self.review.answered
-            );
+            if self.review.pending.is_empty() {
+                self.review.phase = ReviewPhase::Summary;
+                self.review.summary = format!(
+                    "Reviewed {} cards. Session complete.",
+                    self.review.answered
+                );
+            } else {
+                self.review.phase = ReviewPhase::Waiting;
+                self.review.summary =
+                    String::from("Next card is waiting for its learning step.");
+            }
         }
         Ok(())
+    }
+
+    /// Seconds until the next pending learning card is due, if any.
+    #[must_use]
+    pub fn pending_delay_secs(&self) -> Option<i64> {
+        if self.screen != Screen::Review
+            || self.review.phase != ReviewPhase::Waiting
+        {
+            return None;
+        }
+        let now = now_secs();
+        self.review
+            .pending
+            .iter()
+            .filter(|card| {
+                matches!(
+                    card.queue,
+                    CardQueue::Learning | CardQueue::DayLearning
+                )
+            })
+            .map(|card| card.due.saturating_sub(now).max(0))
+            .min()
+    }
+
+    /// Advances when a pending learning card becomes due.
+    pub fn poll_pending(&mut self) {
+        if self.screen != Screen::Review
+            || self.review.phase != ReviewPhase::Waiting
+        {
+            return;
+        }
+        self.take_next_card();
+        if self.review.current.is_some() {
+            self.review.phase = ReviewPhase::Question;
+            self.review.summary.clear();
+        }
     }
 
     /// Leaves review and returns to the decks list.
@@ -366,6 +414,7 @@ impl AppState {
                 return Ok(());
             }
             Err(error) => {
+                self.review.last = Some((before, log_id));
                 self.fail(format!("Could not undo review: {error}"));
                 return Ok(());
             }
@@ -535,6 +584,7 @@ impl AppState {
                 let message = format!("AnkiWeb sign-in failed: {error}");
                 self.sync.status.clone_from(&message);
                 self.fail(message);
+                self.load_sync_state()?;
             }
         }
         Ok(())
@@ -758,8 +808,8 @@ impl AppState {
         let decks = self.decks.clone();
         let models = self.add.models.clone();
         let mut notes = HashMap::new();
-        let mut rows = Vec::with_capacity(ids.len());
-        for id in ids {
+        let mut rows = Vec::with_capacity(ids.len().min(BROWSE_ROW_LIMIT));
+        for id in ids.into_iter().take(BROWSE_ROW_LIMIT) {
             let card = match self.store.card(id) {
                 Ok(Some(card)) => card,
                 Ok(None) => continue,
@@ -797,8 +847,8 @@ impl AppState {
                 );
             rows.push(BrowseRow {
                 card_id: card.id,
-                front: plain(&question),
-                back: plain(&answer),
+                front: question,
+                back: answer,
                 deck,
                 meta: format!("{} / {}", model.name, queue_name(card.queue)),
             });
@@ -877,7 +927,7 @@ impl AppState {
             data: String::new(),
         };
         let (question, _) = sides(&model, &note, 0);
-        self.add.preview = plain(&question);
+        self.add.preview = question;
     }
 
     fn sync_client(

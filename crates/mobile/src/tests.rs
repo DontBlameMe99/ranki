@@ -82,6 +82,25 @@ fn plain_strips_markup_but_keeps_line_breaks_and_entities() {
 }
 
 #[test]
+fn text_filter_uses_the_named_field_and_decodes_once() {
+    let mut model = StockModelKind::Basic.definition();
+    if let Some(template) = model.templates.first_mut() {
+        template.question_format = String::from("{{text:Front}}");
+    }
+    let card = note(&["Use &lt;word&gt; here", "Answer"], model.id);
+
+    let (question, _) = sides(&model, &card, 0);
+
+    assert_eq!(question, "Use <word> here");
+}
+
+#[test]
+fn media_names_accept_spaces_around_attribute_equals() {
+    let names = media_names("<img src = \"diagram.png\">");
+    assert!(names.iter().any(|name| name == "diagram.png"));
+}
+
+#[test]
 fn media_names_finds_images_and_sounds() {
     let names = media_names("<img src=\"diagram.png\"> [sound:word.mp3]");
 
@@ -447,6 +466,42 @@ fn take_next_card_preserves_the_current_phase() {
 
     assert!(fixture.state.review.current.is_some());
     assert!(matches!(fixture.state.review.phase, ReviewPhase::Answer));
+    drop(fixture.dir);
+}
+
+#[test]
+fn pending_card_advances_when_due() {
+    let mut fixture = fixture();
+    fixture
+        .state
+        .start_review(Some(fixture.deck_id))
+        .expect("start review");
+    let mut pending =
+        fixture.state.review.current.clone().expect("current card");
+    pending.queue = CardQueue::Learning;
+    pending.due = i64::MIN;
+    fixture.state.review.current = None;
+    fixture.state.review.queue.clear();
+    fixture.state.review.pending = vec![pending];
+    fixture.state.review.phase = ReviewPhase::Waiting;
+
+    fixture.state.poll_pending();
+
+    assert!(fixture.state.review.current.is_some());
+    assert!(matches!(fixture.state.review.phase, ReviewPhase::Question));
+    drop(fixture.dir);
+}
+
+#[test]
+fn review_scope_is_kept_separate_from_the_deck_picker() {
+    let mut fixture = fixture();
+    fixture.state.start_review(None).expect("study all");
+    assert_eq!(fixture.state.review_scope, None);
+    fixture
+        .state
+        .start_review(Some(fixture.deck_id))
+        .expect("study one deck");
+    assert_eq!(fixture.state.review_scope, Some(fixture.deck_id));
     drop(fixture.dir);
 }
 

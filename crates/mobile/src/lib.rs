@@ -25,13 +25,7 @@ pub use state::AppState;
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
-#[expect(
-    improper_ctypes_definitions,
-    reason = "android-activity requires this exact Rust ABI entry point"
-)]
-pub extern "C" fn android_main(
-    app: winit::platform::android::activity::AndroidApp,
-) {
+pub fn android_main(app: winit::platform::android::activity::AndroidApp) {
     if let Err(error) = platform::run_with_android_app(app) {
         eprintln!("ranki mobile: {error}");
     }

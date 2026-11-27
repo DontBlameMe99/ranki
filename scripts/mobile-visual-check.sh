@@ -51,9 +51,10 @@ SHIM
 chmod +x "$dir/bin/ydotool" "$dir/bin/xdotool"
 
 repo="$PWD"
-nix develop --command cargo build -p ranki -p ranki-mobile >/dev/null
-seed_bin="$repo/target/debug/ranki"
-mobile_bin="$repo/target/debug/ranki-mobile"
+target_dir="${CARGO_TARGET_DIR:-$repo/target}"
+nix develop --command env CARGO_TARGET_DIR="$target_dir" cargo build -p ranki -p ranki-mobile >/dev/null
+seed_bin="$target_dir/debug/ranki"
+mobile_bin="$target_dir/debug/ranki-mobile"
 
 cat > "$config/ranki/config.toml" <<EOF
 [ui]
@@ -61,7 +62,7 @@ theme = "dark"
 reduce_motion = true
 EOF
 
-seed_env=(env XDG_CONFIG_HOME="$config" XDG_DATA_HOME="$data")
+seed_env=(env RANKI_DATA_DIR="$data/ranki" XDG_CONFIG_HOME="$config" XDG_DATA_HOME="$data")
 "${seed_env[@]}" "$seed_bin" --no-sync deck-create 'Visual Deck' >/dev/null
 deck_id="$("${seed_env[@]}" "$seed_bin" --no-sync decks \
   | awk -F '\t' '$2 == "Visual Deck" {print $1}')"

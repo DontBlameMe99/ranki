@@ -16,6 +16,7 @@ use egui::{
     TextStyle, Ui, vec2,
 };
 use ranki_model::{Card, CardType, Rating, ThemeChoice};
+use std::time::Duration;
 
 use crate::card::{render_side, sides};
 use crate::state::{AppState, DeckRow, ReviewPhase, Screen, ToastKind};
@@ -40,6 +41,15 @@ impl MobileApp {
 impl eframe::App for MobileApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_style(ctx, self.state.settings.theme);
+        if self.state.review.phase == ReviewPhase::Waiting {
+            match self.state.pending_delay_secs() {
+                Some(0) => self.state.poll_pending(),
+                Some(delay) => ctx.request_repaint_after(Duration::from_secs(
+                    u64::try_from(delay).unwrap_or(3_600).min(3_600),
+                )),
+                None => {}
+            }
+        }
         render(&mut self.state, ctx);
     }
 }
@@ -387,31 +397,53 @@ fn render_review(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     });
     ui.add_space(12.0);
 
-    if review.phase == ReviewPhase::Summary {
+    if matches!(review.phase, ReviewPhase::Summary | ReviewPhase::Waiting) {
+        let waiting = review.phase == ReviewPhase::Waiting;
         EguiFrame::new()
             .fill(p.panel)
             .stroke(Stroke::new(1.0_f32, p.border))
             .inner_margin(Margin::same(16))
             .corner_radius(CornerRadius::same(12))
             .show(ui, |ui| {
-                ui.label(RichText::new("Session complete").size(22.0).strong());
+                let heading = if waiting {
+                    "Next card pending"
+                } else {
+                    "Session complete"
+                };
+                ui.label(RichText::new(heading).size(22.0).strong());
                 ui.add_space(8.0);
                 ui.label(&review.summary);
             });
         ui.add_space(12.0);
-        let again = touch_button(
-            RichText::new("Study again"),
-            TAP_HEIGHT,
-            p.accent,
-            p.accent_ink,
-        );
-        if ui
-            .add_sized([ui.available_width(), TAP_HEIGHT], again)
-            .clicked()
-        {
-            let _ = app.start_review(app.selected_deck);
+        if review.last.is_some() {
+            let undo = secondary_button(
+                RichText::new("Undo last grade"),
+                TAP_HEIGHT,
+                p,
+            );
+            if ui
+                .add_sized([ui.available_width(), TAP_HEIGHT], undo)
+                .clicked()
+            {
+                let _ = app.undo();
+            }
+            ui.add_space(8.0);
         }
-        ui.add_space(8.0);
+        if !waiting {
+            let again = touch_button(
+                RichText::new("Study again"),
+                TAP_HEIGHT,
+                p.accent,
+                p.accent_ink,
+            );
+            if ui
+                .add_sized([ui.available_width(), TAP_HEIGHT], again)
+                .clicked()
+            {
+                let _ = app.start_review(app.review_scope);
+            }
+            ui.add_space(8.0);
+        }
         let done =
             secondary_button(RichText::new("Back to decks"), TAP_HEIGHT, p);
         if ui
@@ -682,16 +714,16 @@ fn render_browse(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     if app.browse.rows.is_empty() {
         ui.label(RichText::new("No cards match this search.").color(p.muted));
     }
-    for row in app.browse.rows.clone() {
+    for row in &app.browse.rows {
         EguiFrame::new()
             .fill(p.panel)
             .stroke(Stroke::new(1.0_f32, p.border))
             .inner_margin(Margin::same(12))
             .corner_radius(CornerRadius::same(12))
             .show(ui, |ui| {
-                ui.label(RichText::new(row.front).size(18.0).strong());
+                ui.label(RichText::new(row.front.clone()).size(18.0).strong());
                 ui.add_space(4.0);
-                ui.label(RichText::new(row.back).color(p.muted));
+                ui.label(RichText::new(row.back.clone()).color(p.muted));
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(format!("{} / {}", row.deck, row.meta))
