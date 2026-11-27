@@ -47,7 +47,13 @@
         craneLib =
           (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        src = craneLib.cleanCargoSource ./.;
+        # taffy includes its README in the crate docs, so keep README files in the
+        # otherwise cargo-only source filter.
+        src = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          filter = path: type:
+            (craneLib.filterCargoSources path type) || (pkgs.lib.hasSuffix "README.md" path);
+        };
 
         guiLibs = pkgs.lib.makeLibraryPath [
           pkgs.wayland
@@ -121,6 +127,7 @@
             ripsecrets.enable = true;
             typos = {
               enable = true;
+              excludes = ["^vendor/taffy/"];
               settings.config.default.extend-words.PN = "PN";
             };
             check-toml.enable = true;
