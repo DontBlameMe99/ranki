@@ -12,6 +12,7 @@ use std::fmt;
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::Builder;
@@ -96,16 +97,39 @@ pub enum SyncOutcome {
     },
 }
 
+impl SyncOutcome {
+    /// Whether the collection sync left both copies in step, so media can
+    /// follow.
+    #[must_use]
+    pub const fn is_settled(&self) -> bool {
+        matches!(self, Self::NoChanges | Self::Uploaded | Self::Downloaded)
+    }
+}
+
+/// How far a media refresh has got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MediaProgress {
+    /// Media files downloaded so far.
+    pub done: usize,
+    /// Media files this refresh found missing locally.
+    pub total: usize,
+}
+
+/// Receives media progress from a background thread.
+pub type MediaProgressFn = Arc<dyn Fn(MediaProgress) + Send + Sync>;
+
 /// Minimal `AnkiWeb` v11 collection sync client.
 ///
 /// The client stores only the host key and sync metadata in its state file.
-/// Full download adds or replaces local media files. Media is never deleted.
+/// [`SyncClient::sync_media`] adds or replaces local media files. Media is
+/// never deleted.
 pub struct SyncClient<T: SyncTransport> {
     transport: T,
     state: SyncState,
     collection: PathBuf,
     media_dir: PathBuf,
     state_path: PathBuf,
+    media_progress: Option<MediaProgressFn>,
 }
 
 impl<T: SyncTransport> SyncClient<T> {
@@ -135,6 +159,7 @@ impl<T: SyncTransport> SyncClient<T> {
             collection: collection.to_path_buf(),
             media_dir: media_dir.to_path_buf(),
             state_path: state_path.to_path_buf(),
+            media_progress: None,
         })
     }
 
@@ -142,6 +167,11 @@ impl<T: SyncTransport> SyncClient<T> {
     #[must_use]
     pub const fn transport(&self) -> &T {
         &self.transport
+    }
+
+    /// Reports media refresh progress to a background caller.
+    pub fn set_media_progress(&mut self, report: MediaProgressFn) {
+        self.media_progress = Some(report);
     }
 
     /// Current persisted state.
@@ -252,10 +282,13 @@ impl<T: SyncTransport> SyncClient<T> {
 
     /// Download the whole remote collection. This is an explicit one-way choice.
     ///
+    /// Media is not part of this call. Run [`Self::sync_media`] afterwards, so
+    /// the collection lands without waiting for a large media library.
+    ///
     /// # Errors
     ///
     /// Returns an error when the download fails, the temporary collection is
-    /// invalid, the media download fails, or the atomic replacement fails.
+    /// invalid, or the atomic replacement fails.
     pub fn full_download(&mut self) -> Result<()> {
         self.require_host_key()?;
         let body = wire::frame(b"{}")?;
@@ -282,7 +315,6 @@ impl<T: SyncTransport> SyncClient<T> {
         }
         let info = validate_download(file.path())?;
         file.as_file().sync_all()?;
-        self.sync_media()?;
         self.backup_collection()?;
         file.persist(&self.collection)
             .map_err(|error| SyncError::Io(error.to_string()))?;
@@ -291,33 +323,76 @@ impl<T: SyncTransport> SyncClient<T> {
         Ok(())
     }
 
-    /// Downloads the media referenced by the remote collection.
+    /// Refreshes local media from `AnkiWeb`.
     ///
-    /// The full manifest is fetched whenever media changes or the local folder
-    /// is empty, so files from another account or a removed local copy are
-    /// restored. Files already present with the server's hash are left
-    /// untouched.
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "media batches keep request and extraction state local"
-    )]
-    fn sync_media(&mut self) -> Result<()> {
+    /// Callers run this after the collection sync, so a large media library
+    /// never holds up the collection itself. The full manifest is fetched
+    /// whenever media changes or the local folder is empty, so files from
+    /// another account or a removed local copy are restored. Files already
+    /// present with the server's hash are left untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a media request fails, a ZIP cannot be read, or
+    /// the state file cannot be written.
+    pub fn sync_media(&mut self) -> Result<()> {
+        self.require_host_key()?;
+        let server_usn = self.media_server_usn()?;
+        if server_usn <= 0 {
+            return Ok(());
+        }
+        let matching = server_usn == self.state.last_media_usn;
+        if matching
+            && !self.state.media_refill_needed
+            && !self.media_dir_is_empty()
+        {
+            return Ok(());
+        }
+        if matching && !self.state.media_refill_needed {
+            self.state.media_refill_needed = true;
+            self.state.save(&self.state_path)?;
+        }
+        fs::create_dir_all(&self.media_dir)?;
+
+        let missing = self.missing_media(server_usn)?;
+        let total = missing.len();
+        self.report_media(MediaProgress { done: 0, total });
+        let mut done = 0_usize;
+        for names in missing.chunks(media::DOWNLOAD_BATCH) {
+            let request = media::DownloadRequest {
+                files: names.to_vec(),
+            };
+            let body = wire::frame_json(&request)?;
+            let response = self.send(SyncMethod::MediaDownload, &body)?;
+            let zip = wire::decode(&response)?;
+            media::extract_files(&self.media_dir, &zip)?;
+            done = done.saturating_add(names.len());
+            self.report_media(MediaProgress { done, total });
+        }
+        self.state.last_media_usn = server_usn;
+        self.state.media_refill_needed = false;
+        self.state.save(&self.state_path)?;
+        Ok(())
+    }
+
+    fn media_server_usn(&mut self) -> Result<i32> {
         let body = wire::frame_json(&media::BeginRequest {
             v: meta_client_version(),
         })?;
         let response = self.send(SyncMethod::MediaBegin, &body)?;
-        let server_usn = media::parse_begin(&wire::decode(&response)?)?;
-        if server_usn <= 0 {
-            return Ok(());
-        }
-        fs::create_dir_all(&self.media_dir)?;
+        media::parse_begin(&wire::decode(&response)?)
+    }
 
+    /// Collects the names that are missing locally or differ from the server.
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "the manifest walk keeps its cursor and errors local"
+    )]
+    fn missing_media(&mut self, server_usn: i32) -> Result<Vec<String>> {
+        let mut missing = Vec::new();
         let mut last_usn = 0_i32;
-        loop {
-            let request = media::ChangesRequest { last_usn };
-            let body = wire::frame_json(&request)?;
-            let response = self.send(SyncMethod::MediaChanges, &body)?;
-            let batch = media::parse_changes(&wire::decode(&response)?)?;
+        while last_usn < server_usn {
+            let batch = self.media_changes(last_usn)?;
             if batch.is_empty() {
                 break;
             }
@@ -332,60 +407,51 @@ impl<T: SyncTransport> SyncClient<T> {
                 ));
             }
             last_usn = highest;
-
-            let mut missing = Vec::new();
-            for change in &batch {
-                if change.sha1.is_empty() {
-                    continue;
-                }
-                let Some(name) = media::safe_media_name(&change.fname) else {
-                    continue;
-                };
-                if !media::local_matches_sha1(
-                    &self.media_dir,
-                    name,
-                    &change.sha1,
-                )? {
-                    missing.push(name.to_owned());
-                }
-            }
-            for names in missing.chunks(media::DOWNLOAD_BATCH) {
-                let request = media::DownloadRequest {
-                    files: names.to_vec(),
-                };
-                let body = wire::frame_json(&request)?;
-                let response = self.send(SyncMethod::MediaDownload, &body)?;
-                let zip = wire::decode(&response)?;
-                media::extract_files(&self.media_dir, &zip)?;
-            }
-            if last_usn >= server_usn {
-                break;
-            }
+            missing.extend(self.missing_names(&batch)?);
         }
-        self.state.last_media_usn = server_usn;
-        self.state.media_refill_needed = false;
-        self.state.save(&self.state_path)?;
-        Ok(())
+        Ok(missing)
     }
 
-    /// Fetches media when the server has a newer media USN, a refill is
-    /// unfinished, or the local media folder has no files.
-    fn sync_media_if_needed(&mut self, status: &RemoteStatus) -> Result<()> {
-        if status.media_usn <= 0 {
-            return Ok(());
+    fn media_changes(
+        &mut self,
+        last_usn: i32,
+    ) -> Result<Vec<media::MediaChange>> {
+        let body = wire::frame_json(&media::ChangesRequest { last_usn })?;
+        let response = self.send(SyncMethod::MediaChanges, &body)?;
+        media::parse_changes(&wire::decode(&response)?)
+    }
+
+    fn missing_names(
+        &self,
+        batch: &[media::MediaChange],
+    ) -> Result<Vec<String>> {
+        let names = batch
+            .iter()
+            .map(|change| self.missing_name(change))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(names.into_iter().flatten().collect())
+    }
+
+    fn missing_name(
+        &self,
+        change: &media::MediaChange,
+    ) -> Result<Option<String>> {
+        if change.sha1.is_empty() {
+            return Ok(None);
         }
-        let matching = status.media_usn == self.state.last_media_usn;
-        if matching
-            && !self.state.media_refill_needed
-            && !self.media_dir_is_empty()
-        {
-            return Ok(());
+        let Some(name) = media::safe_media_name(&change.fname) else {
+            return Ok(None);
+        };
+        if media::local_matches_sha1(&self.media_dir, name, &change.sha1)? {
+            return Ok(None);
         }
-        if matching && !self.state.media_refill_needed {
-            self.state.media_refill_needed = true;
-            self.state.save(&self.state_path)?;
+        Ok(Some(name.to_owned()))
+    }
+
+    fn report_media(&self, progress: MediaProgress) {
+        if let Some(report) = &self.media_progress {
+            report(progress);
         }
-        self.sync_media()
     }
 
     fn media_dir_is_empty(&self) -> bool {
@@ -456,12 +522,10 @@ impl<T: SyncTransport> SyncClient<T> {
             self.state.failures = 0;
             self.state.last_success = Some(now_secs()?);
             self.state.save(&self.state_path)?;
-            self.sync_media_if_needed(&status)?;
             return Ok(SyncOutcome::NoChanges);
         }
         if local_changed {
             self.full_upload()?;
-            self.sync_media_if_needed(&status)?;
             return Ok(SyncOutcome::Uploaded);
         }
         if status.mod_time < local.mod_time {
@@ -481,7 +545,6 @@ impl<T: SyncTransport> SyncClient<T> {
         match (status.empty, local.cards) {
             (_, 0) if status.empty => {
                 self.record_success()?;
-                self.sync_media_if_needed(status)?;
                 Ok(SyncOutcome::NoChanges)
             }
             (false, 0) => {

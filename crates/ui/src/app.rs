@@ -20,6 +20,7 @@ use ranki_model::{
     NoteModel, Rating, ReviewDecision, StockModelKind, Store, Timing, UiState,
     UiView,
 };
+use ranki_sync::MediaProgress;
 
 use crate::{
     Options, SettingsSaver, ThemeChoice,
@@ -186,6 +187,8 @@ pub struct SyncUiState {
     pub password: Entity<TextField>,
     pub signed_in: bool,
     pub running: Option<SyncActivity>,
+    /// File counts from the media refresh that follows a sync.
+    pub media: Option<MediaProgress>,
     pub conflict: Option<String>,
     /// Failure from the last attempt, kept on screen after the toast fades.
     pub error: Option<String>,
@@ -645,6 +648,7 @@ pub struct Root {
     pub(crate) browse_smooth: SmoothScroll,
     pub(crate) sync: SyncUiState,
     pub(crate) sync_run: Arc<crate::sync_view::SyncRun>,
+    pub(crate) media_run: Arc<crate::sync_view::MediaRun>,
     pub(crate) save_settings: SettingsSaver,
     pub(crate) images: Entity<card_view::LruImageCache>,
     pub(crate) font_family: &'static str,
@@ -1192,10 +1196,12 @@ impl Root {
                 password: sync_password,
                 signed_in,
                 running: None,
+                media: None,
                 conflict: None,
                 error: None,
             },
             sync_run: Arc::new(crate::sync_view::run_sync),
+            media_run: Arc::new(crate::sync_view::run_media),
             save_settings,
             images: card_view::LruImageCache::new(cx),
             last_change_check: Instant::now(),
@@ -1430,8 +1436,16 @@ impl Root {
                 "signing-in" => SyncActivity::SigningIn,
                 "keep-local" => SyncActivity::KeepingLocal,
                 "keep-remote" => SyncActivity::KeepingRemote,
+                "downloading-media" => SyncActivity::DownloadingMedia,
                 _ => SyncActivity::Syncing,
             });
+        }
+        if let Ok(media) = env::var("RANKI_UI_DEV_SYNC_MEDIA")
+            && let Some((done, total)) = media.split_once('/')
+            && let (Ok(done), Ok(total)) =
+                (done.parse::<usize>(), total.parse::<usize>())
+        {
+            root.sync.media = Some(MediaProgress { done, total });
         }
         if env::var("RANKI_UI_DEV_SYNC_CONFLICT")
             .is_ok_and(|value| value == "1")
@@ -1449,6 +1463,21 @@ impl Root {
             root.sync.signed_in = true;
             root.options.sync.enabled = true;
             root.sync.error = Some(error);
+        }
+        if env::var("RANKI_UI_DEV_SYNC_SIGN_IN").is_ok_and(|value| value == "1")
+        {
+            root.view = View::Settings;
+            let username =
+                env::var("RANKI_UI_DEV_SYNC_USER").unwrap_or_default();
+            let password =
+                env::var("RANKI_UI_DEV_SYNC_PASS").unwrap_or_default();
+            root.sync
+                .username
+                .update(cx, |field, cx| field.seed(&username, cx));
+            root.sync
+                .password
+                .update(cx, |field, cx| field.seed(&password, cx));
+            root.sign_in(cx);
         }
         if env::var("RANKI_UI_DEV_SYNC_RUNNING").is_ok()
             || env::var("RANKI_UI_DEV_SYNC_CONFLICT")

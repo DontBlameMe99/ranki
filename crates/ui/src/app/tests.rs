@@ -1594,8 +1594,12 @@ fn gui_answer_time_uses_the_effective_preset_cap(
     let history = reopened.review_history().expect("history");
     assert_eq!(history[0].time_ms, 2_000);
 }
-#[gpui::test]
-fn finishing_a_session_starts_one_quiet_sync(cx: &mut gpui::TestAppContext) {
+/// Grades the last card of a session and reports sync and media runs.
+fn session_sync_counts(
+    cx: &mut gpui::TestAppContext,
+    outcome: ranki_sync::SyncOutcome,
+) -> (usize, usize) {
+    let settled = outcome.is_settled();
     let dir = tempfile::tempdir().expect("temp dir");
     let collection = dir.path().join("collection.anki2");
     let mut store =
@@ -1618,8 +1622,10 @@ fn finishing_a_session_starts_one_quiet_sync(cx: &mut gpui::TestAppContext) {
         },
         ..Options::default()
     };
-    let calls = Arc::new(AtomicUsize::new(0));
-    let counted = Arc::clone(&calls);
+    let syncs = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&syncs);
+    let media = Arc::new(AtomicUsize::new(0));
+    let refreshed = Arc::clone(&media);
     let (root, cx) = cx.add_window_view(|window, cx| {
         let mut root = super::Root::new(
             super::Launch {
@@ -1633,7 +1639,11 @@ fn finishing_a_session_starts_one_quiet_sync(cx: &mut gpui::TestAppContext) {
         root.sync.signed_in = true;
         root.sync_run = Arc::new(move |_, _, _, _, _| {
             counted.fetch_add(1, Ordering::Relaxed);
-            Ok(ranki_sync::SyncOutcome::Uploaded)
+            Ok(outcome.clone())
+        });
+        root.media_run = Arc::new(move |_, _, _, _, _, _| {
+            refreshed.fetch_add(1, Ordering::Relaxed);
+            Ok(())
         });
         root
     });
@@ -1647,7 +1657,7 @@ fn finishing_a_session_starts_one_quiet_sync(cx: &mut gpui::TestAppContext) {
         root.grade(ranki_model::Rating::Easy, cx);
     });
     cx.run_until_parked();
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(syncs.load(Ordering::Relaxed), 0);
 
     cx.update_entity(&root, |root, cx| {
         root.review.phase = Phase::Answer;
@@ -1655,8 +1665,29 @@ fn finishing_a_session_starts_one_quiet_sync(cx: &mut gpui::TestAppContext) {
         root.grade(ranki_model::Rating::Easy, cx);
     });
     cx.run_until_parked();
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
-    cx.read_entity(&root, |root, _| assert!(root.toast.is_none()));
+    let quiet = cx.read_entity(&root, |root, _| root.toast.is_none());
+    assert_eq!(quiet, settled);
+    (syncs.load(Ordering::Relaxed), media.load(Ordering::Relaxed))
+}
+
+#[gpui::test]
+fn finishing_a_session_starts_one_quiet_sync(cx: &mut gpui::TestAppContext) {
+    let (syncs, media) =
+        session_sync_counts(cx, ranki_sync::SyncOutcome::Uploaded);
+    assert_eq!(syncs, 1);
+    assert_eq!(media, 1);
+}
+
+#[gpui::test]
+fn a_conflict_does_not_start_a_media_refresh(cx: &mut gpui::TestAppContext) {
+    let (syncs, media) = session_sync_counts(
+        cx,
+        ranki_sync::SyncOutcome::Conflict {
+            reason: String::from("both collections changed"),
+        },
+    );
+    assert_eq!(syncs, 1);
+    assert_eq!(media, 0);
 }
 #[test]
 fn duration_labels_read_like_a_session_summary() {

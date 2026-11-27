@@ -3,8 +3,8 @@
 //! [`SyncClient`] implements login, metadata checks, full upload, full download,
 //! and a conservative automatic [`SyncClient::sync`]. It refuses one-way
 //! changes when both sides changed or when the local collection may be newer.
-//! A full download adds or replaces remote media files. Local media is never
-//! deleted.
+//! [`SyncClient::sync_media`] refreshes local media on its own, so a large
+//! media library never holds up the collection. Local media is never deleted.
 //!
 //! HTTP lives behind the object-safe [`SyncTransport`] trait. [`HttpTransport`]
 //! uses a blocking client, sends the `anki-sync` header fields `v`, `k`, `c`,
@@ -30,7 +30,10 @@ mod state;
 mod transport;
 mod wire;
 
-pub use client::{Credentials, RemoteStatus, SyncClient, SyncOutcome};
+pub use client::{
+    Credentials, MediaProgress, MediaProgressFn, RemoteStatus, SyncClient,
+    SyncOutcome,
+};
 pub use error::{Result, SyncError};
 pub use mock::{MockResponse, MockTransport, RecordedRequest};
 pub use state::{SyncState, clear_host_key, set_host_key};

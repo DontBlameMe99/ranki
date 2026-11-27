@@ -1064,6 +1064,14 @@ mod tests {
         .unwrap()
     }
 
+    fn media_begin() -> MockResponse {
+        MockResponse::ok_json(&serde_json::json!({
+            "data": { "usn": 0, "sk": "stored-hkey" },
+            "err": ""
+        }))
+        .unwrap()
+    }
+
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).unwrap_or_else(|error| panic!("{error}"))
     }
@@ -1098,15 +1106,24 @@ mod tests {
         .unwrap();
         let mut transport = MockTransport::new()
             .with_response(SyncMethod::Meta, response.clone())
-            .with_response(SyncMethod::Meta, response);
+            .with_response(SyncMethod::Meta, response)
+            .with_response(SyncMethod::MediaBegin, media_begin())
+            .with_response(SyncMethod::MediaBegin, media_begin());
         let cli = parse(&["ranki", "decks"]);
         run_with_sync(cli, &mut config, &mut transport, paths).unwrap();
-        assert_eq!(transport.request_count(), 2);
-        assert!(
+        assert_eq!(transport.request_count(), 4);
+        assert_eq!(
             transport
                 .requests()
                 .iter()
-                .all(|request| request.method == SyncMethod::Meta)
+                .map(|request| request.method)
+                .collect::<Vec<_>>(),
+            vec![
+                SyncMethod::Meta,
+                SyncMethod::MediaBegin,
+                SyncMethod::Meta,
+                SyncMethod::MediaBegin
+            ]
         );
     }
 
@@ -1145,7 +1162,9 @@ mod tests {
             .with_response(SyncMethod::Meta, remote_meta())
             .with_response(SyncMethod::Meta, remote_meta())
             .with_response(SyncMethod::Upload, uploaded())
-            .with_response(SyncMethod::Meta, remote_meta());
+            .with_response(SyncMethod::Meta, remote_meta())
+            .with_response(SyncMethod::MediaBegin, media_begin())
+            .with_response(SyncMethod::MediaBegin, media_begin());
         let mut config = ranki_model::Config::default();
         config.sync.enabled = true;
         config.scheduler.auto_optimize = false;
@@ -1171,9 +1190,11 @@ mod tests {
             methods,
             vec![
                 SyncMethod::Meta,
+                SyncMethod::MediaBegin,
                 SyncMethod::Meta,
                 SyncMethod::Upload,
-                SyncMethod::Meta
+                SyncMethod::Meta,
+                SyncMethod::MediaBegin
             ]
         );
     }
