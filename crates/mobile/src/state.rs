@@ -20,7 +20,7 @@ use ranki_model::{
 use ranki_storage::ReopeningCollection;
 use ranki_sync::{
     Credentials, DEFAULT_ENDPOINT, HttpTransport, RetryPolicy, SyncClient,
-    SyncOutcome, SyncState, TransportConfig, clear_host_key,
+    SyncOutcome, SyncState, SyncTransport, TransportConfig, clear_host_key,
 };
 
 use crate::card::sides;
@@ -985,7 +985,20 @@ impl AppState {
             collection, media_dir, state_path, retries, backoff_ms,
         )?;
         client.login(&Credentials::new(username, password))?;
-        Ok(client.sync(None)?)
+        let outcome = client.sync(None)?;
+        Self::refresh_media(&mut client, &outcome)?;
+        Ok(outcome)
+    }
+
+    /// Fetches media after a sync that left both copies in step.
+    fn refresh_media<T: SyncTransport>(
+        client: &mut SyncClient<T>,
+        outcome: &SyncOutcome,
+    ) -> Result<()> {
+        if outcome.is_settled() {
+            client.sync_media()?;
+        }
+        Ok(())
     }
 
     fn run_sync(
@@ -998,7 +1011,9 @@ impl AppState {
         let mut client = Self::sync_client(
             collection, media_dir, state_path, retries, backoff_ms,
         )?;
-        Ok(client.sync(None)?)
+        let outcome = client.sync(None)?;
+        Self::refresh_media(&mut client, &outcome)?;
+        Ok(outcome)
     }
 
     fn run_conflict(
@@ -1014,9 +1029,11 @@ impl AppState {
         )?;
         if keep_remote {
             client.full_download()?;
+            client.sync_media()?;
             Ok(SyncOutcome::Downloaded)
         } else {
             client.full_upload()?;
+            client.sync_media()?;
             Ok(SyncOutcome::Uploaded)
         }
     }

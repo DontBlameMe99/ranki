@@ -306,7 +306,6 @@ fn full_download_replaces_collection_and_keeps_media() -> TestResult {
             SyncMethod::Download,
             MockResponse::ok_bytes(fs::read(&source)?)?,
         )
-        .with_response(SyncMethod::MediaBegin, media_begin(0)?)
         .with_response(
             SyncMethod::Meta,
             meta_response((900, 200, false, now_secs()?))?,
@@ -614,7 +613,6 @@ fn empty_local_collection_downloads_a_populated_remote() -> TestResult {
             SyncMethod::Download,
             MockResponse::ok_bytes(fs::read(&source)?)?,
         )
-        .with_response(SyncMethod::MediaBegin, media_begin(0)?)
         .with_response(
             SyncMethod::Meta,
             meta_response((900, 500, false, now_secs()?))?,
@@ -668,7 +666,6 @@ fn synced_collection_keeps_deck_steps_from_ankiweb() -> TestResult {
             SyncMethod::Download,
             MockResponse::ok_bytes(fs::read(&source)?)?,
         )
-        .with_response(SyncMethod::MediaBegin, media_begin(0)?)
         .with_response(
             SyncMethod::Meta,
             meta_response((900, 500, false, now_secs()?))?,
@@ -729,6 +726,7 @@ fn full_download_restores_remote_media() -> TestResult {
         SyncClient::new(transport, &collection, &media, &state_path)?;
 
     client.full_download()?;
+    client.sync_media()?;
 
     assert_eq!(fs::read(media.join("flag.png"))?, b"flag bytes");
     let methods: Vec<SyncMethod> = client
@@ -741,10 +739,10 @@ fn full_download_restores_remote_media() -> TestResult {
         methods,
         [
             SyncMethod::Download,
+            SyncMethod::Meta,
             SyncMethod::MediaBegin,
             SyncMethod::MediaChanges,
             SyncMethod::MediaDownload,
-            SyncMethod::Meta,
         ]
     );
     let begin = client
@@ -802,15 +800,18 @@ fn unchanged_collection_still_syncs_new_media() -> TestResult {
         .with_response(
             SyncMethod::Meta,
             meta_response_with_media((100, 100, false, now_secs()?), 1)?,
-        );
+        )
+        .with_response(SyncMethod::MediaBegin, media_begin(1)?);
     let mut client =
         SyncClient::new(transport, &collection, &media, &state_path)?;
 
     assert_eq!(client.sync(None)?, SyncOutcome::NoChanges);
+    client.sync_media()?;
     assert_eq!(fs::read(media.join("Afghanistan.png"))?, b"flag bytes");
     assert_eq!(client.state().last_media_usn, 1);
 
     assert_eq!(client.sync(None)?, SyncOutcome::NoChanges);
+    client.sync_media()?;
     let methods: Vec<SyncMethod> = client
         .transport()
         .requests()
@@ -825,6 +826,7 @@ fn unchanged_collection_still_syncs_new_media() -> TestResult {
             SyncMethod::MediaChanges,
             SyncMethod::MediaDownload,
             SyncMethod::Meta,
+            SyncMethod::MediaBegin,
         ]
     );
     Ok(())
@@ -876,6 +878,7 @@ fn matching_media_usn_refills_an_empty_media_folder() -> TestResult {
         SyncClient::new(transport, &collection, &media, &state_path)?;
 
     assert_eq!(client.sync(None)?, SyncOutcome::NoChanges);
+    client.sync_media()?;
     assert_eq!(fs::read(media.join("Afghanistan.png"))?, b"flag bytes");
     let methods: Vec<SyncMethod> = client
         .transport()
@@ -946,7 +949,8 @@ fn failed_media_refill_keeps_retrying() -> TestResult {
     let mut client =
         SyncClient::new(transport, &collection, &media, &state_path)?;
 
-    assert!(matches!(client.sync(None)?, SyncOutcome::RetryLater { .. }));
+    assert_eq!(client.sync(None)?, SyncOutcome::NoChanges);
+    assert!(matches!(client.sync_media(), Err(SyncError::Timeout)));
     assert!(client.state().media_refill_needed);
     assert!(
         fs::read_to_string(&state_path)?
@@ -957,6 +961,7 @@ fn failed_media_refill_keeps_retrying() -> TestResult {
     fs::write(media.join("partial.png"), b"partial")?;
 
     assert_eq!(client.sync(None)?, SyncOutcome::NoChanges);
+    client.sync_media()?;
     assert_eq!(fs::read(media.join("Afghanistan.png"))?, b"flag bytes");
     assert!(!client.state().media_refill_needed);
     Ok(())

@@ -12,8 +12,8 @@ use gpui::{
 use ranki_storage::ReopeningCollection;
 
 use ranki_sync::{
-    Credentials, HttpTransport, RetryPolicy, SyncClient, SyncOutcome,
-    SyncState, SyncTransport, TransportConfig,
+    Credentials, HttpTransport, MediaProgress, MediaProgressFn, RetryPolicy,
+    SyncClient, SyncOutcome, SyncState, SyncTransport, TransportConfig,
 };
 
 use crate::{
@@ -37,6 +37,7 @@ pub enum SyncActivity {
     Syncing,
     KeepingLocal,
     KeepingRemote,
+    DownloadingMedia,
 }
 
 impl SyncActivity {
@@ -46,6 +47,7 @@ impl SyncActivity {
             Self::Syncing => "Syncing with AnkiWeb",
             Self::KeepingLocal => "Keeping the local copy",
             Self::KeepingRemote => "Keeping the AnkiWeb copy",
+            Self::DownloadingMedia => "Downloading media",
         }
     }
 }
@@ -185,6 +187,26 @@ pub fn run_sync(
         build_client(collection, media_dir, state_path, retries, backoff_ms)?;
     client.sync(None).map_err(|error| error.to_string())
 }
+
+/// Refreshes media with the window's transport settings, reporting progress.
+pub type MediaRun = dyn Fn(&Path, &Path, &Path, u8, u64, MediaProgressFn) -> Result<(), String>
+    + Send
+    + Sync;
+
+pub fn run_media(
+    collection: &Path,
+    media_dir: &Path,
+    state_path: &Path,
+    retries: u8,
+    backoff_ms: u64,
+    progress: MediaProgressFn,
+) -> Result<(), String> {
+    let mut client =
+        build_client(collection, media_dir, state_path, retries, backoff_ms)?;
+    client.set_media_progress(progress);
+    client.sync_media().map_err(|error| error.to_string())
+}
+
 impl Root {
     pub(crate) fn sign_out(&mut self, cx: &mut Context<Self>) {
         if self.sync.busy() {
@@ -462,6 +484,65 @@ impl Root {
         if matches!(result, Ok(SyncOutcome::Downloaded)) {
             self.reopen_collection(cx);
         }
+        let settled = result.as_ref().is_ok_and(SyncOutcome::is_settled);
+        if self.sync.signed_in && settled {
+            self.start_media_sync(cx);
+        }
+    }
+
+    /// Downloads media after the collection sync, off the main thread.
+    fn start_media_sync(&mut self, cx: &mut Context<Self>) {
+        let collection = self.options.paths.collection.clone();
+        let media_dir = self.options.paths.media_dir.clone();
+        let sync_state = self.options.paths.sync_state.clone();
+        let retries = self.options.sync.retries;
+        let backoff_ms = self.options.sync.backoff_ms;
+        let runner = Arc::clone(&self.media_run);
+        let (sender, receiver) = futures::channel::mpsc::unbounded();
+        self.sync.running = Some(SyncActivity::DownloadingMedia);
+        self.sync.media = None;
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            let progress: MediaProgressFn = Arc::new(move |progress| {
+                let _ = sender.unbounded_send(progress);
+            });
+            runner(
+                &collection,
+                &media_dir,
+                &sync_state,
+                retries,
+                backoff_ms,
+                progress,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            let mut receiver = receiver;
+            while let Some(progress) = receiver.next().await {
+                let _ = this.update(cx, |root, cx| {
+                    root.sync.media = Some(progress);
+                    cx.notify();
+                });
+            }
+            let result = task.await;
+            let _ = this.update(cx, |root, cx| {
+                root.sync.running = None;
+                root.sync.media = None;
+                match result {
+                    Ok(()) => {
+                        root.images
+                            .update(cx, |cache, _| cache.forget_failed());
+                    }
+                    Err(error) => root.show_toast(
+                        ToastKind::Error,
+                        format!("Media sync failed: {error}"),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn reopen_collection(&mut self, cx: &mut Context<Self>) {
@@ -505,7 +586,12 @@ impl Root {
         }
 
         let body = if let Some(activity) = running {
-            activity_line(activity, colors, self.motion_ms(PULSE_MS))
+            activity_line(
+                activity,
+                colors,
+                self.motion_ms(PULSE_MS),
+                self.sync.media,
+            )
         } else if !signed_in {
             div()
                 .flex()
@@ -587,13 +673,28 @@ fn status_line(text: impl Into<SharedString>, colors: Palette) -> Div {
         .child(text.into())
 }
 
+/// The activity line's text, including media counts once they are known.
+fn activity_text(
+    activity: SyncActivity,
+    media: Option<MediaProgress>,
+) -> String {
+    let mut label = activity.label().to_owned();
+    if let Some(progress) = media.filter(|progress| progress.total > 0) {
+        label = format!("{} ({} of {})", label, progress.done, progress.total);
+    }
+    format!("{label}...")
+}
+
 /// Replaces the actions while a sync runs, so a long upload still looks alive.
 fn activity_line(
     activity: SyncActivity,
     colors: Palette,
     motion_ms: u64,
+    media: Option<MediaProgress>,
 ) -> Div {
     use gpui::AnimationExt as _;
+
+    let label = activity_text(activity, media);
 
     let marker = if motion_ms == 0 {
         dot(colors.mauve, 8.).into_any_element()
@@ -617,7 +718,7 @@ fn activity_line(
         .text_size(px(13.))
         .text_color(colors.text)
         .child(marker)
-        .child(SharedString::from(format!("{}...", activity.label())))
+        .child(SharedString::from(label))
 }
 
 /// The one decision the sync panel ever asks for.
@@ -717,14 +818,14 @@ fn labeled_input(
 #[cfg(test)]
 mod tests {
     use ranki_sync::{
-        MockResponse, MockTransport, SyncClient, SyncMethod, SyncOutcome,
-        SyncState, clear_host_key,
+        MediaProgress, MockResponse, MockTransport, SyncClient, SyncMethod,
+        SyncOutcome, SyncState, clear_host_key,
     };
     use serde_json::json;
 
     use super::{
-        SyncActivity, capitalized, login_and_sync, read_state, refresh_message,
-        retained_conflict, should_auto_sync, sync_message,
+        SyncActivity, activity_text, capitalized, login_and_sync, read_state,
+        refresh_message, retained_conflict, should_auto_sync, sync_message,
     };
     #[test]
     fn footer_reads_the_last_sync_from_the_state_file() {
@@ -747,6 +848,7 @@ mod tests {
         assert_eq!(loaded.host_key, "stored-key");
         assert_eq!(loaded.last_success, Some(1_700_000_000));
     }
+
     #[test]
     fn sign_in_runs_a_sync_immediately() {
         let Ok(directory) = tempfile::tempdir() else {
@@ -855,18 +957,45 @@ mod tests {
     }
 
     #[test]
+    fn media_activity_reports_file_counts() {
+        assert_eq!(
+            activity_text(
+                SyncActivity::DownloadingMedia,
+                Some(MediaProgress {
+                    done: 12,
+                    total: 40
+                })
+            ),
+            "Downloading media (12 of 40)..."
+        );
+        assert_eq!(
+            activity_text(
+                SyncActivity::DownloadingMedia,
+                Some(MediaProgress { done: 0, total: 0 })
+            ),
+            "Downloading media..."
+        );
+        assert_eq!(
+            activity_text(SyncActivity::SigningIn, None),
+            "Signing in to AnkiWeb..."
+        );
+    }
+
+    #[test]
     fn activity_labels_name_the_running_step() {
         let labels: Vec<&str> = [
             SyncActivity::SigningIn,
             SyncActivity::Syncing,
             SyncActivity::KeepingLocal,
             SyncActivity::KeepingRemote,
+            SyncActivity::DownloadingMedia,
         ]
         .into_iter()
         .map(SyncActivity::label)
         .collect();
         assert_eq!(labels[1], "Syncing with AnkiWeb");
         assert_eq!(labels[2], "Keeping the local copy");
+        assert_eq!(labels[4], "Downloading media");
         let unique: std::collections::HashSet<&str> =
             labels.iter().copied().collect();
         assert_eq!(unique.len(), labels.len());

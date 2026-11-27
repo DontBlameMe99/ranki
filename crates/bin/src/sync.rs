@@ -295,7 +295,21 @@ pub(super) fn sync_once<T: SyncTransport>(
     auth: Option<&SyncAuth>,
 ) -> Result<SyncOutcome, SyncError> {
     let mut client = build_client(transport, settings, auth)?;
-    client.sync(auth.and_then(|credentials| credentials.login.clone()))
+    let outcome =
+        client.sync(auth.and_then(|credentials| credentials.login.clone()))?;
+    refresh_media(&mut client, &outcome)?;
+    Ok(outcome)
+}
+
+/// Refreshes media after a collection sync that left both copies in step.
+fn refresh_media<T: SyncTransport>(
+    client: &mut SyncClient<T>,
+    outcome: &SyncOutcome,
+) -> Result<(), SyncError> {
+    if outcome.is_settled() {
+        client.sync_media()?;
+    }
+    Ok(())
 }
 
 /// Performs the explicit `ranki sync` operation and returns its display text.
@@ -323,16 +337,20 @@ pub(super) fn manual_sync<T: SyncTransport>(
         }
         SyncMode::FullUpload => {
             client.full_upload()?;
+            client.sync_media()?;
             Ok(String::from("uploaded"))
         }
         SyncMode::FullDownload => {
             client.full_download()?;
+            client.sync_media()?;
             Ok(String::from("downloaded"))
         }
-        SyncMode::Safe => Ok(outcome_text(
-            &client
-                .sync(auth.and_then(|credentials| credentials.login.clone()))?,
-        )),
+        SyncMode::Safe => {
+            let outcome = client
+                .sync(auth.and_then(|credentials| credentials.login.clone()))?;
+            refresh_media(&mut client, &outcome)?;
+            Ok(outcome_text(&outcome))
+        }
     }
 }
 
@@ -678,7 +696,8 @@ mod tests {
         let auth = load_auth(&settings, &env).unwrap();
         let mut transport = MockTransport::new()
             .with_response(SyncMethod::HostKey, login())
-            .with_response(SyncMethod::Meta, meta(true));
+            .with_response(SyncMethod::Meta, meta(true))
+            .with_response(SyncMethod::MediaBegin, media_begin());
         sync_once(TransportRef(&mut transport), &settings, Some(&auth))
             .unwrap();
         assert_eq!(transport.requests()[0].method, SyncMethod::HostKey);
@@ -746,8 +765,8 @@ mod tests {
             [
                 SyncMethod::Meta,
                 SyncMethod::Download,
-                SyncMethod::MediaBegin,
-                SyncMethod::Meta
+                SyncMethod::Meta,
+                SyncMethod::MediaBegin
             ]
         );
     }
@@ -792,6 +811,59 @@ mod tests {
     }
 
     #[test]
+    fn manual_safe_sync_refreshes_media() {
+        let directory = tempfile::tempdir().unwrap();
+        collection_with_cards(directory.path());
+        let settings = settings(directory.path());
+        fs::write(
+            &settings.paths.sync_state,
+            serde_json::json!({
+                "version": 1,
+                "endpoint": ranki_sync::DEFAULT_ENDPOINT,
+                "host_key": "stored-hkey",
+                "last_mod": 1_700_000_000_000_i64,
+                "last_scm": 1_700_000_000_000_i64,
+                "last_usn": 0,
+                "last_media_usn": 0,
+                "last_success": null,
+                "failures": 0,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut transport = MockTransport::new()
+            .with_response(SyncMethod::Meta, meta(false))
+            .with_response(
+                SyncMethod::Upload,
+                MockResponse::ok_bytes(b"OK".to_vec()).unwrap(),
+            )
+            .with_response(SyncMethod::Meta, meta(false))
+            .with_response(SyncMethod::MediaBegin, media_begin());
+        let text = manual_sync(
+            TransportRef(&mut transport),
+            &settings,
+            Some(&host_key_auth()),
+            SyncMode::Safe,
+        )
+        .unwrap();
+        assert_eq!(text, "uploaded");
+        let methods: Vec<SyncMethod> = transport
+            .requests()
+            .iter()
+            .map(|request| request.method)
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                SyncMethod::Meta,
+                SyncMethod::Upload,
+                SyncMethod::Meta,
+                SyncMethod::MediaBegin
+            ]
+        );
+    }
+
+    #[test]
     fn manual_full_upload_is_an_explicit_escape_hatch() {
         let directory = tempfile::tempdir().unwrap();
         collection_with_cards(directory.path());
@@ -801,7 +873,8 @@ mod tests {
                 SyncMethod::Upload,
                 MockResponse::ok_bytes(b"OK".to_vec()).unwrap(),
             )
-            .with_response(SyncMethod::Meta, meta(false));
+            .with_response(SyncMethod::Meta, meta(false))
+            .with_response(SyncMethod::MediaBegin, media_begin());
         let text = manual_sync(
             TransportRef(&mut transport),
             &settings,

@@ -1002,6 +1002,14 @@ impl LruImageCache {
         }
     }
 
+    /// Drops cached load failures so files that arrive later are retried.
+    pub fn forget_failed(&mut self) {
+        self.items
+            .retain(|_, item| !matches!(item.get(), Some(Err(_))));
+        let items = &self.items;
+        self.order.retain(|key| items.contains_key(key));
+    }
+
     /// Loads an image resource, keeping at most `capacity` decoded entries.
     #[expect(
         clippy::too_many_arguments,
