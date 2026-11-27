@@ -17,7 +17,8 @@ use gpui::{
 use ranki_core::{FsrsScheduler, from_settings};
 use ranki_model::{
     Card, CardQueue, CardType, Deck, DeckStats, DeckSteps, Id, NewNote, Note,
-    NoteModel, Rating, ReviewDecision, StockModelKind, Store, UiState, UiView,
+    NoteModel, Rating, ReviewDecision, StockModelKind, Store, Timing, UiState,
+    UiView,
 };
 
 use crate::{
@@ -31,7 +32,7 @@ use crate::{
     },
     scrollbar::{self, ScrollbarDrag},
     smooth_scroll::SmoothScroll,
-    statistics_view::{Statistics, build_statistics},
+    statistics_view::{Statistics, build_statistics_timed},
     sync_view::SyncActivity,
     text_field::{EditHook, TextField},
     theme::{self, Palette, Theme, alpha},
@@ -1990,15 +1991,13 @@ impl Root {
 
     /// Rebuilds the collection-wide review summary from the store's log.
     fn refresh_statistics(&mut self, cx: &mut Context<Self>) {
-        let now = Self::now();
+        let timing = self.timing(Self::now());
         match self.store.review_history() {
             Ok(history) => {
-                self.statistics =
-                    build_statistics(&history, now, self.collection_start);
+                self.statistics = build_statistics_timed(&history, &timing);
             }
             Err(error) => {
-                self.statistics =
-                    build_statistics(&[], now, self.collection_start);
+                self.statistics = build_statistics_timed(&[], &timing);
                 self.show_toast(
                     ToastKind::Error,
                     format!("Could not load review history: {error}"),
@@ -2962,14 +2961,21 @@ impl Root {
         cx.notify();
     }
 
+    pub(crate) fn timing(&self, now: i64) -> Timing {
+        self.store
+            .timing(now)
+            .unwrap_or_else(|_| Timing::v1(now, self.collection_start))
+    }
     fn refresh_previews(&mut self) {
         let Some(card) = self.review.current.as_ref() else {
             return;
         };
         let now = Self::now();
-        let start = self.collection_start;
+        let timing = self.timing(now);
+        let last_review = self.store.last_review_secs(card.id).unwrap_or(None);
         let scheduler = self.scheduler.with_steps(&self.review.steps);
-        self.review.previews = scheduler.preview_all(card, now, start);
+        self.review.previews =
+            scheduler.preview_all_timed(card, &timing, last_review);
     }
 
     pub(crate) fn grade(&mut self, rating: Rating, cx: &mut Context<Self>) {
@@ -2993,13 +2999,32 @@ impl Root {
         {
             return;
         }
-        let scheduler = self.scheduler.with_steps(&self.review.steps);
-        let decision: ReviewDecision = scheduler.schedule(
+        let max_taken = self.store.max_taken_secs(card.deck_id).unwrap_or(60);
+        let scheduler = self
+            .scheduler
+            .with_steps(&self.review.steps)
+            .with_max_taken_secs(max_taken);
+        let now_secs = Self::now();
+        let timing = self.timing(now_secs);
+        let last_review = self.store.last_review_secs(card.id).unwrap_or(None);
+        let answer_ms = u32::try_from(self.review.focused_elapsed.as_millis())
+            .unwrap_or(u32::MAX);
+        let Some(decision) = scheduler.schedule_timed(
             &card,
             rating,
-            Self::now(),
-            self.collection_start,
-        );
+            &timing,
+            last_review,
+            answer_ms,
+        ) else {
+            self.show_toast(
+                ToastKind::Error,
+                format!("Card {} is not due", card.id),
+                cx,
+            );
+            cx.notify();
+            return;
+        };
+        let decision: ReviewDecision = decision;
         let before_progress = self.progress_fraction();
         self.poll_external_change(cx);
         let log_id = match self.store.apply_review(&decision) {

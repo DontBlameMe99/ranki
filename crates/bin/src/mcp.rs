@@ -347,21 +347,13 @@ struct NoteView {
 
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
-enum RatingView {
-    Again,
-    Hard,
-    Good,
-    Easy,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
 enum RevLogKindView {
     Learn,
     Review,
     Relearn,
     Filtered,
     Manual,
+    Rescheduled,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -369,7 +361,7 @@ struct RevLogView {
     id: Id,
     card_id: Id,
     usn: i32,
-    ease: RatingView,
+    ease: u8,
     interval: i32,
     last_interval: i32,
     factor: u32,
@@ -514,15 +506,6 @@ fn note_view(note: &ranki_model::Note) -> NoteView {
     }
 }
 
-const fn rating_view(rating: Rating) -> RatingView {
-    match rating {
-        Rating::Again => RatingView::Again,
-        Rating::Hard => RatingView::Hard,
-        Rating::Good => RatingView::Good,
-        Rating::Easy => RatingView::Easy,
-    }
-}
-
 const fn kind_view(kind: ranki_model::RevLogKind) -> RevLogKindView {
     match kind {
         ranki_model::RevLogKind::Learn => RevLogKindView::Learn,
@@ -530,6 +513,7 @@ const fn kind_view(kind: ranki_model::RevLogKind) -> RevLogKindView {
         ranki_model::RevLogKind::Relearn => RevLogKindView::Relearn,
         ranki_model::RevLogKind::Filtered => RevLogKindView::Filtered,
         ranki_model::RevLogKind::Manual => RevLogKindView::Manual,
+        ranki_model::RevLogKind::Rescheduled => RevLogKindView::Rescheduled,
     }
 }
 
@@ -538,7 +522,7 @@ const fn revlog_view(log: &ranki_model::RevLog) -> RevLogView {
         id: log.id,
         card_id: log.card_id,
         usn: log.usn,
-        ease: rating_view(log.ease),
+        ease: log.ease,
         interval: log.interval,
         last_interval: log.last_interval,
         factor: log.factor,
@@ -802,17 +786,22 @@ impl RankiMcp {
         let card = store.card(input.card_id)?.ok_or_else(|| {
             ToolError::call(format!("card not found: {}", input.card_id))
         })?;
-        let collection_start_secs = store.collection_created()?;
+        let timing = store.timing(now)?;
+        let last_review_secs = store.last_review_secs(input.card_id)?;
         let scheduler =
             ranki_core::scheduler_for_card(&self.scheduler, &*store, &card);
-        let mut decision = scheduler.schedule(
-            &card,
-            Rating::from(input.rating),
-            now,
-            collection_start_secs,
-        );
-        decision.revlog.time_ms =
-            u32::try_from(input.elapsed_ms).unwrap_or(u32::MAX);
+        let answer_ms = u32::try_from(input.elapsed_ms).unwrap_or(u32::MAX);
+        let decision = scheduler
+            .schedule_timed(
+                &card,
+                Rating::from(input.rating),
+                &timing,
+                last_review_secs,
+                answer_ms,
+            )
+            .ok_or_else(|| {
+                ToolError::call(format!("card {} is not due", input.card_id))
+            })?;
         store.apply_review(&decision)?;
         Ok(Json(ReviewResult {
             card: card_view(&decision.card),
@@ -1207,7 +1196,7 @@ mod tests {
         assert_eq!(reviewed.card.id, card_id);
         assert_eq!(
             serde_json::to_value(reviewed.revlog.ease).unwrap(),
-            json!("good")
+            json!(3)
         );
         assert_eq!(reviewed.revlog.time_ms, 1234);
 

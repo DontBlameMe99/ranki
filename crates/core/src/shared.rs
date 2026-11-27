@@ -2,11 +2,11 @@ use ranki_model::next_id;
 
 use ranki_model::{
     Card, CardQueue, CardType, Rating, RevLog, RevLogKind, ReviewDecision,
+    Timing,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::SECONDS_PER_DAY;
 use rand::RngExt as _;
 use rand::SeedableRng as _;
 use rand::rngs::StdRng;
@@ -17,28 +17,28 @@ thread_local! {
 const I32_MAX_F32: f32 = 2_147_483_647.0;
 const I32_MIN_F32: f32 = -2_147_483_648.0;
 
-const MAX_STEPS: u32 = u32::MAX;
-
 pub struct ReviewContext<'card> {
     pub card: &'card Card,
     pub rating: Rating,
-    pub now_secs: i64,
-    pub collection_start_secs: i64,
+    pub timing: Timing,
+    pub last_review_secs: Option<i64>,
+    pub answer_ms: u32,
 }
 
 pub struct ReviewOutcome {
     pub card_type: CardType,
     pub queue: CardQueue,
     pub due: i64,
+    /// Interval written to the card: days, or zero while learning.
+    pub card_interval: i32,
+    /// Interval written to the review log: days or negative seconds.
     pub interval: i32,
     pub lapses: u32,
     pub left: u32,
     pub factor: u32,
     pub data: String,
     pub kind: RevLogKind,
-    pub step_seconds: Option<u32>,
-    /// Interval before this answer: days, or negative learning seconds.
-    pub last_interval: Option<i32>,
+    pub last_interval: i32,
 }
 
 pub struct StepConfig<'steps> {
@@ -57,43 +57,18 @@ pub struct FuzzInput {
     pub maximum: u32,
     pub card_id: i64,
     pub reps: u32,
-
     pub enabled: bool,
 }
 
-/// Suspended, buried and preview cards are left untouched.
+/// Suspended, buried and preview cards cannot be answered.
 pub const fn is_schedulable(card: &Card) -> bool {
     card.queue.is_due()
-}
-
-pub const fn day_number(now_secs: i64, collection_start_secs: i64) -> i64 {
-    now_secs
-        .saturating_sub(collection_start_secs)
-        .div_euclid(SECONDS_PER_DAY)
-}
-
-pub fn elapsed_days_from(last: i64, now_secs: i64) -> u32 {
-    let elapsed = now_secs.saturating_sub(last);
-    u32::try_from(elapsed.div_euclid(SECONDS_PER_DAY)).unwrap_or(u32::MAX)
-}
-
-pub fn due_from_days(
-    now_secs: i64,
-    collection_start_secs: i64,
-    interval: i32,
-) -> i64 {
-    day_number(now_secs, collection_start_secs)
-        .saturating_add(i64::from(interval))
-}
-
-pub fn due_from_seconds(now_secs: i64, seconds: u32) -> i64 {
-    now_secs.saturating_add(i64::from(seconds))
 }
 
 /// Converts Anki's packed `left` value into a step count.
 pub fn remaining_steps(left: u32, total: usize) -> usize {
     let cap = u32::try_from(total).unwrap_or(u32::MAX);
-    usize::try_from(left.min(cap)).unwrap_or(total)
+    usize::try_from((left % 1_000).min(cap)).unwrap_or(total)
 }
 
 fn half_sum(first: u64, second: u64) -> Option<u32> {
@@ -160,6 +135,108 @@ pub fn step_delay_seconds(
     }
 }
 
+fn current_step_seconds(steps: &[u32], remaining: usize) -> u32 {
+    let index = steps.len().saturating_sub(remaining.min(steps.len()));
+    steps.get(index).copied().unwrap_or(0)
+}
+
+/// Adds Anki's intraday learning fuzz to a step delay.
+#[must_use]
+pub fn learning_delay_with_fuzz(card_id: i64, reps: u32, seconds: u32) -> u32 {
+    if cfg!(test) {
+        return seconds;
+    }
+    let seed =
+        u64::from_be_bytes(card_id.to_be_bytes()).wrapping_add(u64::from(reps));
+    let extra = as_u32(
+        (as_f32(i32::try_from(seconds).unwrap_or(i32::MAX)) * 0.25)
+            .min(300.0)
+            .floor(),
+    );
+    let upper = seconds.saturating_add(extra);
+    if upper <= seconds {
+        seconds
+    } else {
+        StdRng::seed_from_u64(seed).random_range(seconds..upper)
+    }
+}
+
+pub fn review_kind(ctx: &ReviewContext<'_>) -> RevLogKind {
+    match ctx.card.card_type {
+        CardType::New | CardType::Learning => RevLogKind::Learn,
+        CardType::Relearning => RevLogKind::Relearn,
+        CardType::Review => {
+            let stored_last =
+                serde_json::from_str::<serde_json::Value>(&ctx.card.data)
+                    .ok()
+                    .and_then(|data| {
+                        data.get("lrt").and_then(serde_json::Value::as_i64)
+                    });
+            let last = stored_last
+                .or(ctx.last_review_secs)
+                .unwrap_or(ctx.card.modified);
+            let elapsed = ctx.timing.elapsed_days_since(last);
+            if elapsed
+                < u32::try_from(ctx.card.interval.max(0)).unwrap_or(u32::MAX)
+            {
+                RevLogKind::Filtered
+            } else {
+                RevLogKind::Review
+            }
+        }
+    }
+}
+
+fn current_last_interval(
+    ctx: &ReviewContext<'_>,
+    steps: &[u32],
+    remaining: usize,
+) -> i32 {
+    match ctx.card.card_type {
+        CardType::New => 0,
+        CardType::Learning | CardType::Relearning => {
+            i32::try_from(current_step_seconds(steps, remaining))
+                .unwrap_or(i32::MAX)
+                .saturating_neg()
+        }
+        CardType::Review => ctx.card.interval.max(0),
+    }
+}
+
+/// Converts a seconds-based learning interval into Anki's queue and due value.
+#[expect(
+    clippy::integer_division,
+    reason = "Anki converts learning seconds to whole day numbers"
+)]
+pub fn learning_placement(
+    ctx: &ReviewContext<'_>,
+    seconds: u32,
+    steps_left: u32,
+) -> (CardQueue, i64, i32, u32) {
+    let until_rollover = ctx.timing.secs_until_rollover();
+    let day = (seconds.saturating_sub(until_rollover) / 86_400)
+        .saturating_add(1)
+        .min(u32::try_from(i32::MAX).unwrap_or(u32::MAX));
+    if seconds >= until_rollover {
+        let days = i32::try_from(day).unwrap_or(i32::MAX);
+        (
+            CardQueue::DayLearning,
+            ctx.timing.due_from_days(days),
+            days,
+            steps_left,
+        )
+    } else {
+        let delay =
+            learning_delay_with_fuzz(ctx.card.id, ctx.card.reps, seconds);
+        (
+            CardQueue::Learning,
+            ctx.timing.now.saturating_add(i64::from(delay)),
+            i32::try_from(seconds).unwrap_or(i32::MAX).saturating_neg(),
+            steps_left,
+        )
+    }
+}
+
 pub fn step_outcome(
     ctx: &ReviewContext<'_>,
     config: StepConfig<'_>,
@@ -170,18 +247,23 @@ pub fn step_outcome(
     } else {
         remaining_steps(ctx.card.left, total).max(1)
     };
-    let kind = if config.relearning {
-        RevLogKind::Relearn
-    } else {
-        RevLogKind::Learn
-    };
+    let kind = review_kind(ctx);
+    let last_interval = current_last_interval(ctx, config.steps, remaining);
     match step_delay_seconds(config.steps, remaining, ctx.rating) {
         Some(seconds) => {
+            let remaining_u32 = u32::try_from(remaining).unwrap_or(u32::MAX);
             let steps_left = match ctx.rating {
-                Rating::Again => total,
-                Rating::Hard => remaining,
-                Rating::Good => remaining.saturating_sub(1),
+                Rating::Again => u32::try_from(total).unwrap_or(u32::MAX),
+                Rating::Hard => remaining_u32,
+                Rating::Good => remaining_u32.saturating_sub(1),
                 Rating::Easy => 0,
+            };
+            let (queue, due, interval, left) =
+                learning_placement(ctx, seconds, steps_left);
+            let card_interval = if config.relearning {
+                ctx.card.interval.max(0)
+            } else {
+                0
             };
             ReviewOutcome {
                 card_type: if config.relearning {
@@ -189,97 +271,49 @@ pub fn step_outcome(
                 } else {
                     CardType::Learning
                 },
-                queue: CardQueue::Learning,
-                due: due_from_seconds(ctx.now_secs, seconds),
-                interval: 0,
+                queue,
+                due,
+                card_interval,
+                interval,
                 lapses: 0,
-                left: u32::try_from(steps_left).unwrap_or(MAX_STEPS),
+                left,
                 factor: config.factor,
                 data: config.data,
                 kind,
-                step_seconds: Some(seconds),
-                last_interval: Some(ctx.card.interval),
+                last_interval,
             }
         }
         None => ReviewOutcome {
             card_type: CardType::Review,
             queue: CardQueue::Review,
-            due: due_from_days(
-                ctx.now_secs,
-                ctx.collection_start_secs,
-                config.graduation_interval,
-            ),
+            due: ctx.timing.due_from_days(config.graduation_interval),
+            card_interval: config.graduation_interval,
             interval: config.graduation_interval,
             lapses: 0,
             left: 0,
             factor: config.factor,
             data: config.data,
             kind,
-            step_seconds: None,
-            last_interval: Some(ctx.card.interval),
+            last_interval,
         },
     }
 }
 
-/// Encodes the review interval the same way [`finish`] writes it to the log.
+/// Legacy decision for a card that cannot be answered.
 #[must_use]
-pub fn preview_interval(outcome: &ReviewOutcome) -> i32 {
-    outcome.step_seconds.map_or(outcome.interval, |seconds| {
-        i32::try_from(seconds).unwrap_or(i32::MAX).saturating_neg()
-    })
-}
-
-/// Outcome for a card that is not due for review.
-#[must_use]
-pub fn unchanged_outcome(ctx: &ReviewContext<'_>) -> ReviewOutcome {
-    ReviewOutcome {
-        card_type: ctx.card.card_type,
-        queue: ctx.card.queue,
-        due: ctx.card.due,
-        interval: ctx.card.interval,
-        lapses: ctx.card.lapses,
-        left: ctx.card.left,
-        factor: ctx.card.factor,
-        data: ctx.card.data.clone(),
-        kind: RevLogKind::Manual,
-        step_seconds: None,
-        last_interval: None,
-    }
-}
-pub fn finish(
-    ctx: &ReviewContext<'_>,
-    outcome: ReviewOutcome,
-) -> ReviewDecision {
-    let interval = preview_interval(&outcome);
+pub fn unchanged(ctx: &ReviewContext<'_>) -> ReviewDecision {
     let mut card = ctx.card.clone();
-    card.modified = ctx.now_secs;
     card.usn = -1;
-    card.card_type = outcome.card_type;
-    card.queue = outcome.queue;
-    card.due = outcome.due;
-    card.interval = outcome.interval;
-    card.factor = if outcome.step_seconds.is_some() {
-        0
-    } else {
-        2_500
-    };
-    card.reps = card.reps.saturating_add(1);
-    card.lapses = card.lapses.saturating_add(outcome.lapses);
-    card.left = outcome.left;
-    card.data = outcome.data;
-
     let revlog = RevLog {
-        id: next_id(ctx.now_secs.saturating_mul(1_000)),
+        id: next_id(ctx.timing.now.saturating_mul(1_000)),
         card_id: card.id,
         usn: -1,
-        ease: ctx.rating,
-        interval,
-        last_interval: outcome
-            .last_interval
-            .unwrap_or_else(|| ctx.card.interval.max(0)),
-        factor: outcome.factor,
-        time_ms: 1_000,
-        kind: outcome.kind,
+        ease: ctx.rating.code(),
+        interval: card.interval,
+        last_interval: card.interval.max(0),
+        factor: card.factor,
+        time_ms: 0,
+        kind: RevLogKind::Manual,
     };
     ReviewDecision {
         card,
@@ -289,19 +323,39 @@ pub fn finish(
     }
 }
 
-/// Keeps an unschedulable card unchanged and records a manual log entry.
-pub fn unchanged(ctx: &ReviewContext<'_>) -> ReviewDecision {
-    let card = ctx.card.clone();
+/// The interval a rating would write to the review log.
+#[must_use]
+pub const fn preview_interval(outcome: &ReviewOutcome) -> i32 {
+    outcome.interval
+}
+
+pub fn finish(
+    ctx: &ReviewContext<'_>,
+    outcome: ReviewOutcome,
+) -> ReviewDecision {
+    let mut card = ctx.card.clone();
+    card.modified = ctx.timing.now;
+    card.usn = -1;
+    card.card_type = outcome.card_type;
+    card.queue = outcome.queue;
+    card.due = outcome.due;
+    card.interval = outcome.card_interval;
+    card.factor = outcome.factor;
+    card.reps = card.reps.saturating_add(1);
+    card.lapses = card.lapses.saturating_add(outcome.lapses);
+    card.left = outcome.left;
+    card.data = outcome.data;
+
     let revlog = RevLog {
-        id: next_id(ctx.now_secs.saturating_mul(1_000)),
+        id: next_id(ctx.timing.now.saturating_mul(1_000)),
         card_id: card.id,
         usn: -1,
-        ease: ctx.rating,
-        interval: card.interval,
-        last_interval: card.interval.max(0),
-        factor: card.factor,
-        time_ms: 0,
-        kind: RevLogKind::Manual,
+        ease: ctx.rating.code(),
+        interval: outcome.interval,
+        last_interval: outcome.last_interval,
+        factor: outcome.factor,
+        time_ms: ctx.answer_ms,
+        kind: outcome.kind,
     };
     ReviewDecision {
         card,
@@ -347,7 +401,7 @@ fn fuzz_seed(card_id: i64, reps: u32) -> u64 {
     u64::from_be_bytes(card_id.to_be_bytes()).wrapping_add(u64::from(reps))
 }
 
-fn as_u32(value: f32) -> u32 {
+pub fn as_u32(value: f32) -> u32 {
     u32::try_from(as_i32(value.round())).unwrap_or(0)
 }
 

@@ -39,6 +39,13 @@ fn fsrs_card() -> Card {
     }
 }
 
+fn reviewed_fsrs_card() -> Card {
+    Card {
+        data: String::from(r#"{"s":10.0,"d":5.0,"lrt":1698272000}"#),
+        ..base_card()
+    }
+}
+
 fn fsrs_preset(fuzz: bool, retention: f32) -> FsrsPreset {
     FsrsPreset {
         desired_retention: retention,
@@ -46,6 +53,7 @@ fn fsrs_preset(fuzz: bool, retention: f32) -> FsrsPreset {
         learning_steps_seconds: vec![60, 600],
         relearning_steps_seconds: vec![600],
         enable_fuzzing: fuzz,
+        max_taken_secs: 60,
     }
 }
 
@@ -153,12 +161,16 @@ fn imported_deck_steps_drive_previews_and_answers() {
 #[test]
 fn fsrs_lapse_enters_relearning() {
     let scheduler = FsrsScheduler::new(fsrs_preset(false, 0.9));
-    let decision =
-        scheduler.schedule(&fsrs_card(), Rating::Again, NOW, COLLECTION_START);
+    let decision = scheduler.schedule(
+        &reviewed_fsrs_card(),
+        Rating::Again,
+        NOW,
+        COLLECTION_START,
+    );
     assert_eq!(decision.card.card_type, CardType::Relearning);
     assert_eq!(decision.card.queue, CardQueue::Learning);
     assert_eq!(decision.card.lapses, 1);
-    assert_eq!(decision.revlog.kind, RevLogKind::Relearn);
+    assert_eq!(decision.revlog.kind, RevLogKind::Review);
 }
 
 #[test]
@@ -258,14 +270,14 @@ fn extreme_inputs_do_not_panic() {
 #[test]
 fn revlog_matches_contract() {
     let scheduler = FsrsScheduler::default();
-    let card = fsrs_card();
+    let card = reviewed_fsrs_card();
     let decision =
         scheduler.schedule(&card, Rating::Good, NOW, COLLECTION_START);
     assert_ne!(decision.revlog.id, 0);
     assert_eq!(decision.revlog.card_id, card.id);
     assert_eq!(decision.revlog.usn, -1);
-    assert_eq!(decision.revlog.time_ms, 1_000);
-    assert_eq!(decision.revlog.ease, Rating::Good);
+    assert_eq!(decision.revlog.time_ms, 0);
+    assert_eq!(decision.revlog.ease, 3);
     assert_eq!(decision.revlog.kind, RevLogKind::Review);
 }
 
@@ -554,7 +566,7 @@ fn new_card_good_uses_the_next_learning_step() {
         COLLECTION_START,
     );
     assert_eq!(second.card.card_type, CardType::Review);
-    assert_eq!(second.revlog.last_interval, 0);
+    assert_eq!(second.revlog.last_interval, -600);
 }
 
 #[test]
@@ -684,7 +696,7 @@ fn revlog_last_interval_uses_the_previous_card_interval() {
         NOW.saturating_add(330),
         COLLECTION_START,
     );
-    assert_eq!(good.revlog.last_interval, 0);
+    assert_eq!(good.revlog.last_interval, -60);
 }
 
 fn batch_preview_cases() -> [(&'static str, Card); 11] {
@@ -776,12 +788,17 @@ fn assert_batch_matches_singles(
         assert_eq!(
             preview,
             scheduler.preview(card, rating, now, COLLECTION_START),
-            "batch preview differs for {rating:?}"
+            "batch preview differs for {rating:?} card {} type {:?} queue {:?} now {}",
+            card.id,
+            card.card_type,
+            card.queue,
+            now
         );
         let decision = scheduler.schedule(card, rating, now, COLLECTION_START);
         assert_eq!(
             decision.revlog.interval, preview,
-            "batch preview differs from scheduling for {rating:?}"
+            "batch preview differs from scheduling for {rating:?} card {} type {:?} queue {:?} now {}",
+            card.id, card.card_type, card.queue, now
         );
     }
 }
@@ -911,4 +928,211 @@ fn schedule_keeps_persisted_card_data_bytes() {
         let decision = scheduler.schedule(&card, rating, NOW, COLLECTION_START);
         assert_eq!(decision.card.data, expected);
     }
+}
+
+#[test]
+fn timing_matches_anki_vectors() {
+    use chrono::TimeZone as _;
+
+    let v1 = ranki_model::Timing::v1(1_584_491_078, 1_575_226_800);
+    assert_eq!(v1.days_elapsed, 107);
+    assert_eq!(v1.next_day_at, 1_584_558_000);
+    assert_eq!(v1.secs_until_rollover(), 66_922);
+
+    let mdt = chrono::FixedOffset::west_opt(6 * 3_600).unwrap();
+    let mst = chrono::FixedOffset::west_opt(7 * 3_600).unwrap();
+    let created = mdt
+        .with_ymd_and_hms(2018, 8, 6, 0, 0, 0)
+        .single()
+        .unwrap()
+        .timestamp();
+    let now = mst
+        .with_ymd_and_hms(2019, 12, 26, 20, 0, 0)
+        .single()
+        .unwrap()
+        .timestamp();
+    let dst = ranki_model::Timing::new(now, created, Some(360), 420, Some(4));
+    assert_eq!(dst.days_elapsed, 507);
+    let same_offset =
+        ranki_model::Timing::new(now, created, Some(360), 360, Some(4));
+    assert_eq!(same_offset.days_elapsed, 507);
+
+    let utc = chrono::FixedOffset::east_opt(0).unwrap();
+    let created = utc
+        .with_ymd_and_hms(2019, 1, 1, 2, 0, 0)
+        .single()
+        .unwrap()
+        .timestamp();
+    let morning = utc
+        .with_ymd_and_hms(2019, 1, 3, 2, 0, 0)
+        .single()
+        .unwrap()
+        .timestamp();
+    let morning_timing =
+        ranki_model::Timing::new(morning, created, Some(0), 0, Some(4));
+    assert_eq!(
+        morning_timing.next_day_at,
+        utc.with_ymd_and_hms(2019, 1, 3, 4, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp()
+    );
+    let rolled = utc
+        .with_ymd_and_hms(2019, 1, 3, 4, 0, 0)
+        .single()
+        .unwrap()
+        .timestamp();
+    let rolled_timing =
+        ranki_model::Timing::new(rolled, created, Some(0), 0, Some(4));
+    assert_eq!(rolled_timing.days_elapsed, 2);
+    assert_eq!(
+        rolled_timing.next_day_at,
+        utc.with_ymd_and_hms(2019, 1, 4, 4, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp()
+    );
+}
+
+#[test]
+fn fsrs_elapsed_days_uses_the_next_day_boundary() {
+    let timing = ranki_model::Timing::v1(NOW, COLLECTION_START);
+    let last = timing.next_day_at - 3 * 86_400;
+    let scheduler = FsrsScheduler::new(fsrs_preset(false, 0.9));
+    let stored = Card {
+        data: format!(r#"{{"s":10.0,"d":5.0,"lrt":{last}}}"#),
+        ..base_card()
+    };
+    let fallback = fsrs_card();
+    assert_eq!(
+        scheduler.preview_timed(&stored, Rating::Good, &timing, None),
+        scheduler.preview_timed(&fallback, Rating::Good, &timing, Some(last))
+    );
+    assert_ne!(
+        scheduler.preview_timed(&stored, Rating::Good, &timing, None),
+        scheduler.preview_timed(&fallback, Rating::Good, &timing, None)
+    );
+}
+
+#[test]
+fn learning_delay_crossing_rollover_uses_the_day_queue() {
+    let scheduler = FsrsScheduler::new(FsrsPreset {
+        learning_steps_seconds: vec![600],
+        ..fsrs_preset(false, 0.9)
+    });
+    let timing = ranki_model::Timing {
+        now: NOW,
+        days_elapsed: 5,
+        next_day_at: NOW + 10,
+    };
+    let card = Card {
+        card_type: CardType::Learning,
+        queue: CardQueue::Learning,
+        due: NOW,
+        left: 1,
+        ..base_card()
+    };
+    let decision = scheduler
+        .schedule_timed(&card, Rating::Again, &timing, None, 0)
+        .unwrap();
+    assert_eq!(decision.card.queue, CardQueue::DayLearning);
+    assert_eq!(decision.card.due, 6);
+    assert_eq!(decision.card.interval, 0);
+    assert_eq!(decision.revlog.interval, 1);
+    assert_eq!(decision.revlog.last_interval, -600);
+}
+
+#[test]
+fn packed_learning_steps_are_decoded() {
+    let scheduler = FsrsScheduler::new(fsrs_preset(false, 0.9));
+    let timing = ranki_model::Timing::v1(NOW, COLLECTION_START);
+    let card = |left| Card {
+        card_type: CardType::Learning,
+        queue: CardQueue::Learning,
+        due: NOW,
+        left,
+        ..base_card()
+    };
+    let two = scheduler
+        .schedule_timed(&card(1_002), Rating::Good, &timing, None, 0)
+        .unwrap();
+    assert_eq!(two.revlog.interval, -600);
+    let one = scheduler
+        .schedule_timed(&card(1_001), Rating::Good, &timing, None, 0)
+        .unwrap();
+    assert_eq!(one.card.card_type, CardType::Review);
+    assert!(one.revlog.interval > 0);
+}
+
+#[test]
+fn lapse_preserves_the_pending_interval_and_ease() {
+    let scheduler = FsrsScheduler::new(fsrs_preset(false, 0.9));
+    let timing = ranki_model::Timing::v1(NOW, COLLECTION_START);
+    let card = reviewed_fsrs_card();
+    let lapse = scheduler
+        .schedule_timed(&card, Rating::Again, &timing, None, 0)
+        .unwrap();
+    assert_eq!(lapse.card.card_type, CardType::Relearning);
+    assert_eq!(lapse.card.lapses, 1);
+    assert_eq!(lapse.revlog.kind, RevLogKind::Review);
+    assert_eq!(lapse.revlog.ease, 1);
+    assert!(lapse.card.interval > 0);
+    assert_eq!(lapse.card.factor, 2_300);
+    let graduation = scheduler
+        .schedule_timed(&lapse.card, Rating::Good, &timing, None, 0)
+        .unwrap();
+    assert_eq!(graduation.card.card_type, CardType::Review);
+    assert_eq!(graduation.card.interval, lapse.card.interval);
+    assert_eq!(graduation.card.factor, lapse.card.factor);
+    assert_eq!(graduation.revlog.kind, RevLogKind::Relearn);
+}
+
+#[test]
+fn answer_time_is_capped_by_the_effective_preset() {
+    let scheduler = FsrsScheduler::new(FsrsPreset {
+        max_taken_secs: 5,
+        ..fsrs_preset(false, 0.9)
+    });
+    let timing = ranki_model::Timing::v1(NOW, COLLECTION_START);
+    let decision = scheduler
+        .schedule_timed(&base_card(), Rating::Good, &timing, None, 60_000)
+        .unwrap();
+    assert_eq!(decision.revlog.time_ms, 5_000);
+}
+
+#[test]
+fn unschedulable_cards_produce_no_decision() {
+    let scheduler = FsrsScheduler::new(fsrs_preset(false, 0.9));
+    let timing = ranki_model::Timing::v1(NOW, COLLECTION_START);
+    for queue in [CardQueue::Suspended, CardQueue::Buried, CardQueue::Preview] {
+        let card = Card {
+            queue,
+            ..base_card()
+        };
+        assert!(
+            scheduler
+                .schedule_timed(&card, Rating::Good, &timing, None, 0)
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn fsrs_parameters_are_clipped_like_fsrs_rs() {
+    let mut values = [0.0_f32; 21];
+    for value in &mut values {
+        *value = -100.0;
+    }
+    values[19] = -0.2;
+    values[20] = 0.1542;
+    let params = FsrsParams::from_slice(&values).unwrap();
+    let weights = params.weights();
+    assert_eq!(weights[0], 0.001);
+    assert_eq!(weights[4], 1.0);
+    assert_eq!(weights[7], 0.001);
+    assert_eq!(weights[16], 1.0);
+    assert_eq!(weights[17], 0.0);
+    assert_eq!(weights[19], 0.0);
+    assert_eq!(weights[20], 0.1542);
+    assert_eq!(params.clone().with_decay(5.0).decay(), 0.1542);
 }

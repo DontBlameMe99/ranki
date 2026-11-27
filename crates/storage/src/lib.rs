@@ -30,6 +30,7 @@ mod schema;
 mod search;
 mod tags;
 
+use std::cell::Cell;
 use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -48,6 +49,7 @@ pub use ranki_model::stock_models;
 pub use anki::deck_kind_config_id;
 pub use anki::decode_deck_name;
 pub use anki::encode_deck_name;
+pub use anki::local_minutes_west;
 pub use anki::normal_deck_kind;
 pub use anki::protobuf_floats;
 pub use anki::with_deck_kind_config_id;
@@ -77,6 +79,7 @@ use ranki_model::RevLog;
 use ranki_model::ReviewDecision;
 use ranki_model::StockModelKind;
 use ranki_model::Store;
+use ranki_model::Timing;
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
 use rusqlite::OptionalExtension;
@@ -99,7 +102,121 @@ pub struct Collection {
     conn: Connection,
     path: PathBuf,
     created: OnceCell<i64>,
+    timing_config: OnceCell<TimingConfig>,
+    timing_now: Cell<Option<(i64, Timing)>>,
     due_index: OnceCell<()>,
+}
+
+#[derive(Clone, Copy)]
+struct TimingConfig {
+    creation_offset: Option<i32>,
+    rollover: Option<u8>,
+    scheduler_v1: bool,
+}
+
+fn timing_config_from_conf(conf: &str) -> TimingConfig {
+    let object: Json = serde_json::from_str(conf).unwrap_or(Json::Null);
+    let creation_offset = object
+        .get("creationOffset")
+        .and_then(Json::as_i64)
+        .and_then(|value| i32::try_from(value).ok());
+    let rollover = object
+        .get("rollover")
+        .and_then(Json::as_u64)
+        .and_then(|value| u8::try_from(value).ok());
+    let scheduler_v1 = object
+        .get("schedVer")
+        .and_then(Json::as_i64)
+        .is_none_or(|version| version < 2);
+    TimingConfig {
+        creation_offset,
+        rollover,
+        scheduler_v1,
+    }
+}
+
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "SQLite may store conf as text or blob"
+)]
+fn conf_text(conn: &Connection) -> Result<String, StoreError> {
+    let value: SqlValue = conn
+        .query_row("SELECT conf FROM col WHERE id = 1", [], |row| row.get(0))
+        .map_err(backend)?;
+    Ok(match value {
+        SqlValue::Text(text) => text,
+        SqlValue::Blob(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        _ => String::new(),
+    })
+}
+
+/// Upgrades the stored scheduler state from Anki's original scheduler.
+///
+/// Returns `true` when rows were changed. The connection must be writable;
+/// callers that import a collection can run this before creating their store.
+///
+/// # Errors
+/// Returns an error when the collection cannot be read or written.
+pub fn upgrade_scheduler_v2(conn: &mut Connection) -> Result<bool, StoreError> {
+    let version: Option<i64> = conn
+        .query_row(
+            "SELECT json_extract(conf, '$.schedVer') FROM col WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap_or(None);
+    if version.is_some_and(|stored| stored >= 2) {
+        return Ok(false);
+    }
+    let transaction = conn.transaction().map_err(backend)?;
+    if !anki::scheduler_v1_conf(&conf_text(&transaction)?)
+        || !records::table_exists(&transaction, "cards")?
+        || !records::table_exists(&transaction, "revlog")?
+        || !column_exists(&transaction, "revlog", "ease")?
+    {
+        return Ok(false);
+    }
+    transaction
+        .execute(
+            "UPDATE revlog SET ease = ease + 1 WHERE ease IN (2, 3) AND type IN (0, 2)",
+            [],
+        )
+        .map_err(backend)?;
+    transaction
+        .execute(
+            "UPDATE cards SET type = 3 WHERE type = 2 AND queue IN (1, 3)",
+            [],
+        )
+        .map_err(backend)?;
+    let mut conf_json: Json =
+        serde_json::from_str(&conf_text(&transaction)?).unwrap_or(Json::Null);
+    if let Some(object) = conf_json.as_object_mut() {
+        let _ = object.insert(String::from("schedVer"), json!(2));
+        let _ = object.insert(String::from("sched2021"), json!(true));
+        if object.get("creationOffset").is_none() {
+            let created: i64 = transaction
+                .query_row("SELECT crt FROM col WHERE id = 1", [], |row| {
+                    row.get(0)
+                })
+                .map_err(backend)?;
+            let offset = anki::local_minutes_west(created)?;
+            let _ =
+                object.insert(String::from("creationOffset"), json!(offset));
+        }
+        if object.get("rollover").is_none() {
+            let _ = object.insert(String::from("rollover"), json!(4));
+        }
+    }
+    let conf_value = serde_json::to_string(&conf_json).map_err(backend)?;
+    transaction
+        .execute(
+            "UPDATE col SET conf = ?1, scm = ?2 WHERE id = 1",
+            params![conf_value, anki::now_ms()?],
+        )
+        .map_err(backend)?;
+    transaction.commit().map_err(backend)?;
+    Ok(true)
 }
 
 impl Collection {
@@ -128,7 +245,12 @@ impl Collection {
             transaction.execute(statement, []).map_err(backend)?;
         }
         let now_secs = anki::now_secs()?;
-        let col = schema::default_col(now_secs, anki::now_ms()?, Some(0));
+        let creation_offset = anki::local_minutes_west(now_secs)?;
+        let col = schema::default_col(
+            now_secs,
+            anki::now_ms()?,
+            Some(creation_offset),
+        );
         let text = |key: &str| -> Result<String, StoreError> {
             let value =
                 col.get(key).ok_or_else(|| invalid("missing col field"))?;
@@ -164,7 +286,7 @@ impl Collection {
     /// Returns an error when the file is missing, locked, or has no `col`
     /// table.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        let conn = Connection::open_with_flags(
+        let mut conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE,
         )
@@ -174,10 +296,13 @@ impl Collection {
         if !records::table_exists(&conn, "col")? {
             return Err(invalid("not an Anki collection"));
         }
+        let _ = upgrade_scheduler_v2(&mut conn)?;
         Ok(Self {
             conn,
             path: path.to_path_buf(),
             created: OnceCell::new(),
+            timing_config: OnceCell::new(),
+            timing_now: Cell::new(None),
             due_index: OnceCell::new(),
         })
     }
@@ -291,6 +416,51 @@ params![stamp.modified, stamp.scm, json],
         Ok(created)
     }
 
+    /// Returns Anki's day boundary for `now_secs`.
+    ///
+    /// # Errors
+    /// Returns an error when the collection metadata cannot be read.
+    pub fn timing(&self, now_secs: i64) -> Result<Timing, StoreError> {
+        if let Some((cached_now, cached)) = self.timing_now.get().as_ref()
+            && *cached_now == now_secs
+        {
+            return Ok(*cached);
+        }
+        let config = if let Some(config) = self.timing_config.get() {
+            *config
+        } else {
+            let config =
+                timing_config_from_conf(&crate::conf_text(&self.conn)?);
+            let _ = self.timing_config.set(config);
+            config
+        };
+        let created = self.collection_created()?;
+        let timing = if config.scheduler_v1 {
+            Timing::v1(now_secs, created)
+        } else {
+            Timing::new(
+                now_secs,
+                created,
+                config.creation_offset,
+                anki::local_minutes_west(now_secs)?,
+                config.rollover.or(Some(4)),
+            )
+        };
+        self.timing_now.set(Some((now_secs, timing)));
+        Ok(timing)
+    }
+
+    /// Runs the scheduler-v1 upgrade on this collection.
+    ///
+    /// # Errors
+    /// Returns an error when the collection cannot be written.
+    pub fn upgrade_scheduler_v2(&mut self) -> Result<bool, StoreError> {
+        let upgraded = upgrade_scheduler_v2(&mut self.conn)?;
+        let _ = self.timing_config.take();
+        let _ = self.timing_now.take();
+        Ok(upgraded)
+    }
+
     /// Checkpoints the write-ahead log, if the collection uses one.
     ///
     /// # Errors
@@ -354,7 +524,7 @@ params![stamp.modified, stamp.scm, json],
         decisions: &[ReviewDecision],
     ) -> Result<(), StoreError> {
         let transaction = self.conn.transaction().map_err(backend)?;
-        let usn = update_col(&transaction, true)?;
+        let usn = update_col(&transaction, false)?;
         for decision in decisions {
             write_review(&transaction, usn, decision)?;
         }
@@ -682,7 +852,7 @@ impl Store for Collection {
         if filter.missing {
             return Ok(Vec::new());
         }
-        let today = anki::day_number(now_secs, self.collection_created()?)?;
+        let today = i64::from(self.timing(now_secs)?.days_elapsed);
         let deck_clause = if filter.clause.is_empty() {
             String::new()
         } else {
@@ -1038,10 +1208,60 @@ impl Store for Collection {
         {
             return Err(invalid("card changed since it was loaded"));
         }
-        let usn = update_col(&transaction, true)?;
+        let usn = update_col(&transaction, false)?;
         let log_id = write_review(&transaction, usn, decision)?;
         transaction.commit().map_err(backend)?;
         Ok(log_id)
+    }
+
+    fn update_card(
+        &mut self,
+        card: &Card,
+        now_secs: i64,
+    ) -> Result<(), StoreError> {
+        let transaction = self.conn.transaction().map_err(backend)?;
+        let current: Option<(i64, i32)> = transaction
+            .query_row(
+                "SELECT mod, usn FROM cards WHERE id = ?1",
+                [card.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(backend)?;
+        if current != Some((card.modified, card.usn)) {
+            return Err(invalid("card changed since it was loaded"));
+        }
+        let usn = update_col(&transaction, false)?;
+        let updated = transaction
+            .execute(
+                "UPDATE cards SET did = ?1, mod = ?2, usn = ?3, type = ?4, queue = ?5, due = ?6, \
+                 ivl = ?7, factor = ?8, reps = ?9, lapses = ?10, left = ?11, odue = ?12, odid = \
+                 ?13, flags = ?14, data = ?15 WHERE id = ?16",
+                params![
+                    card.deck_id,
+                    now_secs,
+                    usn,
+                    card.card_type.code(),
+                    card.queue.code(),
+                    card.due,
+                    card.interval,
+                    card.factor,
+                    card.reps,
+                    card.lapses,
+                    card.left,
+                    card.original_due,
+                    card.original_deck_id,
+                    card.flags,
+                    card.data,
+                    card.id,
+                ],
+            )
+            .map_err(backend)?;
+        if updated == 0 {
+            return Err(StoreError::NotFound(format!("card {}", card.id)));
+        }
+        transaction.commit().map_err(backend)?;
+        Ok(())
     }
 
     fn undo_review(
@@ -1063,7 +1283,7 @@ impl Store for Collection {
         if !logged {
             return Ok(false);
         }
-        let usn = update_col(&transaction, true)?;
+        let usn = update_col(&transaction, false)?;
         transaction
             .execute(
                 "DELETE FROM revlog WHERE id = ?1 AND cid = ?2",
@@ -1111,7 +1331,7 @@ impl Store for Collection {
         if filter.missing {
             return Ok(DeckStats::default());
         }
-        let today = anki::day_number(now_secs, self.collection_created()?)?;
+        let today = i64::from(self.timing(now_secs)?.days_elapsed);
         let (deck_and, deck_where) = if filter.params.is_empty() {
             (String::new(), String::new())
         } else {
@@ -1155,19 +1375,15 @@ impl Store for Collection {
         if days == 0 {
             return Ok(counts);
         }
-        let created = self.collection_created()?;
-        let today = anki::day_number(now_secs, created)?;
+        let timing = self.timing(now_secs)?;
+        let today = i64::from(timing.days_elapsed);
         let last = i64::try_from(days)
             .map_err(|_| invalid("forecast too long"))?
             .saturating_sub(1);
         let horizon = today
             .checked_add(last)
             .ok_or_else(|| invalid("forecast overflow"))?;
-        let end_today_secs = today
-            .checked_add(1)
-            .and_then(|day| day.checked_mul(86_400))
-            .and_then(|offset| created.checked_add(offset))
-            .ok_or_else(|| invalid("forecast overflow"))?;
+        let end_today_secs = timing.next_day_at;
         let sql = "SELECT CASE WHEN c.queue = 1 OR c.due < ?1 THEN ?1 ELSE c.due END AS due_day, \
                    COUNT(*) FROM cards c WHERE (c.queue = 1 AND c.due <= ?2) \
                    OR (c.queue IN (2, 3) AND c.due <= ?3) GROUP BY due_day";
@@ -1188,7 +1404,7 @@ impl Store for Collection {
 
     fn deck_stats(&self, now_secs: i64) -> Result<DeckTotals, StoreError> {
         let decks = self.deck_list()?;
-        let today = anki::day_number(now_secs, self.collection_created()?)?;
+        let today = i64::from(self.timing(now_secs)?.days_elapsed);
         let counts = deck_card_counts(&self.conn, now_secs, today)?;
         let ids_by_name = decks
             .iter()
@@ -1225,8 +1441,38 @@ impl Store for Collection {
         read_deck_steps(&self.conn, deck_id)
     }
 
+    fn max_taken_secs(&self, deck_id: Id) -> Result<u32, StoreError> {
+        let decks = self.effective_decks()?;
+        let Some(preset_id) = decks
+            .iter()
+            .find(|deck| deck.id == deck_id)
+            .map(|deck| deck.preset_id)
+        else {
+            return Ok(60);
+        };
+        Ok(self
+            .preset(preset_id)?
+            .map_or(60, |preset| preset.max_taken_secs))
+    }
+
+    fn last_review_secs(&self, card_id: Id) -> Result<Option<i64>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT MAX(id) FROM revlog WHERE cid = ?1 AND ease BETWEEN 1 AND 4 \
+                 AND (type != 3 OR factor != 0)",
+                [card_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .map(|stamp| stamp.map(|millis| millis.div_euclid(1_000)))
+            .map_err(backend)
+    }
+
     fn collection_created(&self) -> Result<i64, StoreError> {
         Self::collection_created(self)
+    }
+
+    fn timing(&self, now_secs: i64) -> Result<Timing, StoreError> {
+        Self::timing(self, now_secs)
     }
 
     fn collection_modified(&self) -> Result<i64, StoreError> {
@@ -2202,7 +2448,7 @@ fn write_review(
                 log_id,
                 card.id,
                 usn,
-                log.ease.code(),
+                log.ease,
                 log.interval,
                 log.last_interval,
                 log.factor,
@@ -2309,7 +2555,6 @@ fn parse_position(bytes: &[u8]) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use ranki_model::NewNote;
-    use ranki_model::Rating;
     use ranki_model::RevLog;
     use ranki_model::RevLogKind;
     use ranki_model::ReviewDecision;
@@ -2335,7 +2580,7 @@ mod tests {
             id: 1_700_000_000_000,
             card_id: card.id,
             usn: 0,
-            ease: Rating::Good,
+            ease: 3,
             interval: 1,
             last_interval: 0,
             factor: 2_500,
@@ -2405,7 +2650,7 @@ mod tests {
             id: 1_700_000_000_000,
             card_id: card.id,
             usn: 0,
-            ease: Rating::Good,
+            ease: 3,
             interval: 1,
             last_interval: 0,
             factor: 2_500,

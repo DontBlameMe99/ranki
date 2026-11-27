@@ -58,6 +58,7 @@ fn rating_and_review_kinds_cover_every_code() {
         (RevLogKind::Relearn, 2),
         (RevLogKind::Filtered, 3),
         (RevLogKind::Manual, 4),
+        (RevLogKind::Rescheduled, 5),
     ] {
         assert_eq!(kind.code(), code);
         assert_eq!(RevLogKind::from_code(code), kind);

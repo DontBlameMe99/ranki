@@ -274,7 +274,7 @@ fn stdio_adds_answers_and_reports_one_card() {
         }),
     );
     assert_eq!(reviewed["card"]["id"], json!(card_id));
-    assert_eq!(reviewed["revlog"]["ease"], json!("good"));
+    assert_eq!(reviewed["revlog"]["ease"], json!(3));
     assert_eq!(reviewed["revlog"]["time_ms"], json!(1234));
 
     let stats = client.tool("stats", json!({"now_secs": 1_000_000}));

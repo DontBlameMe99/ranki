@@ -23,7 +23,6 @@ use ranki_model::Id;
 use ranki_model::Note;
 use ranki_model::NoteKind;
 use ranki_model::NoteModel;
-use ranki_model::Rating;
 use ranki_model::RevLog;
 use ranki_model::RevLogKind;
 use ranki_model::StoreError;
@@ -140,7 +139,7 @@ pub fn revlog_from_row(row: &Row<'_>) -> SqlResult<RevLog> {
         id: row.get(0)?,
         card_id: row.get(1)?,
         usn: i32::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
-        ease: Rating::from_code(ease).unwrap_or(Rating::Again),
+        ease,
         interval: i32::try_from(row.get::<_, i64>(4)?).unwrap_or_default(),
         last_interval: i32::try_from(row.get::<_, i64>(5)?).unwrap_or_default(),
         factor: anki::as_u32(row.get(6)?).map_err(conversion)?,

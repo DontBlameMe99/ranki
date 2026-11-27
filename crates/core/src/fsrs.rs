@@ -1,14 +1,21 @@
+#![expect(
+    clippy::too_many_arguments,
+    clippy::excessive_nesting,
+    reason = "Anki scheduling carries card, timing, rating and answer state"
+)]
 use ranki_model::{
-    Card, CardQueue, CardType, DeckSteps, Rating, RevLogKind, ReviewDecision,
+    Card, CardQueue, CardType, DeckSteps, Rating, ReviewDecision,
 };
 use serde_json::{Map, Value};
 
+use ranki_model::Timing;
+
 use crate::shared::{
     FuzzInput, ReviewContext, ReviewOutcome, StepConfig, as_f32, as_i32,
-    due_from_days, elapsed_days_from, f32_from_f64, finish, fuzz_interval,
-    is_schedulable, minimum_review_fuzz_interval, positive_factor,
-    preview_interval, remaining_steps, step_delay_seconds, step_outcome,
-    unchanged, unchanged_outcome,
+    as_u32, f32_from_f64, finish, fuzz_interval, is_schedulable,
+    learning_placement, minimum_review_fuzz_interval, positive_factor,
+    preview_interval, remaining_steps, review_kind, step_delay_seconds,
+    step_outcome, unchanged,
 };
 
 /// Anki's default FSRS-6 parameters (21 weights, positive `w20` decay).
@@ -111,7 +118,7 @@ impl FsrsParams {
         let Some(slot) = self.weights.get_mut(FSRS6_PARAMS_LEN - 1) else {
             return self;
         };
-        if decay.is_finite() && decay > 0.0 {
+        if decay.is_finite() && (0.1..=0.8).contains(&decay) {
             self.decay = decay;
             *slot = decay;
         }
@@ -123,7 +130,7 @@ impl FsrsParams {
         Self { weights, decay }
     }
 
-    fn from_valid(weights: [f32; FSRS6_PARAMS_LEN]) -> Option<Self> {
+    fn from_valid(mut weights: [f32; FSRS6_PARAMS_LEN]) -> Option<Self> {
         if weights.iter().any(|weight| !weight.is_finite()) {
             return None;
         }
@@ -131,7 +138,39 @@ impl FsrsParams {
         if decay <= 0.0 {
             return None;
         }
+        clip_parameters(&mut weights);
         Some(Self::from_weights(weights))
+    }
+}
+
+fn clip_parameters(weights: &mut [f32; FSRS6_PARAMS_LEN]) {
+    // fsrs-rs 6.6.2 clips with one relearning step and short-term stability
+    // disabled, which leaves w19 free to be negative.
+    let clamps: [(f32, f32); FSRS6_PARAMS_LEN] = [
+        (S_MIN, S_MAX),
+        (S_MIN, S_MAX),
+        (S_MIN, S_MAX),
+        (S_MIN, S_MAX),
+        (D_MIN, D_MAX),
+        (0.001, 4.0),
+        (0.001, 4.0),
+        (0.001, 0.75),
+        (0.0, 4.5),
+        (0.0, 0.8),
+        (0.001, 3.5),
+        (0.001, 5.0),
+        (0.001, 0.25),
+        (0.001, 0.9),
+        (0.0, 4.0),
+        (0.0, 1.0),
+        (1.0, 6.0),
+        (0.0, 2.0),
+        (0.0, 2.0),
+        (0.0, 0.8),
+        (0.1, 0.8),
+    ];
+    for (weight, (minimum, maximum)) in weights.iter_mut().zip(clamps) {
+        *weight = (*weight).clamp(minimum, maximum);
     }
 }
 
@@ -143,6 +182,23 @@ pub const fn clamp_desired_retention(value: f32) -> f32 {
     } else {
         DEFAULT_DESIRED_RETENTION
     }
+}
+
+/// Anki's ease-factor change for an answer to a review card.
+fn review_factor(ctx: &ReviewContext<'_>, memory_factor: u32) -> u32 {
+    if ctx.card.card_type != ranki_model::CardType::Review {
+        return memory_factor;
+    }
+    let delta = match ctx.rating {
+        Rating::Again => -200_i32,
+        Rating::Hard => -150,
+        Rating::Good => 0,
+        Rating::Easy => 150,
+    };
+    let factor = i64::from(ctx.card.factor)
+        .saturating_add(i64::from(delta))
+        .max(1_300);
+    u32::try_from(factor).unwrap_or(u32::MAX)
 }
 
 fn difficulty_factor(difficulty: f32) -> u32 {
@@ -219,6 +275,7 @@ pub struct FsrsPreset {
     pub learning_steps_seconds: Vec<u32>,
     pub relearning_steps_seconds: Vec<u32>,
     pub enable_fuzzing: bool,
+    pub max_taken_secs: u32,
 }
 
 impl Default for FsrsPreset {
@@ -229,6 +286,7 @@ impl Default for FsrsPreset {
             learning_steps_seconds: vec![60, 600],
             relearning_steps_seconds: vec![600],
             enable_fuzzing: true,
+            max_taken_secs: 60,
         }
     }
 }
@@ -299,6 +357,13 @@ impl FsrsScheduler {
             params: self.params.clone(),
         }
     }
+
+    /// Caps answer time at the deck preset's `maxTaken` seconds.
+    #[must_use]
+    pub const fn with_max_taken_secs(mut self, secs: u32) -> Self {
+        self.preset.max_taken_secs = secs;
+        self
+    }
     #[expect(
         clippy::too_many_arguments,
         reason = "Anki's button minimum needs the card state and both bounds"
@@ -361,14 +426,22 @@ impl FsrsScheduler {
                 .min(maximum);
             let minimum =
                 Self::interval_minimum(index, raw, previous, maximum, earlier);
-            *slot = fuzz_interval(FuzzInput {
-                interval: raw,
-                minimum,
-                maximum,
-                card_id: ctx.card.id,
-                reps: ctx.card.reps,
-                enabled: self.preset.enable_fuzzing,
-            });
+            if index == 0 {
+                // Anki takes Again from the raw interval with no fuzz or
+                // previous-interval floor, then caps it below the maximum.
+                let cap = maximum.saturating_sub(1).max(1);
+                let rounded = as_u32(raw.round()).clamp(1, cap);
+                *slot = i32::try_from(rounded).unwrap_or(i32::MAX);
+            } else {
+                *slot = fuzz_interval(FuzzInput {
+                    interval: raw,
+                    minimum,
+                    maximum,
+                    card_id: ctx.card.id,
+                    reps: ctx.card.reps,
+                    enabled: self.preset.enable_fuzzing,
+                });
+            }
             previous_interval = *slot;
         }
         (intervals, memory)
@@ -380,7 +453,11 @@ impl FsrsScheduler {
         card_data: CardData,
     ) -> Prepared {
         let needed = Self::rating_count(ctx.rating);
-        let elapsed = card_data.elapsed_days(ctx.card.modified, ctx.now_secs);
+        let elapsed = card_data.elapsed_days(
+            ctx.card.modified,
+            ctx.last_review_secs,
+            ctx.timing,
+        );
         let CardData {
             object,
             memory: current,
@@ -396,10 +473,10 @@ impl FsrsScheduler {
                         self.preset.desired_retention,
                     ),
                     decay: self.params.decay(),
-                    now_secs: ctx.now_secs,
+                    now_secs: ctx.timing.now,
                 },
             ),
-            factor: difficulty_factor(memory.difficulty),
+            factor: review_factor(ctx, difficulty_factor(memory.difficulty)),
             graduation: intervals
                 .get(needed.saturating_sub(1))
                 .copied()
@@ -409,9 +486,7 @@ impl FsrsScheduler {
     }
 
     fn plan(&self, ctx: &ReviewContext<'_>) -> ReviewOutcome {
-        if !is_schedulable(ctx.card) {
-            return unchanged_outcome(ctx);
-        }
+        // Unschedulable cards are rejected by the public API before planning.
         let card_data = CardData::parse(&ctx.card.data);
         let prepared = self.prepare(ctx, card_data);
         match ctx.card.card_type {
@@ -438,8 +513,16 @@ impl FsrsScheduler {
             StepConfig {
                 steps,
                 relearning,
-                graduation_interval: prepared.graduation,
-                factor: prepared.factor,
+                graduation_interval: if relearning {
+                    ctx.card.interval.max(1)
+                } else {
+                    prepared.graduation
+                },
+                factor: if relearning && ctx.card.factor > 0 {
+                    ctx.card.factor
+                } else {
+                    prepared.factor
+                },
                 data: prepared.data,
             },
         )
@@ -465,26 +548,19 @@ impl FsrsScheduler {
             outcome.lapses = 1;
             return outcome;
         }
+        let last_interval = ctx.card.interval.max(0);
         ReviewOutcome {
             card_type: CardType::Review,
             queue: CardQueue::Review,
-            due: due_from_days(
-                ctx.now_secs,
-                ctx.collection_start_secs,
-                prepared.graduation,
-            ),
+            due: ctx.timing.due_from_days(prepared.graduation),
+            card_interval: prepared.graduation,
             interval: prepared.graduation,
             lapses: u32::from(ctx.rating == Rating::Again),
             left: 0,
             factor: prepared.factor,
             data: prepared.data,
-            kind: if ctx.rating == Rating::Again {
-                RevLogKind::Relearn
-            } else {
-                RevLogKind::Review
-            },
-            step_seconds: None,
-            last_interval: None,
+            kind: review_kind(ctx),
+            last_interval,
         }
     }
 }
@@ -496,13 +572,25 @@ impl Default for FsrsScheduler {
 }
 
 impl FsrsScheduler {
-    /// Schedules `card` after `rating` at `now_secs` Unix seconds.
-    ///
-    /// Review dues are days since `collection_start_secs`.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the scheduling signature is shared by every caller"
-    )]
+    fn context<'card>(
+        &self,
+        card: &'card Card,
+        rating: Rating,
+        timing: &Timing,
+        last_review_secs: Option<i64>,
+        answer_ms: u32,
+    ) -> ReviewContext<'card> {
+        ReviewContext {
+            card,
+            rating,
+            timing: *timing,
+            last_review_secs,
+            answer_ms: answer_ms
+                .min(self.preset.max_taken_secs.saturating_mul(1_000)),
+        }
+    }
+
+    /// Convenience wrapper for callers without collection timing metadata.
     #[must_use]
     pub fn schedule(
         &self,
@@ -511,25 +599,13 @@ impl FsrsScheduler {
         now_secs: i64,
         collection_start_secs: i64,
     ) -> ReviewDecision {
-        let ctx = ReviewContext {
-            card,
-            rating,
-            now_secs,
-            collection_start_secs,
-        };
-        if !is_schedulable(card) {
-            return unchanged(&ctx);
-        }
-        finish(&ctx, self.plan(&ctx))
+        let timing = Timing::v1(now_secs, collection_start_secs);
+        let ctx = self.context(card, rating, &timing, None, 0);
+        self.schedule_timed(card, rating, &timing, None, 0)
+            .unwrap_or_else(|| unchanged(&ctx))
     }
 
-    /// Returns the interval a rating would produce without writing a log.
-    ///
-    /// Negative intervals are learning delays in seconds.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the preview signature mirrors schedule"
-    )]
+    /// Convenience wrapper using the original scheduler's day boundaries.
     #[must_use]
     pub fn preview(
         &self,
@@ -538,20 +614,11 @@ impl FsrsScheduler {
         now_secs: i64,
         collection_start_secs: i64,
     ) -> i32 {
-        let ctx = ReviewContext {
-            card,
-            rating,
-            now_secs,
-            collection_start_secs,
-        };
-        preview_interval(&self.plan(&ctx))
+        let timing = Timing::v1(now_secs, collection_start_secs);
+        self.preview_timed(card, rating, &timing, None)
     }
 
-    /// Returns the four rating intervals from one shared memory pass.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the batch preview signature mirrors preview"
-    )]
+    /// Convenience wrapper using the original scheduler's day boundaries.
     #[must_use]
     pub fn preview_all(
         &self,
@@ -559,18 +626,64 @@ impl FsrsScheduler {
         now_secs: i64,
         collection_start_secs: i64,
     ) -> [i32; 4] {
+        let timing = Timing::v1(now_secs, collection_start_secs);
+        self.preview_all_timed(card, &timing, None)
+    }
+
+    /// Schedules `card` after `rating`, or returns `None` for a card that
+    /// cannot be answered. Answer time is capped by the effective preset.
+    #[must_use]
+    pub fn schedule_timed(
+        &self,
+        card: &Card,
+        rating: Rating,
+        timing: &Timing,
+        last_review_secs: Option<i64>,
+        answer_ms: u32,
+    ) -> Option<ReviewDecision> {
+        let ctx =
+            self.context(card, rating, timing, last_review_secs, answer_ms);
+        if !is_schedulable(card) {
+            return None;
+        }
+        Some(finish(&ctx, self.plan(&ctx)))
+    }
+
+    /// Returns the interval a rating would produce without writing a log.
+    ///
+    /// Negative intervals are learning delays in seconds.
+    #[must_use]
+    pub fn preview_timed(
+        &self,
+        card: &Card,
+        rating: Rating,
+        timing: &Timing,
+        last_review_secs: Option<i64>,
+    ) -> i32 {
+        if !is_schedulable(card) {
+            return card.interval;
+        }
+        let ctx = self.context(card, rating, timing, last_review_secs, 0);
+        preview_interval(&self.plan(&ctx))
+    }
+
+    /// Returns the four rating intervals from one shared memory pass.
+    #[must_use]
+    pub fn preview_all_timed(
+        &self,
+        card: &Card,
+        timing: &Timing,
+        last_review_secs: Option<i64>,
+    ) -> [i32; 4] {
         if !is_schedulable(card) {
             return [card.interval; 4];
         }
         let ratings = [Rating::Again, Rating::Hard, Rating::Good, Rating::Easy];
         let card_data = CardData::parse(&card.data);
-        let elapsed = card_data.elapsed_days(card.modified, now_secs);
-        let ctx = ReviewContext {
-            card,
-            rating: Rating::Again,
-            now_secs,
-            collection_start_secs,
-        };
+        let elapsed =
+            card_data.elapsed_days(card.modified, last_review_secs, *timing);
+        let ctx =
+            self.context(card, Rating::Again, timing, last_review_secs, 0);
         let (intervals, _) = self.button_intervals(
             &ctx,
             card_data.memory,
@@ -581,13 +694,15 @@ impl FsrsScheduler {
         for ((preview, rating), interval) in
             previews.iter_mut().zip(ratings).zip(intervals)
         {
-            let ctx = ReviewContext {
-                card,
-                rating,
-                now_secs,
-                collection_start_secs,
+            let ctx = self.context(card, rating, timing, last_review_secs, 0);
+            let graduation = if ctx.card.card_type == CardType::Relearning
+                && ctx.card.interval > 0
+            {
+                ctx.card.interval
+            } else {
+                interval.max(1)
             };
-            *preview = self.preview_interval_for(&ctx, interval.max(1));
+            *preview = self.preview_interval_for(&ctx, graduation);
         }
         previews
     }
@@ -626,9 +741,7 @@ fn step_preview_interval(
         remaining_steps(ctx.card.left, total).max(1)
     };
     step_delay_seconds(steps, remaining, ctx.rating)
-        .map_or(graduation, |seconds| {
-            i32::try_from(seconds).unwrap_or(i32::MAX).saturating_neg()
-        })
+        .map_or(graduation, |seconds| learning_placement(ctx, seconds, 0).2)
 }
 
 #[derive(Clone, Copy)]
@@ -650,13 +763,19 @@ impl CardData {
         Self { object, memory }
     }
 
-    fn elapsed_days(&self, modified: i64, now_secs: i64) -> u32 {
+    fn elapsed_days(
+        &self,
+        modified: i64,
+        last_review_secs: Option<i64>,
+        timing: Timing,
+    ) -> u32 {
         let last = self
             .object
             .get("lrt")
             .and_then(Value::as_i64)
+            .or(last_review_secs)
             .unwrap_or(modified);
-        elapsed_days_from(last, now_secs)
+        timing.elapsed_days_since(last)
     }
 }
 
@@ -752,7 +871,7 @@ fn same_day_stability(
     let grade = f32::from(rating.code());
     let raw_factor = (weight(params, 17) * (grade - 3.0 + weight(params, 18)))
         .exp()
-        * stability.powf(-weight(params, 19).max(0.0));
+        * stability.powf(-weight(params, 19));
     let factor = if rating.code() >= 2 {
         raw_factor.max(1.0)
     } else {

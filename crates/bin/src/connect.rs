@@ -12,6 +12,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use ranki_core::FsrsScheduler;
 use ranki_model::AddNoteOptions;
+use ranki_model::Card;
 use ranki_model::CardQueue;
 use ranki_model::CardType;
 use ranki_model::Deck;
@@ -36,7 +37,6 @@ use crate::CliError;
 use crate::CliResult;
 use crate::answer_card;
 use crate::error::{ErrorCode, InterfaceError};
-use crate::save_card;
 const API_VERSION: u32 = 6;
 static MEDIA_STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const EMPTY_PARAMS: Value = Value::Null;
@@ -876,11 +876,12 @@ fn answer_cards(
             .and_then(|ease| u8::try_from(ease).ok())
             .and_then(Rating::from_code)
             .ok_or("invalid parameter: ease")?;
-        if store.card(card_id)?.is_none() {
+        let pending = store.card(card_id)?;
+        if pending.is_none_or(|card| !card.queue.is_due()) {
             result.push(false);
             continue;
         }
-        answer_card(store, card_id, ease, now, scheduler)?;
+        answer_card(store, card_id, ease, now, scheduler, 0)?;
         result.push(true);
     }
     Ok(json!(result))
@@ -956,19 +957,24 @@ fn set_suspended(
         card.queue = if suspend {
             CardQueue::Suspended
         } else {
-            queue_for(card.card_type)
+            queue_for(&card)
         };
-        save_card(store, card)?;
+        store.update_card(&card, crate::now_secs()?)?;
     }
     Ok(json!(suspend))
 }
 
-const fn queue_for(card_type: CardType) -> CardQueue {
-    match card_type {
+const fn queue_for(card: &Card) -> CardQueue {
+    match card.card_type {
         CardType::New => CardQueue::New,
-        CardType::Learning => CardQueue::Learning,
         CardType::Review => CardQueue::Review,
-        CardType::Relearning => CardQueue::DayLearning,
+        CardType::Learning | CardType::Relearning => {
+            if ranki_model::Timing::is_unix_due(card.due) {
+                CardQueue::Learning
+            } else {
+                CardQueue::DayLearning
+            }
+        }
     }
 }
 
@@ -986,7 +992,7 @@ fn change_deck(
         };
         card.deck_id = deck.id;
         card.original_deck_id = 0;
-        save_card(store, card)?;
+        store.update_card(&card, crate::now_secs()?)?;
     }
     Ok(Value::Null)
 }
@@ -1301,6 +1307,7 @@ mod tests {
             Rating::Good,
             crate::now_secs().unwrap(),
             &scheduler(),
+            0,
         )
         .unwrap();
         assert_eq!(decision.card.id, card_id);
@@ -1650,5 +1657,58 @@ mod tests {
                 .as_deref(),
             Some("é.png")
         );
+    }
+    #[test]
+    fn unsuspend_restores_learning_queue_from_the_due_value() {
+        let (_dir, mut store) = fixture();
+        add_card(&mut store);
+        let card_id = store.find_cards("").unwrap()[0];
+        let mut card = store.card(card_id).unwrap().unwrap();
+        card.card_type = ranki_model::CardType::Learning;
+        card.queue = ranki_model::CardQueue::Learning;
+        card.due = 1_700_000_100;
+        card.left = 2;
+        store
+            .update_card(&card, crate::now_secs().unwrap())
+            .unwrap();
+
+        call(&mut store, "suspend", json!({"cards": [card_id]}));
+        assert_eq!(
+            store.card(card_id).unwrap().unwrap().queue,
+            ranki_model::CardQueue::Suspended
+        );
+        call(&mut store, "unsuspend", json!({"cards": [card_id]}));
+        assert_eq!(
+            store.card(card_id).unwrap().unwrap().queue,
+            ranki_model::CardQueue::Learning
+        );
+
+        let mut day_card = store.card(card_id).unwrap().unwrap();
+        day_card.due = 12;
+        store
+            .update_card(&day_card, crate::now_secs().unwrap() + 1)
+            .unwrap();
+        call(&mut store, "suspend", json!({"cards": [card_id]}));
+        call(&mut store, "unsuspend", json!({"cards": [card_id]}));
+        assert_eq!(
+            store.card(card_id).unwrap().unwrap().queue,
+            ranki_model::CardQueue::DayLearning
+        );
+        assert_eq!(store.review_history().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn answering_a_suspended_card_creates_no_log() {
+        let (_dir, mut store) = fixture();
+        add_card(&mut store);
+        let card_id = store.find_cards("").unwrap()[0];
+        call(&mut store, "suspend", json!({"cards": [card_id]}));
+        let result = call(
+            &mut store,
+            "answerCards",
+            json!({"answers": [{"cardId": card_id, "ease": 3}]}),
+        );
+        assert_eq!(result, json!([false]));
+        assert_eq!(store.review_history().unwrap().len(), 0);
     }
 }

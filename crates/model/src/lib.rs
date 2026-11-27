@@ -200,6 +200,7 @@ pub enum RevLogKind {
     Relearn,
     Filtered,
     Manual,
+    Rescheduled,
 }
 
 impl RevLogKind {
@@ -211,6 +212,7 @@ impl RevLogKind {
             Self::Relearn => 2,
             Self::Filtered => 3,
             Self::Manual => 4,
+            Self::Rescheduled => 5,
         }
     }
 
@@ -221,6 +223,7 @@ impl RevLogKind {
             2 => Self::Relearn,
             3 => Self::Filtered,
             4 => Self::Manual,
+            5 => Self::Rescheduled,
             _ => Self::Learn,
         }
     }
@@ -231,7 +234,7 @@ pub struct RevLog {
     pub id: Id,
     pub card_id: Id,
     pub usn: i32,
-    pub ease: Rating,
+    pub ease: u8,
     pub interval: i32,
     pub last_interval: i32,
     pub factor: u32,
@@ -254,6 +257,130 @@ impl Default for DeckSteps {
             relearning: vec![600],
         }
     }
+}
+
+/// Anki's day boundary for one moment in time.
+///
+/// `creation_offset` and `current_offset` are minutes west of UTC, including
+/// daylight saving time. A missing rollover selects the original scheduler's
+/// fixed 86400-second days.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timing {
+    pub now: i64,
+    pub days_elapsed: u32,
+    pub next_day_at: i64,
+}
+
+impl Timing {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Anki timing needs both offsets, the rollover and two timestamps"
+    )]
+    #[must_use]
+    pub fn new(
+        now: i64,
+        collection_created: i64,
+        creation_offset: Option<i32>,
+        current_offset: i32,
+        rollover_hour: Option<u8>,
+    ) -> Self {
+        let Some(hour) = rollover_hour else {
+            return Self::v1(now, collection_created);
+        };
+        let offset = offset_secs(current_offset);
+        let now_local = now.saturating_sub(offset);
+        let now_day = now_local.div_euclid(SECONDS_PER_DAY);
+        let rollover_secs = i64::from(hour.min(23)).saturating_mul(3_600);
+        let today_rollover = now_day
+            .saturating_mul(SECONDS_PER_DAY)
+            .saturating_add(rollover_secs)
+            .saturating_add(offset);
+        let next_day_at = if today_rollover <= now {
+            today_rollover.saturating_add(SECONDS_PER_DAY)
+        } else {
+            today_rollover
+        };
+        let rolled_over = now_local
+            .saturating_sub(now_day.saturating_mul(SECONDS_PER_DAY))
+            >= rollover_secs;
+        let days = creation_offset.map_or_else(
+            || {
+                let created_day = now_local
+                    .saturating_sub(now.saturating_sub(collection_created))
+                    .div_euclid(SECONDS_PER_DAY);
+                let created_rollover = created_day
+                    .saturating_mul(SECONDS_PER_DAY)
+                    .saturating_add(rollover_secs)
+                    .saturating_add(offset);
+                now.saturating_sub(created_rollover)
+                    .max(0)
+                    .div_euclid(SECONDS_PER_DAY)
+            },
+            |creation_minutes| {
+                let created_local = collection_created
+                    .saturating_sub(offset_secs(creation_minutes));
+                let created_day = created_local.div_euclid(SECONDS_PER_DAY);
+                now_day
+                    .saturating_sub(created_day)
+                    .saturating_sub(i64::from(!rolled_over))
+            },
+        );
+        Self {
+            now,
+            days_elapsed: u32::try_from(days.max(0)).unwrap_or(u32::MAX),
+            next_day_at,
+        }
+    }
+
+    /// The original scheduler's fixed-length days.
+    #[must_use]
+    pub fn v1(now: i64, collection_created: i64) -> Self {
+        let days = now
+            .saturating_sub(collection_created)
+            .max(0)
+            .div_euclid(SECONDS_PER_DAY);
+        Self {
+            now,
+            days_elapsed: u32::try_from(days).unwrap_or(u32::MAX),
+            next_day_at: collection_created.saturating_add(
+                days.saturating_add(1).saturating_mul(SECONDS_PER_DAY),
+            ),
+        }
+    }
+
+    /// Seconds left before the next day starts.
+    #[must_use]
+    pub fn secs_until_rollover(&self) -> u32 {
+        let left = self.next_day_at.saturating_sub(self.now).max(0);
+        u32::try_from(left).unwrap_or(u32::MAX)
+    }
+
+    /// Whole Anki days between a timestamp and the next rollover.
+    #[must_use]
+    pub fn elapsed_days_since(&self, timestamp: i64) -> u32 {
+        let elapsed = self.next_day_at.saturating_sub(timestamp).max(0);
+        u32::try_from(elapsed.div_euclid(SECONDS_PER_DAY)).unwrap_or(u32::MAX)
+    }
+
+    /// Due day for a review interval, relative to the collection's day zero.
+    #[must_use]
+    pub fn due_from_days(&self, interval: i32) -> i64 {
+        i64::from(self.days_elapsed)
+            .saturating_add(i64::from(interval))
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+    }
+
+    /// True when a queue-1 or queue-3 `due` value is a Unix timestamp.
+    #[must_use]
+    pub const fn is_unix_due(due: i64) -> bool {
+        due > 1_000_000_000
+    }
+}
+
+const SECONDS_PER_DAY: i64 = 86_400;
+
+fn offset_secs(minutes_west: i32) -> i64 {
+    i64::from(minutes_west.clamp(-1_380, 1_380)).saturating_mul(60)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -614,6 +741,25 @@ pub trait Store {
         ))
     }
 
+    /// Returns the answer-time cap of the preset used by a deck.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection metadata cannot be read.
+    fn max_taken_secs(&self, _deck_id: Id) -> Result<u32, StoreError> {
+        Ok(60)
+    }
+
+    /// Returns the time of a card's last review log, in Unix seconds.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection cannot be read.
+    fn last_review_secs(
+        &self,
+        _card_id: Id,
+    ) -> Result<Option<i64>, StoreError> {
+        Ok(None)
+    }
+
     /// Loads one card by id.
     ///
     /// # Errors
@@ -686,6 +832,24 @@ pub trait Store {
         &mut self,
         decision: &ReviewDecision,
     ) -> Result<Id, StoreError>;
+
+    /// Writes card state without creating a review log.
+    ///
+    /// The card's stored modification time and sync revision must still match
+    /// `card`, so a stale edit is rejected.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the card changed or the write fails.
+    fn update_card(
+        &mut self,
+        card: &Card,
+        now_secs: i64,
+    ) -> Result<(), StoreError> {
+        let _ = (card, now_secs);
+        Err(StoreError::Unsupported(
+            "update_card is not supported by this store".to_owned(),
+        ))
+    }
 
     /// Reverses one persisted review: deletes the review log and restores the
     /// card row to the snapshot taken before that review.
@@ -772,4 +936,12 @@ pub trait Store {
     ///
     /// Returns [`StoreError`] if the collection cannot be read.
     fn collection_created(&self) -> Result<i64, StoreError>;
+
+    /// Returns Anki's current day boundary information.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the collection metadata cannot be read.
+    fn timing(&self, now_secs: i64) -> Result<Timing, StoreError> {
+        Ok(Timing::v1(now_secs, self.collection_created()?))
+    }
 }

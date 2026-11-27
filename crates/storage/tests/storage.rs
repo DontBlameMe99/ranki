@@ -42,6 +42,34 @@ fn fixture() -> (TempDir, PathBuf) {
     (directory, path)
 }
 
+/// Keeps legacy day-number tests on the original fixed-length day rule.
+fn pin_v1_timing(path: &Path) {
+    let conn = Connection::open(path).expect("write connection");
+    let raw_conf: String = conn
+        .query_row("SELECT conf FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("conf");
+    let mut value: Value = serde_json::from_str(&raw_conf).expect("conf JSON");
+    value
+        .as_object_mut()
+        .expect("conf object")
+        .insert(String::from("schedVer"), json!(1));
+    let v1_conf = value.to_string();
+    conn.execute(
+        "UPDATE col SET conf = ?1 WHERE id = 1",
+        rusqlite::params![v1_conf],
+    )
+    .expect("pin v1");
+    let stored_raw: String = conn
+        .query_row("SELECT conf FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("stored conf");
+    let stored_value: Value =
+        serde_json::from_str(&stored_raw).expect("stored conf JSON");
+    assert_eq!(
+        stored_value.get("schedVer").and_then(Value::as_i64),
+        Some(1)
+    );
+}
+
 fn read_only(path: &Path) -> Connection {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .expect("read only")
@@ -283,6 +311,7 @@ fn review_and_day_learning_dues_use_days_since_collection_creation() {
         }
     }
     let store = Collection::open(&path).expect("open");
+    pin_v1_timing(&path);
     assert_eq!(store.collection_created().expect("created"), created);
     let due_ids: Vec<_> = store
         .due_cards(None, 50, now)
@@ -340,6 +369,7 @@ fn due_forecast_buckets_current_overdue_learning_and_future_cards() {
         }
     }
     let store = Collection::open(&path).expect("open");
+    pin_v1_timing(&path);
     assert_eq!(
         store.due_forecast(7, now).expect("forecast"),
         [4, 2, 1, 0, 0, 0, 1]
@@ -706,7 +736,7 @@ fn apply_review_updates_card_log_and_collection_metadata() {
             id: 9_000,
             card_id: card.id,
             usn: 0,
-            ease: Rating::Good,
+            ease: 3,
             interval: 4,
             last_interval: 0,
             factor: 2500,
@@ -720,7 +750,7 @@ fn apply_review_updates_card_log_and_collection_metadata() {
     assert_eq!(saved.due, 42);
     let log = store.revlog(9_000).expect("revlog").expect("entry");
     assert_eq!(log.card_id, card.id);
-    assert_eq!(log.ease, Rating::Good);
+    assert_eq!(log.ease, 3);
     assert!(store.collection_modified().expect("modified") > before);
     store.apply_review(&decision).expect("second review");
     assert_eq!(
@@ -923,6 +953,7 @@ fn stats_excludes_future_day_learning_cards() {
         }
     }
     let store = Collection::open(&path).expect("open");
+    pin_v1_timing(&path);
     let stats = store.stats(None, now).expect("stats");
     assert_eq!(stats.total_cards, 2);
     assert_eq!(stats.learning_cards, 1);
@@ -954,6 +985,7 @@ fn due_stats_count_only_cards_due_now() {
         }
     }
     let store = Collection::open(&path).expect("open");
+    pin_v1_timing(&path);
     let all = store.stats(None, now).expect("stats");
     let due = store
         .deck_stats(now)
@@ -1261,7 +1293,7 @@ fn remove_deck_deletes_subtree_cards_notes_revlog_and_writes_graves() {
             id: log_id,
             card_id,
             usn: 0,
-            ease: Rating::Good,
+            ease: 3,
             interval: 4,
             last_interval: 0,
             factor: 2500,
@@ -1361,7 +1393,7 @@ fn remove_deck_keeps_notes_that_still_have_cards() {
             id: 9_003_i64,
             card_id: cards[1],
             usn: 0,
-            ease: Rating::Good,
+            ease: 3,
             interval: 0,
             last_interval: 0,
             factor: 2500,
@@ -1526,7 +1558,7 @@ fn apply_reviews_writes_a_batch_atomically() {
                 id: 20_000 + i64::from(index),
                 card_id: card.id,
                 usn: 0,
-                ease: Rating::Good,
+                ease: 3,
                 interval: 4,
                 last_interval: 0,
                 factor: 2500,
@@ -2312,4 +2344,280 @@ fn pb_floats(field: u32, values: &[f32]) -> Vec<u8> {
         bytes.extend(value.to_le_bytes());
     }
     bytes
+}
+
+#[test]
+fn scheduler_v1_upgrade_fixes_cards_and_revlogs() {
+    let (_directory, path) = fixture();
+    let card_id = {
+        let mut store = Collection::open(&path).expect("open");
+        let ids = store
+            .add_note(&note(&["Front?", "Answer!"], &[]))
+            .expect("note");
+        ids[0]
+    };
+    let conn = Connection::open(&path).expect("write connection");
+    let conf_text: String = conn
+        .query_row("SELECT conf FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("conf");
+    let mut conf_json: Value =
+        serde_json::from_str(&conf_text).expect("conf JSON");
+    conf_json["schedVer"] = json!(1);
+    conf_json
+        .as_object_mut()
+        .expect("conf object")
+        .remove("creationOffset");
+    let created = 1_672_531_200_i64;
+    conn.execute(
+        "UPDATE col SET crt = ?1 WHERE id = 1",
+        rusqlite::params![created],
+    )
+    .expect("set creation stamp");
+    let v1_conf = conf_json.to_string();
+    conn.execute(
+        "UPDATE col SET conf = ?1 WHERE id = 1",
+        rusqlite::params![v1_conf],
+    )
+    .expect("set v1");
+    conn.execute(
+        "UPDATE cards SET type = 2, queue = 1 WHERE id = ?1",
+        rusqlite::params![card_id],
+    )
+    .expect("v1 relearning card");
+    for (id, ease, kind) in [(1_i64, 2_i64, 0_i64), (2, 3, 2), (3, 1, 1)] {
+        conn.execute(
+            "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type) \
+             VALUES (?1, ?2, -1, ?3, 1, 0, 2500, 100, ?4)",
+            rusqlite::params![id, card_id, ease, kind],
+        )
+        .expect("revlog");
+    }
+    drop(conn);
+
+    let store = Collection::open(&path).expect("upgrade on open");
+    let card = store.card(card_id).expect("card").expect("card present");
+    assert_eq!(card.card_type, CardType::Relearning);
+    let history = store.review_history().expect("history");
+    let eases: Vec<u8> = history.iter().map(|log| log.ease).collect();
+    assert_eq!(eases, vec![3, 4, 1]);
+    let conn = read_only(&path);
+    let upgraded_text: String = conn
+        .query_row("SELECT conf FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("conf");
+    let upgraded: Value =
+        serde_json::from_str(&upgraded_text).expect("conf JSON");
+    assert_eq!(upgraded["schedVer"], 2);
+    assert_eq!(upgraded["sched2021"], true);
+    assert_eq!(
+        upgraded["creationOffset"],
+        ranki_storage::local_minutes_west(created).expect("offset")
+    );
+}
+
+#[test]
+fn ordinary_card_writes_do_not_bump_schema_modification() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let ids = store
+        .add_note(&note(&["Front?", "Answer!"], &[]))
+        .expect("note");
+    let card = store.card(ids[0]).expect("card").expect("card present");
+    let timing = store.timing(now_secs()).expect("timing");
+    let conn = read_only(&path);
+    let before: i64 = conn
+        .query_row("SELECT scm FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("scm");
+    drop(conn);
+    let decision = FsrsScheduler::default()
+        .schedule_timed(&card, Rating::Good, &timing, None, 0)
+        .expect("decision");
+    store.apply_review(&decision).expect("apply");
+    let conn = read_only(&path);
+    let after: i64 = conn
+        .query_row("SELECT scm FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("scm");
+    assert_eq!(before, after);
+}
+
+#[test]
+fn card_updates_write_state_without_a_manual_log() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let ids = store
+        .add_note(&note(&["Front?", "Answer!"], &[]))
+        .expect("note");
+    let mut card = store.card(ids[0]).expect("card").expect("card present");
+    let now = now_secs() + 10;
+    card.queue = CardQueue::Suspended;
+    store.update_card(&card, now).expect("update");
+    let stored = store.card(card.id).expect("card").expect("card present");
+    assert_eq!(stored.queue, CardQueue::Suspended);
+    assert_eq!(stored.modified, now);
+    assert_eq!(stored.usn, -1);
+    assert_eq!(store.review_history().expect("history").len(), 0);
+}
+
+#[test]
+fn scheduler_v2_collections_use_rollover_timing() {
+    let (_directory, path) = fixture();
+    let now = 1_700_000_000_i64;
+    let created = now - 20 * 86_400;
+    let v2_conf = json!({
+        "schedVer": 2,
+        "creationOffset": 0,
+        "rollover": 4,
+    })
+    .to_string();
+    let conn = Connection::open(&path).expect("write connection");
+    conn.execute(
+        "UPDATE col SET crt = ?1, conf = ?2 WHERE id = 1",
+        rusqlite::params![created, v2_conf],
+    )
+    .expect("set v2 timing metadata");
+    drop(conn);
+
+    let store = Collection::open(&path).expect("open");
+    let timing = Store::timing(&store, now).expect("timing");
+    let expected = ranki_model::Timing::new(
+        now,
+        created,
+        Some(0),
+        ranki_storage::local_minutes_west(now).expect("offset"),
+        Some(4),
+    );
+    assert_eq!(timing.days_elapsed, expected.days_elapsed);
+    assert_eq!(timing.next_day_at, expected.next_day_at);
+}
+
+#[test]
+fn scheduler_v2_without_rollover_uses_ankis_four_am_default() {
+    let (_directory, path) = fixture();
+    let now = 1_700_000_000_i64;
+    let created = now - 20 * 86_400;
+    let v2_conf = json!({"schedVer": 2, "creationOffset": 0}).to_string();
+    let conn = Connection::open(&path).expect("write connection");
+    conn.execute(
+        "UPDATE col SET crt = ?1, conf = ?2 WHERE id = 1",
+        rusqlite::params![created, v2_conf],
+    )
+    .expect("set v2 metadata without rollover");
+    drop(conn);
+
+    let store = Collection::open(&path).expect("open");
+    let timing = Store::timing(&store, now).expect("timing");
+    let expected = ranki_model::Timing::new(
+        now,
+        created,
+        Some(0),
+        ranki_storage::local_minutes_west(now).expect("offset"),
+        Some(4),
+    );
+    assert_eq!(timing.days_elapsed, expected.days_elapsed);
+    assert_eq!(timing.next_day_at, expected.next_day_at);
+}
+
+#[test]
+fn last_review_time_ignores_non_answer_logs() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let ids = store
+        .add_note(&note(&["Front?", "Answer!"], &[]))
+        .expect("note");
+    let card_id = ids[0];
+    let conn = Connection::open(&path).expect("write connection");
+    for (id, ease, kind, factor) in [
+        (1_000_000_i64, 3_i64, 1_i64, 2_500_i64),
+        (2_000_000, 0, 5, 0),
+        (3_000_000, 4, 3, 0),
+    ] {
+        conn.execute(
+            "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type) \
+             VALUES (?1, ?2, -1, ?3, 1, 0, ?4, 100, ?5)",
+            rusqlite::params![id, card_id, ease, factor, kind],
+        )
+        .expect("revlog");
+    }
+    drop(conn);
+    assert_eq!(
+        Store::last_review_secs(&store, card_id).expect("last review"),
+        Some(1_000)
+    );
+}
+
+#[test]
+fn timing_metadata_is_cached_until_an_upgrade() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    pin_v1_timing(&path);
+    let now = 1_700_000_000_i64;
+    let created = store.collection_created().expect("created");
+    let before = Store::timing(&store, now).expect("v1 timing");
+    assert_eq!(before, ranki_model::Timing::v1(now, created));
+
+    assert!(store.upgrade_scheduler_v2().expect("upgrade"));
+    let after = Store::timing(&store, now).expect("v2 timing");
+    assert_ne!(after.next_day_at, before.next_day_at);
+}
+
+#[test]
+fn repeated_timing_calls_reuse_cached_configuration() {
+    let (_directory, path) = fixture();
+    let store = Collection::open(&path).expect("open");
+    let now = 1_700_000_000_i64;
+    let before = Store::timing(&store, now).expect("timing");
+
+    let conn = Connection::open(&path).expect("write connection");
+    let text: String = conn
+        .query_row("SELECT conf FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("conf");
+    let mut config: Value = serde_json::from_str(&text).expect("conf JSON");
+    config
+        .as_object_mut()
+        .expect("conf object")
+        .insert(String::from("rollover"), json!(12));
+    conn.execute(
+        "UPDATE col SET conf = ?1 WHERE id = 1",
+        rusqlite::params![config.to_string()],
+    )
+    .expect("write rollover");
+    drop(conn);
+
+    let after = Store::timing(&store, now).expect("cached timing");
+    assert_eq!(after.next_day_at, before.next_day_at);
+}
+
+#[test]
+fn timing_cache_is_keyed_by_exact_now() {
+    let (_directory, path) = fixture();
+    let store = Collection::open(&path).expect("open");
+    let now = 1_700_000_000_i64;
+    let before = Store::timing(&store, now).expect("timing");
+
+    let conn = Connection::open(&path).expect("write connection");
+    conn.execute(
+        "UPDATE col SET crt = ?1 WHERE id = 1",
+        rusqlite::params![now - 86_400],
+    )
+    .expect("change creation stamp");
+    drop(conn);
+
+    let same = Store::timing(&store, now).expect("cached timing");
+    assert_eq!(same, before);
+    let later = Store::timing(&store, now + 1).expect("recomputed timing");
+    assert_eq!(later.now, now + 1);
+}
+
+#[test]
+fn malformed_conf_does_not_start_an_upgrade() {
+    let (_directory, path) = fixture();
+    let conn = Connection::open(&path).expect("write connection");
+    conn.execute(
+        "UPDATE col SET conf = ?1 WHERE id = 1",
+        rusqlite::params!["not json"],
+    )
+    .expect("write malformed conf");
+    drop(conn);
+
+    let mut store = Collection::open(&path).expect("open");
+    assert!(!store.upgrade_scheduler_v2().expect("no upgrade"));
 }

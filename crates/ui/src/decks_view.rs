@@ -483,10 +483,7 @@ impl Root {
                                     .child("7-day forecast unavailable"),
                             )
                     } else {
-                        let today = crate::statistics_view::day_number(
-                            Self::now(),
-                            self.collection_start,
-                        );
+                        let today = i64::from(self.timing(Self::now()).days_elapsed);
                         let peak = self
                             .forecast
                             .iter()

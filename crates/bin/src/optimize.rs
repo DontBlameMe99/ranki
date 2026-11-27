@@ -15,6 +15,7 @@ use ranki_model::RevLog;
 use ranki_model::RevLogKind;
 use ranki_model::Store;
 
+#[cfg(test)]
 const SECONDS_PER_DAY: i64 = 86_400;
 const MILLIS_PER_DAY: i64 = 86_400_000;
 
@@ -29,12 +30,12 @@ const MILLIS_PER_DAY: i64 = 86_400_000;
 pub(super) fn maybe_auto_optimize(
     store: &dyn Store,
     config: &mut Config,
-    now_secs: i64,
+    timing: &ranki_model::Timing,
 ) {
     if !config.scheduler.auto_optimize {
         return;
     }
-    let today = day_number(now_secs);
+    let today = timing.days_elapsed;
     if !day_gate(u64::from(today), u64::from(config.scheduler.last_optimized)) {
         return;
     }
@@ -85,6 +86,7 @@ pub(super) fn maybe_auto_optimize(
     config.scheduler.reviews_since = 0;
 }
 
+#[cfg(test)]
 fn day_number(now_secs: i64) -> u32 {
     u32::try_from(now_secs.div_euclid(SECONDS_PER_DAY)).unwrap_or(u32::MAX)
 }
@@ -113,7 +115,8 @@ fn review_records(history: &[RevLog]) -> Vec<ReviewRecord> {
         previous = Some((log.card_id, log.id));
         records.push(ReviewRecord {
             card_id: log.card_id,
-            rating: log.ease,
+            rating: ranki_model::Rating::from_code(log.ease)
+                .unwrap_or(ranki_model::Rating::Good),
             elapsed_days,
             kind: log.kind,
         });
@@ -132,7 +135,6 @@ mod tests {
     use std::path::Path;
 
     use ranki_model::NewNote;
-    use ranki_model::Rating;
     use ranki_model::RevLog;
     use ranki_model::RevLogKind;
     use ranki_model::ReviewDecision;
@@ -142,6 +144,10 @@ mod tests {
     use super::maybe_auto_optimize;
 
     const NOW: i64 = 2_000_000_000;
+
+    fn timing(now: i64) -> ranki_model::Timing {
+        ranki_model::Timing::v1(now, 0)
+    }
 
     fn collection_with_reviews(path: &Path, count: usize) -> Collection {
         let mut collection =
@@ -168,7 +174,7 @@ mod tests {
                         .saturating_add(base),
                     card_id: card.id,
                     usn: 0,
-                    ease: Rating::Good,
+                    ease: 3,
                     interval: 1,
                     last_interval: 0,
                     factor: 2_500,
@@ -188,14 +194,14 @@ mod tests {
         let mut config = ranki_model::Config::default();
         config.scheduler.last_optimized =
             super::day_number(NOW).saturating_sub(29);
-        maybe_auto_optimize(&collection, &mut config, NOW);
+        maybe_auto_optimize(&collection, &mut config, &timing(NOW));
         assert_eq!(config.scheduler.params.len(), 0);
         // The day gate returns before the review log is read.
         assert_eq!(config.scheduler.reviews_since, 0);
 
         config.scheduler.last_optimized =
             super::day_number(NOW).saturating_sub(30);
-        maybe_auto_optimize(&collection, &mut config, NOW);
+        maybe_auto_optimize(&collection, &mut config, &timing(NOW));
         assert_eq!(config.scheduler.params.len(), 21);
         assert_eq!(config.scheduler.last_optimized, super::day_number(NOW));
         assert_eq!(config.scheduler.reviews_since, 0);
@@ -207,7 +213,7 @@ mod tests {
         let collection = collection_with_reviews(first.path(), 999);
         let mut config = ranki_model::Config::default();
         config.scheduler.last_optimized = 0;
-        maybe_auto_optimize(&collection, &mut config, NOW);
+        maybe_auto_optimize(&collection, &mut config, &timing(NOW));
         assert_eq!(config.scheduler.params.len(), 0);
         assert_eq!(config.scheduler.reviews_since, 999);
 
@@ -215,7 +221,7 @@ mod tests {
         let collection = collection_with_reviews(second.path(), 1_000);
         let mut config = ranki_model::Config::default();
         config.scheduler.last_optimized = 0;
-        maybe_auto_optimize(&collection, &mut config, NOW);
+        maybe_auto_optimize(&collection, &mut config, &timing(NOW));
         assert_eq!(config.scheduler.params.len(), 21);
     }
 
@@ -226,7 +232,7 @@ mod tests {
         let mut config = ranki_model::Config::default();
         config.scheduler.auto_optimize = false;
         let before = config.clone();
-        maybe_auto_optimize(&collection, &mut config, NOW);
+        maybe_auto_optimize(&collection, &mut config, &timing(NOW));
         assert_eq!(config, before);
     }
 
@@ -238,7 +244,7 @@ mod tests {
         config.scheduler.params = vec![2.0; 21];
         config.scheduler.decay = 0.4;
         config.scheduler.last_optimized = 0;
-        maybe_auto_optimize(&collection, &mut config, NOW);
+        maybe_auto_optimize(&collection, &mut config, &timing(NOW));
         assert_eq!(config.scheduler.params.len(), 21);
         assert!((0.1..=0.8).contains(&config.scheduler.decay));
         assert_eq!(config.scheduler.last_optimized, super::day_number(NOW));
