@@ -11,6 +11,8 @@ ranki-model.workspace = true
 rusqlite = { workspace = true, features = ["collation", "functions"] }
 serde.workspace = true
 serde_json.workspace = true
+unicase = "2"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -5,6 +5,7 @@
 )]
 //! Anki's value encodings: ids, guids, field separators and checksums.
 
+use crate::entities;
 use ranki_model::FIELD_SEPARATOR;
 use ranki_model::Id;
 use ranki_model::StoreError;
@@ -16,6 +17,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+use unicode_normalization::UnicodeNormalization;
 
 const DAY_SECS: i64 = 86_400;
 static GUID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -92,14 +94,32 @@ pub fn decode_tags(tags: &str) -> Vec<String> {
 }
 
 /// Anki strips HTML and resolves entities before computing sort fields and checksums.
+#[must_use]
 pub fn sort_field(fields: &[String], index: usize) -> String {
-    fields
-        .get(index)
-        .map_or_else(String::new, |value| strip_html(value))
+    sort_field_with(fields, index, true)
 }
 
+/// Computes a sort field with explicit note-text normalization.
+pub fn sort_field_with(
+    fields: &[String],
+    index: usize,
+    normalize_text: bool,
+) -> String {
+    let field = fields.get(index).map_or("", String::as_str);
+    strip_html_preserving_media_filenames_with(field, normalize_text)
+}
+
+/// Computes the first-field checksum used by Anki.
+#[must_use]
 pub fn checksum(field: &str) -> i32 {
-    let digest = Sha1::digest(strip_html(field).as_bytes());
+    checksum_with(field, true)
+}
+
+/// Computes a checksum with explicit note-text normalization.
+pub fn checksum_with(field: &str, normalize_text: bool) -> i32 {
+    let text =
+        strip_html_preserving_media_filenames_with(field, normalize_text);
+    let digest = Sha1::digest(text.as_bytes());
     let bytes = digest.get(..4).unwrap_or_default();
     let unsigned = u32::from_be_bytes([
         bytes.first().copied().unwrap_or(0),
@@ -108,6 +128,47 @@ pub fn checksum(field: &str) -> i32 {
         bytes.get(3).copied().unwrap_or(0),
     ]);
     signed_i32(unsigned)
+}
+
+/// Removes the control characters Anki rejects and optionally normalizes NFC.
+pub fn normalize_field(field: &mut String, normalize_text: bool) {
+    if field.chars().any(invalid_char_for_field) {
+        field.retain(|character| !invalid_char_for_field(character));
+    }
+    if normalize_text && !unicode_normalization::is_nfc(field) {
+        *field = field.nfc().collect();
+    }
+}
+
+const fn invalid_char_for_field(character: char) -> bool {
+    character.is_ascii_control() && character != '\n' && character != '\t'
+}
+
+/// Converts one field to the text Anki uses for display, sorting, and checking.
+///
+/// Media references remain as filenames so `<img src="x.png">` and
+/// `[sound:x.mp3]` both become `x.png` and `x.mp3` respectively.
+#[must_use]
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "Anki's text helper exposes both independent flags"
+)]
+pub fn html_to_text_line(
+    html: &str,
+    preserve_media_filenames: bool,
+    normalize_text: bool,
+) -> String {
+    let mut field = html.to_owned();
+    normalize_field(&mut field, normalize_text);
+    let spaced = replace_persistent_spacers(&field);
+    let plain = remove_type_tags(&spaced);
+    let with_sound = replace_sound_tags(&plain, preserve_media_filenames);
+    let stripped = if preserve_media_filenames {
+        strip_html_preserving_media_filenames(&with_sound)
+    } else {
+        remove_tags(&with_sound)
+    };
+    stripped.trim().to_owned()
 }
 
 pub fn csum_value(checksum: i32) -> i64 {
@@ -180,9 +241,245 @@ pub(crate) fn append_varint(bytes: &mut Vec<u8>, mut value: u64) {
     }
     bytes.push(u8::try_from(value & 0x7f).unwrap_or(0));
 }
+#[must_use]
 pub fn strip_html(input: &str) -> String {
-    let without_tags = remove_tags(input);
-    decode_entities(&without_tags)
+    decode_entities(&remove_tags(input)).replace('\u{a0}', " ")
+}
+
+#[must_use]
+pub fn strip_html_preserving_media_filenames(html: &str) -> String {
+    strip_html_preserving_media_filenames_with(html, false)
+}
+
+#[must_use]
+pub fn strip_html_preserving_media_filenames_with(
+    html: &str,
+    normalize_text: bool,
+) -> String {
+    let mut field = html.to_owned();
+    normalize_field(&mut field, normalize_text);
+    let with_media = replace_media_tags(&field);
+    let stripped = remove_tags(&with_media);
+    decode_entities(&stripped).replace('\u{a0}', " ")
+}
+
+fn replace_persistent_spacers(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(character) = rest.chars().next() {
+        if character == '\n' {
+            output.push(' ');
+            rest = rest.get(1..).unwrap_or("");
+            continue;
+        }
+        if character == '<' {
+            if let Some(length) = br_spacer_len(rest) {
+                output.push(' ');
+                rest = rest.get(length..).unwrap_or("");
+                continue;
+            }
+            if starts_with_ci(rest, "<div>") {
+                output.push(' ');
+                rest = rest.get(5..).unwrap_or("");
+                continue;
+            }
+        }
+        output.push(character);
+        rest = rest.get(character.len_utf8()..).unwrap_or("");
+    }
+    output
+}
+
+fn br_spacer_len(rest: &str) -> Option<usize> {
+    if !starts_with_ci(rest, "<br") {
+        return None;
+    }
+    let bytes = rest.as_bytes();
+    let mut index = 3usize;
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index = index.saturating_add(1);
+    }
+    if bytes.get(index) == Some(&b'/') {
+        index = index.saturating_add(1);
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index = index.saturating_add(1);
+        }
+    }
+    if bytes.get(index) == Some(&b'>') {
+        Some(index.saturating_add(1))
+    } else {
+        None
+    }
+}
+
+fn starts_with_ci(text: &str, prefix: &str) -> bool {
+    text.len() >= prefix.len()
+        && text
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+fn remove_type_tags(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("[[type:") {
+        let (prefix, tail) = rest.split_at(start);
+        output.push_str(prefix);
+        if let Some(end) = tail.find("]]") {
+            let (_, after) = tail.split_at(end.saturating_add(2));
+            rest = after;
+        } else {
+            output.push_str(tail);
+            return output;
+        }
+    }
+    output.push_str(rest);
+    output
+}
+
+fn replace_sound_tags(input: &str, preserve_filename: bool) -> String {
+    let needle = "[sound:";
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find(needle) {
+        let (prefix, tail) = rest.split_at(start);
+        output.push_str(prefix);
+        let after_open = tail.get(needle.len()..).unwrap_or("");
+        if let Some(end) = after_open.find(']') {
+            let (filename, after) = after_open.split_at(end);
+            if preserve_filename {
+                output.push_str(filename);
+            }
+            rest = after.get(1..).unwrap_or("");
+        } else {
+            output.push_str(tail);
+            return output;
+        }
+    }
+    output.push_str(rest);
+    output
+}
+
+fn replace_media_tags(html: &str) -> String {
+    let mut output = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find('<') {
+        let (prefix, tail) = rest.split_at(start);
+        output.push_str(prefix);
+        let Some(end) = tag_end(tail) else {
+            output.push_str(tail);
+            return output;
+        };
+        let (tag, after) = tail.split_at(end);
+        if let Some(filename) = media_filename(tag) {
+            output.push(' ');
+            output.push_str(filename);
+            output.push(' ');
+        } else {
+            output.push_str(tag);
+        }
+        rest = after;
+    }
+    output.push_str(rest);
+    output
+}
+
+fn tag_end(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.first() != Some(&b'<') {
+        return None;
+    }
+    let mut quote = None;
+    for index in 1..bytes.len() {
+        let byte = *bytes.get(index)?;
+        if let Some(marker) = quote {
+            if byte == marker {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' => quote = Some(byte),
+            b'>' => return Some(index.saturating_add(1)),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn media_filename(tag: &str) -> Option<&str> {
+    let inner = tag.strip_prefix('<')?.strip_suffix('>')?;
+    let bytes = inner.as_bytes();
+    let mut index = 0usize;
+    skip_whitespace(bytes, &mut index);
+    if bytes.get(index) == Some(&b'/') {
+        return None;
+    }
+    let name_start = index;
+    while bytes.get(index).is_some_and(|byte| {
+        !byte.is_ascii_whitespace() && *byte != b'>' && *byte != b'/'
+    }) {
+        index = index.saturating_add(1);
+    }
+    let name = inner.get(name_start..index)?;
+    if !["img", "audio", "video", "object", "source"]
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    {
+        return None;
+    }
+    loop {
+        skip_whitespace(bytes, &mut index);
+        match bytes.get(index) {
+            None | Some(b'>' | b'/') => return None,
+            Some(_) => {}
+        }
+        let attribute_start = index;
+        while bytes.get(index).is_some_and(|byte| {
+            !byte.is_ascii_whitespace() && *byte != b'=' && *byte != b'>'
+        }) {
+            index = index.saturating_add(1);
+        }
+        let attribute = inner.get(attribute_start..index)?;
+        skip_whitespace(bytes, &mut index);
+        if bytes.get(index) != Some(&b'=') {
+            continue;
+        }
+        index = index.saturating_add(1);
+        skip_whitespace(bytes, &mut index);
+        let value = if let Some(b'"' | b'\'') = bytes.get(index) {
+            let quote = *bytes.get(index)?;
+            let value_start = index.saturating_add(1);
+            index = value_start;
+            while bytes.get(index).is_some_and(|byte| *byte != quote) {
+                index = index.saturating_add(1);
+            }
+            let value = inner.get(value_start..index)?;
+            if bytes.get(index) == Some(&quote) {
+                index = index.saturating_add(1);
+            }
+            value
+        } else {
+            let value_start = index;
+            while bytes.get(index).is_some_and(|byte| {
+                !byte.is_ascii_whitespace() && *byte != b'>'
+            }) {
+                index = index.saturating_add(1);
+            }
+            inner.get(value_start..index)?
+        };
+        if attribute.eq_ignore_ascii_case("src")
+            || attribute.eq_ignore_ascii_case("data")
+        {
+            return Some(value);
+        }
+    }
+}
+
+fn skip_whitespace(bytes: &[u8], index: &mut usize) {
+    while bytes.get(*index).is_some_and(u8::is_ascii_whitespace) {
+        *index = index.saturating_add(1);
+    }
 }
 
 /// Reads a length-delimited protobuf field from Anki 25's `config` blobs.
@@ -705,10 +1002,29 @@ fn remove_tags(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut rest = input;
     while let Some(start) = rest.find('<') {
-        output.push_str(rest.get(..start).unwrap_or(""));
-        let tail = rest.get(start..).unwrap_or("");
+        let (prefix, tail) = rest.split_at(start);
+        output.push_str(prefix);
+        let lowered = tail.to_ascii_lowercase();
+        let mut skipped = None;
+        for (open, close) in [
+            ("<!--", "-->"),
+            ("<style", "</style>"),
+            ("<script", "</script>"),
+        ] {
+            if lowered.starts_with(open) {
+                if let Some(end) = lowered.find(close) {
+                    skipped = Some(end.saturating_add(close.len()));
+                }
+                break;
+            }
+        }
+        if let Some(length) = skipped {
+            rest = tail.get(length..).unwrap_or("");
+            continue;
+        }
         if let Some(end) = tail.find('>') {
-            rest = tail.get(end.saturating_add(1)..).unwrap_or("");
+            let (_, after) = tail.split_at(end.saturating_add(1));
+            rest = after;
         } else {
             output.push_str(tail);
             return output;
@@ -722,38 +1038,56 @@ fn decode_entities(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut rest = input;
     while let Some(start) = rest.find('&') {
-        output.push_str(rest.get(..start).unwrap_or(""));
-        let tail = rest.get(start..).unwrap_or("");
-        let Some(end) = tail.find(';') else {
+        let (prefix, tail) = rest.split_at(start);
+        output.push_str(prefix);
+        let after = tail.get(1..).unwrap_or("");
+        let Some(end) = after.find(';') else {
             output.push_str(tail);
             return output;
         };
-        let entity = tail.get(1..end).unwrap_or("");
-        output.push(decode_entity(entity).unwrap_or('&'));
-        rest = tail.get(end.saturating_add(1)..).unwrap_or("");
+        let entity = after.get(..end).unwrap_or("");
+        if entity.is_empty()
+            || entity.len() > 32
+            || entity.chars().any(char::is_whitespace)
+        {
+            output.push('&');
+            rest = after;
+            continue;
+        }
+        if let Some(decoded) = decode_entity(entity) {
+            if decoded == '\u{a0}' {
+                output.push(' ');
+            } else {
+                output.push(decoded);
+            }
+            rest = after.get(end.saturating_add(1)..).unwrap_or("");
+        } else {
+            output.push('&');
+            rest = after;
+        }
     }
     output.push_str(rest);
     output
 }
 
 fn decode_entity(entity: &str) -> Option<char> {
-    match entity {
-        "amp" => Some('&'),
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "quot" => Some('"'),
-        "apos" | "#39" => Some('\''),
-        "nbsp" | "#160" => Some('\u{00a0}'),
-        _ => entity
-            .strip_prefix('#')
-            .and_then(|value| value.parse::<u32>().ok())
-            .and_then(char::from_u32),
+    if let Some(digits) = entity.strip_prefix('#') {
+        let (radix, numeric) = digits
+            .strip_prefix('x')
+            .or_else(|| digits.strip_prefix('X'))
+            .map_or((10, digits), |hex| (16, hex));
+        let code = u32::from_str_radix(numeric, radix).ok()?;
+        return char::from_u32(code);
     }
+    entities::named(entity).and_then(|value| value.chars().next())
 }
 
 #[cfg(test)]
 mod tests {
     use super::anki_base91;
+    use super::checksum;
+    use super::html_to_text_line;
+    use super::sort_field;
 
     #[test]
     fn base91_matches_anki_vectors() {
@@ -766,5 +1100,109 @@ mod tests {
     #[test]
     fn normal_deck_kind_declares_a_normal_deck() {
         assert_eq!(super::normal_deck_kind(1), vec![0x0a, 0x02, 0x08, 0x01]);
+    }
+    #[test]
+    fn html_to_text_matches_anki_vectors() {
+        assert_eq!(html_to_text_line("plain", true, true), "plain");
+        assert_eq!(
+            html_to_text_line(
+                "<b>hello</b><br>world<div>again</div>",
+                true,
+                true
+            ),
+            "hello world again"
+        );
+        assert_eq!(
+            html_to_text_line(
+                "<img src=photo.png> [sound:voice.mp3]",
+                true,
+                true
+            ),
+            "photo.png  voice.mp3"
+        );
+        assert_eq!(
+            html_to_text_line(
+                "<img src=photo.png> [sound:voice.mp3]",
+                false,
+                true
+            ),
+            ""
+        );
+        assert_eq!(
+            html_to_text_line(
+                "<audio src='a.mp3'><source data=b.ogg>",
+                true,
+                true
+            ),
+            "a.mp3  b.ogg"
+        );
+        assert_eq!(
+            html_to_text_line(
+                "<!--hidden--><style>x</style><script>y</script>kept",
+                true,
+                true
+            ),
+            "kept"
+        );
+        assert_eq!(
+            html_to_text_line("before <b>after", true, true),
+            "before after"
+        );
+        assert_eq!(
+            html_to_text_line("before <b after", true, true),
+            "before <b after"
+        );
+        assert_eq!(html_to_text_line("[[type:cloze]]word", true, true), "word");
+    }
+
+    #[test]
+    fn entities_and_whitespace_match_anki() {
+        assert_eq!(
+            html_to_text_line("&amp; &lt; &gt; &quot; &apos;", true, true),
+            "& < > \" '"
+        );
+        assert_eq!(
+            html_to_text_line("&Alpha; &#65; &#x1F600;", true, true),
+            "Α A 😀"
+        );
+        assert_eq!(html_to_text_line("a&nbsp;b&#160;c", true, true), "a b c");
+        assert_eq!(html_to_text_line("a\u{a0}b", true, true), "a b");
+        assert_eq!(html_to_text_line("&unknown;", true, true), "&unknown;");
+    }
+
+    #[test]
+    fn normalization_and_checksums_use_the_same_field_text() {
+        let decomposed = "e\u{301}";
+        assert_eq!(html_to_text_line(decomposed, true, true), "é");
+        assert_eq!(html_to_text_line(decomposed, true, false), decomposed);
+        assert_eq!(html_to_text_line("a\u{0001}b\nc", true, true), "ab c");
+        assert_eq!(checksum("\u{0001}<b>A</b>"), checksum("A"));
+        let fields = vec![String::from("<b>A</b>"), String::from("B")];
+        assert_eq!(sort_field(&fields, 0), "A");
+        assert_eq!(sort_field(&fields, 1), "B");
+        assert_eq!(sort_field(&fields, 9), "");
+    }
+    #[test]
+    fn checksums_and_sort_fields_follow_anki_stripping() {
+        let fields = vec![
+            String::from("a<br>b"),
+            String::from("[sound:x]"),
+            String::from("<img src=\"sound.png\">y"),
+            String::from("a&nbsp;b"),
+        ];
+        assert_eq!(sort_field(&fields, 0), "ab");
+        assert_eq!(sort_field(&fields, 1), "[sound:x]");
+        assert_eq!(sort_field(&fields, 2), " sound.png y");
+        assert_eq!(sort_field(&fields, 3), "a b");
+        assert_eq!(checksum("a<br>b"), checksum("ab"));
+        assert_ne!(checksum("[sound:x]"), checksum("x"));
+        assert_eq!(
+            checksum("<img src=\"sound.png\">y"),
+            checksum(" sound.png y")
+        );
+        assert_ne!(
+            checksum("<img src=\"sound.png\">y"),
+            checksum("sound.png y")
+        );
     }
 }

@@ -5452,6 +5452,8 @@ dependencies = [
  "serde_json",
  "sha1",
  "tempfile",
+ "unicase",
+ "unicode-normalization",
 ]
 
 [[package]]

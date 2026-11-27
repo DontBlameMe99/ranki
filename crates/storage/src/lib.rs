@@ -22,17 +22,19 @@
 //! All values are bound as SQL parameters.
 
 mod anki;
+mod entities;
 mod options;
 mod records;
 mod reopening;
 mod schema;
 mod search;
+mod tags;
 
 use std::cell::OnceCell;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Display;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::slice;
@@ -49,17 +51,23 @@ pub use anki::encode_deck_name;
 pub use anki::normal_deck_kind;
 pub use anki::protobuf_floats;
 pub use anki::with_deck_kind_config_id;
+pub use anki::{
+    checksum, html_to_text_line, sort_field, strip_html,
+    strip_html_preserving_media_filenames,
+};
 pub use reopening::ReopeningCollection;
 
 pub use records::models_from_tables_with_prefix;
 pub use records::models_to_json;
 
+use ranki_model::AddNoteOptions;
 use ranki_model::Card;
 use ranki_model::DEFAULT_DECK_ID;
 use ranki_model::Deck;
 use ranki_model::DeckStats;
 use ranki_model::DeckSteps;
 use ranki_model::DeckTotals;
+use ranki_model::DuplicateScope;
 use ranki_model::Id;
 use ranki_model::NewNote;
 use ranki_model::Note;
@@ -612,18 +620,7 @@ impl Store for Collection {
     }
 
     fn tags(&self) -> Result<Vec<String>, StoreError> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT tags FROM notes")
-            .map_err(backend)?;
-        let rows = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(backend)?;
-        let mut tags = BTreeSet::new();
-        for row in rows {
-            tags.extend(anki::decode_tags(&row.map_err(backend)?));
-        }
-        Ok(tags.into_iter().collect())
+        tags::all(&self.conn)
     }
 
     fn ensure_model(
@@ -786,6 +783,18 @@ impl Store for Collection {
     }
 
     fn add_note(&mut self, note: &NewNote) -> Result<Vec<Id>, StoreError> {
+        self.add_note_with_options(note, &AddNoteOptions::default())
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "note writes keep validation and card generation in one transaction"
+    )]
+    fn add_note_with_options(
+        &mut self,
+        note: &NewNote,
+        options: &AddNoteOptions,
+    ) -> Result<Vec<Id>, StoreError> {
         let model = self
             .model_list()?
             .into_iter()
@@ -799,15 +808,40 @@ impl Store for Collection {
         if !self.deck_subtree(note.deck_id)?.contains(&note.deck_id) {
             return Err(StoreError::NotFound(format!("deck {}", note.deck_id)));
         }
+
+        let mut fields = note.fields.clone();
+        for field in &mut fields {
+            anki::normalize_field(field, true);
+        }
+        let first = fields.first().map_or("", String::as_str);
+        let checksum = anki::checksum_with(first, true);
+        let stripped_first =
+            anki::strip_html_preserving_media_filenames_with(first, true);
+        if stripped_first.trim().is_empty() {
+            return Err(invalid("empty question"));
+        }
+        if !options.allow_duplicate
+            && duplicate_exists(
+                &self.conn,
+                note.model_id,
+                checksum,
+                &stripped_first,
+                &options.duplicate_scope,
+            )?
+        {
+            return Err(invalid("duplicate"));
+        }
         let id = fresh_id(&self.conn, "notes")?;
         let guid = anki::guid(id)?;
         let modified = anki::now_secs()?;
-        let first = note.fields.first().map_or("", String::as_str);
-        let sort_field =
-            anki::sort_field(&note.fields, usize::from(model.sort_field_index));
-        let checksum = anki::checksum(first);
+        let sort_field = anki::sort_field_with(
+            &fields,
+            usize::from(model.sort_field_index),
+            true,
+        );
         let transaction = self.conn.transaction().map_err(backend)?;
         let usn = update_col(&transaction, false)?;
+        let tags = tags::canonify(&note.tags, &transaction, usn)?;
         let next_position = next_position(&transaction)?;
         transaction
             .execute(
@@ -819,14 +853,14 @@ impl Store for Collection {
                     note.model_id,
                     modified,
                     usn,
-                    anki::encode_tags(&note.tags),
-                    anki::encode_fields(&note.fields),
+                    anki::encode_tags(&tags),
+                    anki::encode_fields(&fields),
                     sort_field,
                     anki::csum_value(checksum),
                 ],
             )
             .map_err(backend)?;
-        let ordinals = model.card_ordinals(&note.fields);
+        let ordinals = model.card_ordinals(&fields);
         let mut cards: Vec<Id> = Vec::with_capacity(ordinals.len());
         for (offset, ordinal) in ordinals.into_iter().enumerate() {
             let card_id = fresh_id(&transaction, "cards")?;
@@ -878,6 +912,11 @@ impl Store for Collection {
         if !self.deck_subtree(deck_id)?.contains(&deck_id) {
             return Err(StoreError::NotFound(format!("deck {deck_id}")));
         }
+        let mut fields = note.fields.clone();
+        for field in &mut fields {
+            anki::normalize_field(field, true);
+        }
+        let first = fields.first().map_or("", String::as_str);
         let transaction = self.conn.transaction().map_err(backend)?;
         let exists: bool = transaction
             .query_row(
@@ -889,7 +928,7 @@ impl Store for Collection {
         if !exists {
             return Err(StoreError::NotFound(format!("note {}", note.id)));
         }
-        let mut expected = model.card_ordinals(&note.fields);
+        let mut expected = model.card_ordinals(&fields);
         expected.sort_unstable();
         let mut statement = transaction
             .prepare("SELECT ord FROM cards WHERE nid = ?1 ORDER BY ord")
@@ -909,25 +948,26 @@ impl Store for Collection {
         }
         drop(statement);
         let usn = update_col(&transaction, false)?;
+        let tags = tags::canonify(&note.tags, &transaction, usn)?;
         let modified = anki::now_secs()?;
-        let first = note.fields.first().map_or("", String::as_str);
-        let sort_field =
-            anki::sort_field(&note.fields, usize::from(model.sort_field_index));
-        let checksum = anki::checksum(first);
+        let sort_field = anki::sort_field_with(
+            &fields,
+            usize::from(model.sort_field_index),
+            true,
+        );
+        let checksum = anki::checksum_with(first, true);
         transaction
             .execute(
                 "UPDATE notes SET mid = ?1, mod = ?2, usn = ?3, tags = ?4, flds = ?5, \
-                 sfld = ?6, csum = ?7, flags = ?8, data = ?9 WHERE id = ?10",
+                 sfld = ?6, csum = ?7 WHERE id = ?8",
                 params![
                     note.model_id,
                     modified,
                     usn,
-                    anki::encode_tags(&note.tags),
-                    anki::encode_fields(&note.fields),
+                    anki::encode_tags(&tags),
+                    anki::encode_fields(&fields),
                     sort_field,
                     anki::csum_value(checksum),
-                    note.flags,
-                    note.data,
                     note.id,
                 ],
             )
@@ -1327,7 +1367,7 @@ fn minutes_to_seconds(minutes: f64) -> Option<u32> {
 /// Returns an error when SQLite cannot install the collation.
 pub fn register_collations(conn: &Connection) -> Result<(), StoreError> {
     conn.create_collation("unicase", |left, right| {
-        left.to_lowercase().cmp(&right.to_lowercase())
+        unicase::UniCase::new(left).cmp(&unicase::UniCase::new(right))
     })
     .map_err(backend)
 }
@@ -1360,6 +1400,83 @@ fn fnv_hash(first: i64, second: i64) -> i64 {
         }
     }
     i64::from_ne_bytes(hash.to_ne_bytes())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the duplicate check needs checksum, scope, and field text inputs"
+)]
+fn duplicate_exists(
+    conn: &Connection,
+    model_id: Id,
+    checksum: i32,
+    first_field: &str,
+    scope: &DuplicateScope,
+) -> Result<bool, StoreError> {
+    let mut sql = String::from("SELECT id, flds FROM notes WHERE csum = ?1");
+    let mut parameters = vec![SqlValue::Integer(anki::csum_value(checksum))];
+    let next_parameter = 2usize;
+    if !scope.check_all_models {
+        let _ = write!(sql, " AND mid = ?{next_parameter}");
+        parameters.push(SqlValue::Integer(model_id));
+    }
+
+    let allowed_decks = if scope.use_deck {
+        let Some(deck_id) = scope.deck_id else {
+            return Ok(false);
+        };
+        if scope.check_children {
+            let decks = deck_list_from(conn)?;
+            let Some(name) = decks.iter().find(|deck| deck.id == deck_id)
+            else {
+                return Ok(false);
+            };
+            deck_subtree_ids(&decks, &name.name)
+        } else {
+            vec![deck_id]
+        }
+    } else {
+        Vec::new()
+    };
+
+    let mut statement = conn.prepare(&sql).map_err(backend)?;
+    let rows = statement
+        .query_map(params_from_iter(parameters), |row| {
+            Ok((row.get::<_, Id>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(backend)?;
+    for row in rows {
+        let (id, fields) = row.map_err(backend)?;
+        let note_fields = anki::decode_fields(&fields);
+        let other = note_fields.first().map_or("", String::as_str);
+        if anki::strip_html_preserving_media_filenames(other) != first_field {
+            continue;
+        }
+        if scope.use_deck && !note_has_card_in(conn, id, &allowed_decks)? {
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn note_has_card_in(
+    conn: &Connection,
+    note_id: Id,
+    deck_ids: &[Id],
+) -> Result<bool, StoreError> {
+    let mut statement = conn
+        .prepare("SELECT did FROM cards WHERE nid = ?1")
+        .map_err(backend)?;
+    let rows = statement
+        .query_map([note_id], |row| row.get::<_, Id>(0))
+        .map_err(backend)?;
+    for row in rows {
+        if deck_ids.contains(&row.map_err(backend)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn backend(error: impl Display) -> StoreError {

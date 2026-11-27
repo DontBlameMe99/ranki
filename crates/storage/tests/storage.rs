@@ -11,10 +11,12 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use ranki_core::FsrsScheduler;
+use ranki_model::AddNoteOptions;
 use ranki_model::CardQueue;
 use ranki_model::CardType;
 use ranki_model::DeckStats;
 use ranki_model::DeckSteps;
+use ranki_model::DuplicateScope;
 use ranki_model::NewNote;
 use ranki_model::Rating;
 use ranki_model::RevLog;
@@ -998,7 +1000,12 @@ fn collection_modified_increases_with_consecutive_writes() {
     let mut store = Collection::open(&path).expect("open");
     let mut previous = store.collection_modified().expect("modified");
     for _ in 0..3 {
-        store.add_note(&note(&["one", "answer"], &[])).expect("add");
+        store
+            .add_note_with_options(
+                &note(&["one", "answer"], &[]),
+                &AddNoteOptions::allowing_duplicates(),
+            )
+            .expect("add");
         let current = store.collection_modified().expect("modified");
         assert!(current > previous, "{current} <= {previous}");
         previous = current;
@@ -1014,7 +1021,12 @@ fn collection_modified_saturates_at_the_end_of_the_range() {
     drop(conn);
     let mut store = Collection::open(&path).expect("open");
     for _ in 0..2 {
-        store.add_note(&note(&["one", "answer"], &[])).expect("add");
+        store
+            .add_note_with_options(
+                &note(&["one", "answer"], &[]),
+                &AddNoteOptions::allowing_duplicates(),
+            )
+            .expect("add");
         assert_eq!(
             store.collection_modified().expect("modified"),
             i64::MAX,
@@ -1915,6 +1927,298 @@ fn deck_steps_read_schema18_preset() {
             relearning: vec![30],
         }
     );
+}
+
+#[test]
+fn add_note_enforces_first_field_rules_with_explicit_allowance() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    assert!(matches!(
+        store.add_note(&note(&["<b> </b>", "back"], &[])),
+        Err(StoreError::InvalidData(_))
+    ));
+    store
+        .add_note(&note(&["Question", "back"], &[]))
+        .expect("first note");
+    let duplicate = note(&["<b>Question</b>", "back"], &[]);
+    assert!(matches!(
+        store.add_note(&duplicate),
+        Err(StoreError::InvalidData(_))
+    ));
+    store
+        .add_note_with_options(
+            &duplicate,
+            &AddNoteOptions::allowing_duplicates(),
+        )
+        .expect("explicitly allowed duplicate");
+}
+
+#[test]
+fn duplicate_detection_uses_the_stored_checksum_input() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(&["<b>x", "back"], &[]))
+        .expect("markup note");
+    assert!(store.add_note(&note(&["x", "back"], &[])).is_err());
+
+    store
+        .add_note(&note(&["<img src=\"sound.png\">y", "back"], &[]))
+        .expect("media note");
+    assert!(
+        store
+            .add_note(&note(&[" sound.png y", "back"], &[]))
+            .is_err()
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one test covers each duplicate-scope flag"
+)]
+fn duplicate_scope_controls_deck_model_and_invalid_deck_checks() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let other = store.create_deck("Other").expect("deck");
+    store
+        .add_note(&note(&["Scoped", "back"], &[]))
+        .expect("first note");
+
+    let options = AddNoteOptions {
+        duplicate_scope: DuplicateScope {
+            use_deck: true,
+            deck_id: Some(other.id),
+            ..DuplicateScope::default()
+        },
+        ..AddNoteOptions::default()
+    };
+    store
+        .add_note_with_options(&note(&["Scoped", "back"], &[]), &options)
+        .expect("different deck is not a duplicate");
+    assert!(store.add_note(&note(&["Scoped", "back"], &[])).is_err());
+
+    let _parent_deck = store.create_deck("Parent").expect("parent deck");
+    let child_deck = store.create_deck("Parent::Child").expect("child deck");
+    let parent = store
+        .decks()
+        .expect("decks")
+        .into_iter()
+        .find(|deck| deck.name == "Parent")
+        .expect("parent deck");
+    store
+        .add_note(&NewNote {
+            deck_id: child_deck.id,
+            ..note(&["Child scoped", "back"], &[])
+        })
+        .expect("child note");
+    let mut child_scope = DuplicateScope {
+        use_deck: true,
+        deck_id: Some(parent.id),
+        ..DuplicateScope::default()
+    };
+    assert!(
+        store
+            .add_note_with_options(
+                &NewNote {
+                    deck_id: parent.id,
+                    ..note(&["Child scoped", "back"], &[])
+                },
+                &AddNoteOptions {
+                    duplicate_scope: child_scope,
+                    ..AddNoteOptions::default()
+                },
+            )
+            .is_ok()
+    );
+    child_scope.check_children = true;
+    assert!(
+        store
+            .add_note_with_options(
+                &NewNote {
+                    deck_id: parent.id,
+                    ..note(&["Child scoped", "back"], &[])
+                },
+                &AddNoteOptions {
+                    duplicate_scope: child_scope,
+                    ..AddNoteOptions::default()
+                },
+            )
+            .is_err()
+    );
+
+    store
+        .add_note(&note(&["All models", "back"], &[]))
+        .expect("note for model scope");
+    let note_id = store
+        .find_cards("All models")
+        .expect("find")
+        .first()
+        .and_then(|card_id| store.card(*card_id).expect("card"))
+        .expect("note")
+        .note_id;
+    Connection::open(&path)
+        .expect("open sqlite")
+        .execute("UPDATE notes SET mid = 99 WHERE id = ?1", [note_id])
+        .expect("change model");
+    assert!(store.add_note(&note(&["All models", "back"], &[])).is_ok());
+    let all_models = AddNoteOptions {
+        duplicate_scope: DuplicateScope {
+            check_all_models: true,
+            ..DuplicateScope::default()
+        },
+        ..AddNoteOptions::default()
+    };
+    assert!(
+        store
+            .add_note_with_options(
+                &note(&["All models", "back"], &[]),
+                &all_models
+            )
+            .is_err()
+    );
+
+    let missing_deck = AddNoteOptions {
+        duplicate_scope: DuplicateScope {
+            use_deck: true,
+            deck_id: None,
+            ..DuplicateScope::default()
+        },
+        ..AddNoteOptions::default()
+    };
+    assert!(
+        store
+            .add_note_with_options(
+                &note(&["Scoped", "back"], &[]),
+                &missing_deck
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn tags_are_canonified_and_registered_in_col_tags() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(
+            &["front", "back"],
+            &[
+                " Foo  BAR ",
+                "foo::bar",
+                "\u{3000}Ten\u{3000}",
+                "X::Y",
+                "X",
+                "x::z",
+                "a\u{0001}b",
+            ],
+        ))
+        .expect("add note");
+    let card = store.find_cards("").expect("find")[0];
+    let saved = store.card(card).expect("card").expect("exists");
+    let note = store.note(saved.note_id).expect("note").expect("exists");
+    assert_eq!(
+        note.tags,
+        ["ab", "BAR", "Foo", "Foo::bar", "Ten", "X", "X::Y", "X::z"]
+    );
+    assert_eq!(store.tags().expect("tags"), note.tags);
+
+    let conn = read_only(&path);
+    let raw: String = conn
+        .query_row("SELECT tags FROM col WHERE id = 1", [], |row| row.get(0))
+        .expect("col tags");
+    let registry: Value = serde_json::from_str(&raw).expect("parse col tags");
+    let names: Vec<&str> = registry
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(names.len(), 8);
+    assert!(names.contains(&"Foo::bar"));
+}
+
+#[test]
+fn tags_are_registered_in_schema18_tags_table() {
+    let (_directory, path) = fixture();
+    {
+        let conn = Connection::open(&path).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE tags (
+                 tag TEXT NOT NULL PRIMARY KEY,
+                 usn INTEGER NOT NULL,
+                 collapsed INTEGER NOT NULL
+             );
+             UPDATE col SET ver = 18 WHERE id = 1;",
+        )
+        .expect("schema-18 tags table");
+    }
+    let mut store = Collection::open(&path).expect("open");
+    store
+        .add_note(&note(
+            &["front", "back"],
+            &["Existing", "existing::child", "EXISTING::sibling"],
+        ))
+        .expect("add note");
+    let card = store.find_cards("").expect("find")[0];
+    let saved = store.card(card).expect("card").expect("exists");
+    let note = store.note(saved.note_id).expect("note").expect("exists");
+    assert_eq!(
+        note.tags,
+        ["Existing", "Existing::child", "Existing::sibling"]
+    );
+    assert_eq!(store.tags().expect("tags"), note.tags);
+
+    let conn = read_only(&path);
+    let mut statement = conn
+        .prepare("SELECT tag FROM tags ORDER BY tag")
+        .expect("prepare");
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query");
+    let registered: Vec<String> = rows.map(|row| row.expect("row")).collect();
+    assert_eq!(registered, note.tags);
+}
+
+#[test]
+fn update_note_preserves_identity_flags_data_and_card_state() {
+    let (_directory, path) = fixture();
+    let mut store = Collection::open(&path).expect("open");
+    let ids = store
+        .add_note(&note(&["old", "back"], &["keep"]))
+        .expect("add note");
+    let card = store.card(ids[0]).expect("card").expect("exists");
+    let connection = Connection::open(&path).expect("open sqlite");
+    connection
+        .execute(
+            "UPDATE notes SET guid = 'stable', flags = 7, data = 'meta' WHERE id = ?1",
+            [card.note_id],
+        )
+        .expect("seed identity");
+    connection
+        .execute(
+            "UPDATE cards SET ivl = 42, reps = 9, queue = 2 WHERE id = ?1",
+            [card.id],
+        )
+        .expect("seed scheduling");
+    drop(connection);
+
+    let mut edited = store.note(card.note_id).expect("note").expect("exists");
+    edited.fields = vec![String::from("new"), String::from("back")];
+    edited.guid = String::from("wrong");
+    edited.flags = 0;
+    edited.data = String::from("ignored");
+    store.update_note(&edited, 1).expect("update");
+
+    let saved = store.note(card.note_id).expect("note").expect("exists");
+    assert_eq!(saved.guid, "stable");
+    assert_eq!(saved.flags, 7);
+    assert_eq!(saved.data, "meta");
+    assert_eq!(saved.tags, ["keep"]);
+    let saved_card = store.card(card.id).expect("card").expect("exists");
+    assert_eq!(saved_card.interval, 42);
+    assert_eq!(saved_card.reps, 9);
+    assert_eq!(saved_card.queue, ranki_model::CardQueue::Review);
 }
 
 fn pb_floats(field: u32, values: &[f32]) -> Vec<u8> {
