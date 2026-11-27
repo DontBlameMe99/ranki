@@ -25,14 +25,14 @@
   "metrics": {
     "connect/roundtrip/find-cards": {
       "budget_ms": 100.0,
-      "median_ms": 0.5226919999999999,
+      "median_ms": 0.49298400000000003,
       "method": 1,
       "repeat": 1,
       "samples": 10,
-      "sha": "5482c826f02a233325c7e67e842b8152b0b31e64",
-      "updated_at": "2026-11-25T22:26:47.688916+00:00",
+      "sha": "c22c79b16ea87b0fe574bd4361630cf3035f239c",
+      "updated_at": "2026-11-27T02:44:05.047505+00:00",
       "warmup": 3,
-      "worst_median_ms": 0.560778
+      "worst_median_ms": 0.509842
     },
     "connect/roundtrip/version": {
       "budget_ms": 100.0,
@@ -233,7 +233,7 @@
       "worst_median_ms": 0.031911
     }
   },
-  "sha": "d1cf34fd3d878ae880b25539653f3621d475a95e",
+  "sha": "c22c79b16ea87b0fe574bd4361630cf3035f239c",
   "version": 1,
   "workload_hash": "41c505710405ce82"
 }
