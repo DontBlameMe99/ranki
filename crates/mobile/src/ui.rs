@@ -21,7 +21,7 @@ use std::time::Duration;
 use crate::card::{render_side, sides};
 use crate::state::{AppState, DeckRow, ReviewPhase, Screen, ToastKind};
 
-const PAGE_PAD: f32 = 16.0;
+const PAGE_MARGIN: i8 = 16;
 const TAB_HEIGHT: f32 = 56.0;
 const TAP_HEIGHT: f32 = 48.0;
 const RATING_HEIGHT: f32 = 60.0;
@@ -135,6 +135,13 @@ fn apply_style(ctx: &egui::Context, theme: ThemeChoice) {
     style.visuals.widgets.inactive.fg_stroke.color = p.text;
     style.visuals.widgets.hovered.fg_stroke.color = p.text;
     style.visuals.widgets.active.fg_stroke.color = p.text;
+    style.visuals.text_edit_bg_color = Some(p.panel_alt);
+    style.visuals.widgets.inactive.weak_bg_fill = p.panel_alt;
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, p.border);
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, p.border);
+    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, p.border);
+    style.visuals.widgets.noninteractive.bg_stroke =
+        Stroke::new(1.0_f32, p.border);
     style.visuals.widgets.noninteractive.corner_radius = CornerRadius::same(12);
     style.visuals.widgets.inactive.corner_radius = CornerRadius::same(12);
     style.visuals.widgets.hovered.corner_radius = CornerRadius::same(12);
@@ -147,25 +154,33 @@ pub fn render(app: &mut AppState, ctx: &egui::Context) {
     let system_dark = matches!(ctx.theme(), egui::Theme::Dark);
     let p = palette(app.settings.theme, system_dark);
     egui::CentralPanel::default()
-        .frame(EguiFrame::new().fill(p.bg))
+        .frame(
+            EguiFrame::new()
+                .fill(p.bg)
+                .inner_margin(Margin::same(PAGE_MARGIN)),
+        )
         .show(ctx, |ui| {
+            show_toast(app, ui, &p);
             let size = ui.available_size();
             let show_tabs = app.screen != Screen::Review;
-            let content_height = if show_tabs {
-                (size.y - TAB_HEIGHT).max(1.0)
+            let tab_space = if show_tabs {
+                TAB_HEIGHT + ui.spacing().item_spacing.y
             } else {
-                size.y.max(1.0)
+                0.0
             };
+            let content_height = (size.y - tab_space).max(1.0);
             ui.allocate_ui_with_layout(
                 vec2(size.x, content_height),
                 Layout::top_down(Align::Min),
                 |ui| {
-                    ScrollArea::vertical().auto_shrink([false, false]).show(
-                        ui,
-                        |ui| {
+                    ScrollArea::vertical()
+                        .id_salt((
+                            app.screen,
+                            app.review.current.as_ref().map(|card| card.id),
+                        ))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            ui.add_space(PAGE_PAD);
-                            show_toast(app, ui, &p);
                             match app.screen {
                                 Screen::Decks => render_decks(app, ui, &p),
                                 Screen::Review => render_review(app, ui, &p),
@@ -175,9 +190,7 @@ pub fn render(app: &mut AppState, ctx: &egui::Context) {
                                     render_settings(app, ui, &p);
                                 }
                             }
-                            ui.add_space(PAGE_PAD);
-                        },
-                    );
+                        });
                 },
             );
             if show_tabs {
@@ -204,6 +217,7 @@ fn show_toast(app: &mut AppState, ui: &mut Ui, p: &Palette) {
         .inner_margin(Margin::same(12))
         .corner_radius(CornerRadius::same(12))
         .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(RichText::new(toast.text).color(color));
                 if ui
@@ -231,7 +245,7 @@ fn touch_button(
     fill: Color32,
     ink: Color32,
 ) -> Button<'static> {
-    Button::new(text.color(ink).size(17.0).strong())
+    Button::new(text.color(ink).strong())
         .min_size(vec2(0.0, height))
         .corner_radius(CornerRadius::same(12))
         .fill(fill)
@@ -261,23 +275,29 @@ fn render_tabs(app: &mut AppState, ui: &mut Ui, p: &Palette) {
         (Screen::Browse, "Browse"),
         (Screen::Settings, "Settings"),
     ];
-    let width = (ui.available_width() - (tabs.len() as f32) * 8.0)
+    let width = (ui.available_width() - ((tabs.len() as f32) - 1.0) * 8.0)
         / (tabs.len() as f32);
-    ui.horizontal(|ui| {
+    ui.scope(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        for (screen, label) in tabs {
-            let selected = app.screen == screen;
-            let button = touch_button(
-                RichText::new(label),
-                TAB_HEIGHT,
-                if selected { p.accent } else { p.panel },
-                if selected { p.accent_ink } else { p.text },
-            )
-            .stroke(Stroke::new(1.0_f32, p.border));
-            if ui.add_sized([width, TAB_HEIGHT], button).clicked() {
-                let _ = app.set_screen(screen);
+        ui.spacing_mut().button_padding = vec2(4.0, 8.0);
+        ui.style_mut()
+            .text_styles
+            .insert(TextStyle::Button, FontId::proportional(15.0));
+        ui.horizontal(|ui| {
+            for (screen, label) in tabs {
+                let selected = app.screen == screen;
+                let button = touch_button(
+                    RichText::new(label),
+                    TAB_HEIGHT,
+                    if selected { p.accent } else { p.panel },
+                    if selected { p.accent_ink } else { p.text },
+                )
+                .stroke(Stroke::new(1.0_f32, p.border));
+                if ui.add_sized([width, TAB_HEIGHT], button).clicked() {
+                    let _ = app.set_screen(screen);
+                }
             }
-        }
+        });
     });
 }
 
@@ -297,16 +317,15 @@ fn render_decks(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     }
     ui.add_space(12.0);
 
+    let any_due = app.decks.iter().any(|row| row.due > 0);
     let study_all = touch_button(
         RichText::new("Study all"),
         TAP_HEIGHT,
         p.accent,
         p.accent_ink,
-    );
-    if ui
-        .add_sized([ui.available_width(), TAP_HEIGHT], study_all)
-        .clicked()
-    {
+    )
+    .min_size(vec2(ui.available_width(), TAP_HEIGHT));
+    if ui.add_enabled(any_due, study_all).clicked() {
         let _ = app.start_review(None);
     }
     ui.add_space(16.0);
@@ -321,7 +340,22 @@ fn render_decks(app: &mut AppState, ui: &mut Ui, p: &Palette) {
         .cloned()
         .collect();
     if rows.is_empty() {
-        ui.label(RichText::new("No decks match this search.").color(p.muted));
+        if app.deck_query.trim().is_empty() {
+            ui.label(RichText::new("No decks yet.").color(p.muted));
+        } else {
+            ui.label(
+                RichText::new("No decks match this search.").color(p.muted),
+            );
+            ui.add_space(8.0);
+            let clear =
+                secondary_button(RichText::new("Clear search"), TAP_HEIGHT, p);
+            if ui
+                .add_sized([ui.available_width(), TAP_HEIGHT], clear)
+                .clicked()
+            {
+                app.set_deck_query(String::new());
+            }
+        }
     }
     for row in rows {
         EguiFrame::new()
@@ -330,6 +364,7 @@ fn render_decks(app: &mut AppState, ui: &mut Ui, p: &Palette) {
             .inner_margin(Margin::same(12))
             .corner_radius(CornerRadius::same(12))
             .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 ui.label(RichText::new(row.name).size(20.0).strong());
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -339,17 +374,19 @@ fn render_decks(app: &mut AppState, ui: &mut Ui, p: &Palette) {
                     stat(ui, "Review", row.stats.review_cards, p);
                 });
                 ui.add_space(10.0);
-                let label = format!("Study ({} due)", row.due);
+                let label = if row.due == 0 {
+                    String::from("No cards due")
+                } else {
+                    format!("Study ({} due)", row.due)
+                };
                 let button = touch_button(
                     RichText::new(label),
                     TAP_HEIGHT,
                     p.panel_alt,
                     p.text,
-                );
-                if ui
-                    .add_sized([ui.available_width(), TAP_HEIGHT], button)
-                    .clicked()
-                {
+                )
+                .min_size(vec2(ui.available_width(), TAP_HEIGHT));
+                if ui.add_enabled(row.due > 0, button).clicked() {
                     let _ = app.start_review(row.id);
                 }
             });
@@ -382,10 +419,16 @@ fn render_review(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     } else {
         (review.answered as f32) / (total as f32)
     };
-    ui.add(ProgressBar::new(fraction).desired_width(ui.available_width()));
+    ui.add(
+        ProgressBar::new(fraction)
+            .desired_width(ui.available_width())
+            .desired_height(8.0)
+            .fill(p.accent),
+    );
     ui.add_space(8.0);
     ui.label(
-        RichText::new(format!("{} reviewed", review.answered)).color(p.muted),
+        RichText::new(format!("{} / {} reviewed", review.answered, total))
+            .color(p.muted),
     );
     let counts =
         review_counts(&review.queue, &review.pending, review.current.as_ref());
@@ -405,6 +448,7 @@ fn render_review(app: &mut AppState, ui: &mut Ui, p: &Palette) {
             .inner_margin(Margin::same(16))
             .corner_radius(CornerRadius::same(12))
             .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 let heading = if waiting {
                     "Next card pending"
                 } else {
@@ -468,6 +512,7 @@ fn render_review(app: &mut AppState, ui: &mut Ui, p: &Palette) {
             .inner_margin(Margin::same(16))
             .corner_radius(CornerRadius::same(12))
             .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 ui.label(RichText::new("Question").size(14.0).color(p.muted));
                 ui.add_space(6.0);
                 render_side(ui, &question, &media_dir);
@@ -509,7 +554,11 @@ fn render_review(app: &mut AppState, ui: &mut Ui, p: &Palette) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             for (index, (rating, label, fill)) in ratings.iter().enumerate() {
-                let ink = p.accent_ink;
+                let ink = if matches!(rating, Rating::Hard | Rating::Easy) {
+                    Color32::from_rgb(24, 24, 37)
+                } else {
+                    p.accent_ink
+                };
                 let interval =
                     interval_label(*review.intervals.get(index).unwrap_or(&0));
                 let text = format!("{label}\n{interval}");
@@ -573,11 +622,25 @@ const fn card_bucket(card: &Card) -> usize {
 }
 
 fn interval_label(interval: i32) -> String {
-    if interval < 0 {
-        format!("{}s", interval.saturating_abs())
-    } else {
-        format!("{interval}d")
+    if interval >= 0 {
+        return format!("{interval}d");
     }
+    let seconds = interval.saturating_abs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3_600 {
+        format!("{}m", ceil_div(seconds, 60))
+    } else if seconds < 86_400 {
+        format!("{}h", ceil_div(seconds, 3_600))
+    } else {
+        format!("{}d", ceil_div(seconds, 86_400))
+    }
+}
+
+const fn ceil_div(value: i32, divisor: i32) -> i32 {
+    value
+        .saturating_add(divisor.saturating_sub(1))
+        .saturating_div(divisor)
 }
 
 fn render_add(app: &mut AppState, ui: &mut Ui, p: &Palette) {
@@ -586,7 +649,8 @@ fn render_add(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     let deck_names: Vec<String> =
         app.add.decks.iter().map(|deck| deck.name.clone()).collect();
     let mut deck_index = app.add.deck_index;
-    ComboBox::from_label("Deck")
+    ui.label(RichText::new("Deck").color(p.muted));
+    ComboBox::from_id_salt("mobile-add-deck")
         .selected_text(
             deck_names
                 .get(deck_index)
@@ -611,7 +675,8 @@ fn render_add(app: &mut AppState, ui: &mut Ui, p: &Palette) {
         .map(|model| model.name.clone())
         .collect();
     let mut model_index = app.add.model_index;
-    ComboBox::from_label("Note type")
+    ui.label(RichText::new("Note type").color(p.muted));
+    ComboBox::from_id_salt("mobile-add-note-type")
         .selected_text(
             model_names
                 .get(model_index)
@@ -639,13 +704,13 @@ fn render_add(app: &mut AppState, ui: &mut Ui, p: &Palette) {
             .get(index)
             .cloned()
             .unwrap_or_else(|| format!("Field {}", index + 1));
-        ui.label(RichText::new(label.clone()).color(p.muted));
+        ui.label(RichText::new(label).color(p.muted));
         let mut value = app.add.fields.get(index).cloned().unwrap_or_default();
         let field = TextEdit::multiline(&mut value)
-            .hint_text(label)
-            .desired_width(f32::MAX)
+            .desired_rows(2)
+            .desired_width(ui.available_width())
             .min_size(vec2(0.0, TAP_HEIGHT));
-        if ui.add_sized([ui.available_width(), 72.0], field).changed() {
+        if ui.add(field).changed() {
             app.set_add_field(index, value);
         }
         ui.add_space(8.0);
@@ -654,9 +719,28 @@ fn render_add(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     ui.label(RichText::new("Tags").color(p.muted));
     let tags = TextEdit::singleline(&mut app.add.tags)
         .hint_text("Separate tags with spaces")
-        .desired_width(f32::MAX)
+        .desired_width(ui.available_width())
         .min_size(vec2(0.0, TAP_HEIGHT));
-    ui.add_sized([ui.available_width(), TAP_HEIGHT], tags);
+    ui.add(tags);
+    ui.add_space(12.0);
+
+    title(ui, "Preview", p);
+    EguiFrame::new()
+        .fill(p.panel)
+        .stroke(Stroke::new(1.0_f32, p.border))
+        .inner_margin(Margin::same(12))
+        .corner_radius(CornerRadius::same(12))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            if app.add.preview.is_empty() {
+                ui.label(
+                    RichText::new("The card preview appears here.")
+                        .color(p.muted),
+                );
+            } else {
+                ui.label(&app.add.preview);
+            }
+        });
     ui.add_space(12.0);
 
     let save = touch_button(
@@ -671,24 +755,6 @@ fn render_add(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     {
         let _ = app.add_note();
     }
-    ui.add_space(16.0);
-
-    title(ui, "Preview", p);
-    EguiFrame::new()
-        .fill(p.panel)
-        .stroke(Stroke::new(1.0_f32, p.border))
-        .inner_margin(Margin::same(12))
-        .corner_radius(CornerRadius::same(12))
-        .show(ui, |ui| {
-            if app.add.preview.is_empty() {
-                ui.label(
-                    RichText::new("The card preview appears here.")
-                        .color(p.muted),
-                );
-            } else {
-                ui.label(&app.add.preview);
-            }
-        });
 }
 
 fn render_browse(app: &mut AppState, ui: &mut Ui, p: &Palette) {
@@ -696,23 +762,38 @@ fn render_browse(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     let mut query = app.browse.query.clone();
     let search = TextEdit::singleline(&mut query)
         .hint_text("Search cards, tags, or decks")
-        .desired_width(f32::MAX)
+        .desired_width(ui.available_width())
         .min_size(vec2(0.0, TAP_HEIGHT));
-    if ui
-        .add_sized([ui.available_width(), TAP_HEIGHT], search)
-        .changed()
-    {
+    if ui.add(search).changed() {
         let _ = app.set_browse_query(query);
     }
     ui.add_space(10.0);
-    ui.label(
-        RichText::new(format!("{} cards", app.browse.rows.len()))
+    let count = if app.browse.total == 1 {
+        String::from("1 card")
+    } else {
+        format!("{} cards", app.browse.total)
+    };
+    ui.label(RichText::new(count).color(p.muted));
+    if app.browse.rows.len() < app.browse.total {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(format!(
+                "Showing first {} of {}",
+                app.browse.rows.len(),
+                app.browse.total
+            ))
             .color(p.muted),
-    );
+        );
+    }
     ui.add_space(6.0);
 
     if app.browse.rows.is_empty() {
-        ui.label(RichText::new("No cards match this search.").color(p.muted));
+        let empty = if app.browse.query.trim().is_empty() {
+            "No cards yet."
+        } else {
+            "No cards match this search."
+        };
+        ui.label(RichText::new(empty).color(p.muted));
     }
     for row in &app.browse.rows {
         EguiFrame::new()
@@ -721,6 +802,7 @@ fn render_browse(app: &mut AppState, ui: &mut Ui, p: &Palette) {
             .inner_margin(Margin::same(12))
             .corner_radius(CornerRadius::same(12))
             .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 ui.label(RichText::new(row.front.clone()).size(18.0).strong());
                 ui.add_space(4.0);
                 ui.label(RichText::new(row.back.clone()).color(p.muted));
@@ -744,10 +826,12 @@ fn render_settings(app: &mut AppState, ui: &mut Ui, p: &Palette) {
         .inner_margin(Margin::same(12))
         .corner_radius(CornerRadius::same(12))
         .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             ui.label(RichText::new("Appearance").size(20.0).strong());
             ui.add_space(8.0);
             let mut theme = app.settings.theme;
-            ComboBox::from_label("Theme")
+            ui.label(RichText::new("Theme").color(p.muted));
+            ComboBox::from_id_salt("mobile-theme")
                 .selected_text(theme_name(theme))
                 .width(ui.available_width())
                 .show_ui(ui, |ui| {
@@ -776,58 +860,62 @@ fn render_settings(app: &mut AppState, ui: &mut Ui, p: &Palette) {
         .inner_margin(Margin::same(12))
         .corner_radius(CornerRadius::same(12))
         .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             ui.label(RichText::new("AnkiWeb sync").size(20.0).strong());
             ui.add_space(8.0);
-            let state = if app.sync.signed_in {
-                "Signed in"
+            if !app.sync.status.is_empty() {
+                ui.label(RichText::new(app.sync.status.clone()).color(p.muted));
+                ui.add_space(8.0);
+            }
+
+            if app.sync.signed_in {
+                ui.label(RichText::new("Signed in").color(p.success));
+                ui.add_space(8.0);
+                if !app.sync.username.is_empty() {
+                    ui.label(
+                        RichText::new(app.sync.username.clone()).color(p.text),
+                    );
+                    ui.add_space(8.0);
+                }
+                let sync_now =
+                    secondary_button(RichText::new("Sync now"), TAP_HEIGHT, p)
+                        .min_size(vec2(ui.available_width(), TAP_HEIGHT));
+                if ui.add_enabled(!app.sync.busy, sync_now).clicked() {
+                    let _ = app.sync_now();
+                }
+                ui.add_space(8.0);
+                let sign_out =
+                    secondary_button(RichText::new("Sign out"), TAP_HEIGHT, p)
+                        .min_size(vec2(ui.available_width(), TAP_HEIGHT));
+                if ui.add_enabled(!app.sync.busy, sign_out).clicked() {
+                    let _ = app.sign_out();
+                }
             } else {
-                "Not signed in"
-            };
-            ui.label(RichText::new(state).color(p.muted));
-            ui.add_space(8.0);
-
-            let username = TextEdit::singleline(&mut app.sync.username)
-                .hint_text("Username")
-                .desired_width(f32::MAX)
-                .min_size(vec2(0.0, TAP_HEIGHT));
-            ui.add_sized([ui.available_width(), TAP_HEIGHT], username);
-            ui.add_space(8.0);
-            let password = TextEdit::singleline(&mut app.sync.password)
-                .hint_text("Password")
-                .password(true)
-                .desired_width(f32::MAX)
-                .min_size(vec2(0.0, TAP_HEIGHT));
-            ui.add_sized([ui.available_width(), TAP_HEIGHT], password);
-            ui.add_space(8.0);
-            ui.label(RichText::new(app.sync.status.clone()).color(p.muted));
-            ui.add_space(8.0);
-
-            let sign_in = touch_button(
-                RichText::new("Sign in and sync"),
-                TAP_HEIGHT,
-                p.accent,
-                p.accent_ink,
-            );
-            if ui.add_enabled(!app.sync.busy, sign_in).clicked() {
-                let _ = app.sign_in();
-            }
-            ui.add_space(8.0);
-            let sync_now =
-                secondary_button(RichText::new("Sync now"), TAP_HEIGHT, p);
-            if ui
-                .add_enabled(!app.sync.busy && app.sync.signed_in, sync_now)
-                .clicked()
-            {
-                let _ = app.sync_now();
-            }
-            ui.add_space(8.0);
-            let sign_out =
-                secondary_button(RichText::new("Sign out"), TAP_HEIGHT, p);
-            if ui
-                .add_enabled(!app.sync.busy && app.sync.signed_in, sign_out)
-                .clicked()
-            {
-                let _ = app.sign_out();
+                ui.label(RichText::new("Not signed in").color(p.muted));
+                ui.add_space(8.0);
+                let username = TextEdit::singleline(&mut app.sync.username)
+                    .hint_text("Username")
+                    .desired_width(ui.available_width())
+                    .min_size(vec2(0.0, TAP_HEIGHT));
+                ui.add(username);
+                ui.add_space(8.0);
+                let password = TextEdit::singleline(&mut app.sync.password)
+                    .hint_text("Password")
+                    .password(true)
+                    .desired_width(ui.available_width())
+                    .min_size(vec2(0.0, TAP_HEIGHT));
+                ui.add(password);
+                ui.add_space(8.0);
+                let sign_in = touch_button(
+                    RichText::new("Sign in and sync"),
+                    TAP_HEIGHT,
+                    p.accent,
+                    p.accent_ink,
+                )
+                .min_size(vec2(ui.available_width(), TAP_HEIGHT));
+                if ui.add_enabled(!app.sync.busy, sign_in).clicked() {
+                    let _ = app.sign_in();
+                }
             }
 
             if app.sync.conflict {
@@ -841,7 +929,8 @@ fn render_settings(app: &mut AppState, ui: &mut Ui, p: &Palette) {
                     RichText::new("Keep local"),
                     TAP_HEIGHT,
                     p,
-                );
+                )
+                .min_size(vec2(ui.available_width(), TAP_HEIGHT));
                 if ui.add_enabled(!app.sync.busy, keep_local).clicked() {
                     let _ = app.resolve_conflict(false);
                 }
@@ -850,7 +939,8 @@ fn render_settings(app: &mut AppState, ui: &mut Ui, p: &Palette) {
                     RichText::new("Keep remote"),
                     TAP_HEIGHT,
                     p,
-                );
+                )
+                .min_size(vec2(ui.available_width(), TAP_HEIGHT));
                 if ui.add_enabled(!app.sync.busy, keep_remote).clicked() {
                     let _ = app.resolve_conflict(true);
                 }
@@ -863,5 +953,19 @@ const fn theme_name(theme: ThemeChoice) -> &'static str {
         ThemeChoice::Dark => "Dark",
         ThemeChoice::Light => "Light",
         ThemeChoice::System => "System",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::interval_label;
+
+    #[test]
+    fn interval_labels_use_readable_time_units() {
+        assert_eq!(interval_label(-30), "30s");
+        assert_eq!(interval_label(-119), "2m");
+        assert_eq!(interval_label(-7_200), "2h");
+        assert_eq!(interval_label(-86_400), "1d");
+        assert_eq!(interval_label(3), "3d");
     }
 }

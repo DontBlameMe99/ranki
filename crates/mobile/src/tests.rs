@@ -25,6 +25,7 @@ use tempfile::TempDir;
 use crate::card::media_names;
 use crate::card::plain;
 use crate::card::sides;
+use crate::card::without_images;
 use crate::platform;
 use crate::state::AppState;
 use crate::state::ReviewPhase;
@@ -78,6 +79,19 @@ fn plain_strips_markup_but_keeps_line_breaks_and_entities() {
     assert_eq!(
         plain("<div>One<br>Two &amp; Three</div>"),
         "One\nTwo & Three"
+    );
+}
+
+#[test]
+fn plain_keeps_one_blank_line_between_paragraphs() {
+    assert_eq!(plain("One<br><br><br>Two"), "One\n\nTwo");
+}
+
+#[test]
+fn without_images_keeps_decoded_entities() {
+    assert_eq!(
+        without_images("Use <word> here <img src=\"image.png\">"),
+        "Use <word> here "
     );
 }
 
@@ -400,8 +414,12 @@ fn adding_a_note_makes_it_browsable() {
         .expect("browse query");
 
     assert!(fixture.state.browse.rows.iter().any(|row| {
-        row.front.contains("Second question") && row.deck == "Mobile Deck"
+        row.front.contains("Second question")
+            && row.back == "Second answer"
+            && row.deck == "Mobile Deck"
+            && !row.back.contains('<')
     }));
+    assert_eq!(fixture.state.browse.total, 1);
     assert_eq!(
         fixture
             .state

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+width="${MOBILE_VISUAL_WIDTH:-390}"
+height="${MOBILE_VISUAL_HEIGHT:-844}"
 cd "$(dirname "$0")/.."
 
 mkdir -p .tmp
@@ -73,9 +75,10 @@ deck_id="$("${seed_env[@]}" "$seed_bin" --no-sync decks \
   --field 'The {{c1::capital}} is Paris.' --field 'Remember it' >/dev/null
 [[ -f "$collection" ]]
 
-cat > "$dir/sway.conf" <<'EOF'
-output * resolution 390x844
+cat > "$dir/sway.conf" <<EOF
+output * resolution ${width}x${height}
 output * bg #1e1e2e solid_color
+default_border none
 seat seat0 hide_cursor 1000
 EOF
 
@@ -119,6 +122,7 @@ capture() {
   setsid env XDG_CONFIG_HOME="$config" XDG_DATA_HOME="$data" \
     RANKI_DATA_DIR="$data/ranki" RANKI_CONFIG_DIR="$config/ranki" \
     RANKI_MOBILE_DEV_VIEW="$view" RANKI_MOBILE_DEV_REVEAL="$reveal" \
+    RANKI_MOBILE_DEV_WIDTH="$width" RANKI_MOBILE_DEV_HEIGHT="$height" \
     nix develop --command nix shell "${nix_packages[@]}" --command env \
     XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$display" \
     "$mobile_bin" >"$dir/$name.log" 2>&1 &
@@ -156,5 +160,6 @@ capture browse browse
 capture settings settings
 
 printf 'Screenshots:\n'
+printf 'Viewport: %sx%s\n' "$width" "$height"
 printf '%s\n' "$dir"/*.png
 printf 'Temporary directory: %s\n' "$dir"

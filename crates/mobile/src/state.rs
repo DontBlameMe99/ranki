@@ -23,14 +23,14 @@ use ranki_sync::{
     SyncOutcome, SyncState, SyncTransport, TransportConfig, clear_host_key,
 };
 
-use crate::card::sides;
+use crate::card::{sides, without_images};
 use crate::error::Result;
 use ranki_core::scheduler_for_card;
 
 const BROWSE_ROW_LIMIT: usize = 200;
 
 /// Full-screen destination shown on a phone.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 pub enum Screen {
     #[default]
     Decks,
@@ -102,6 +102,7 @@ pub struct AddState {
 pub struct BrowseState {
     pub query: String,
     pub rows: Vec<BrowseRow>,
+    pub total: usize,
 }
 
 /// Synchronous `AnkiWeb` state shown in settings.
@@ -178,6 +179,7 @@ impl AppState {
             browse: BrowseState {
                 query: browse_query,
                 rows: Vec::new(),
+                total: 0,
             },
             sync: SyncUiState {
                 username: sync_username,
@@ -821,9 +823,11 @@ impl AppState {
             Err(error) => {
                 self.fail(format!("Could not search cards: {error}"));
                 self.browse.rows.clear();
+                self.browse.total = 0;
                 return;
             }
         };
+        self.browse.total = ids.len();
         let decks = self.decks.clone();
         let models = self.add.models.clone();
         let mut notes = HashMap::new();
@@ -856,7 +860,15 @@ impl AppState {
             else {
                 continue;
             };
-            let (question, answer) = sides(model, note, card.ordinal);
+            let (question_markup, answer_markup) =
+                sides(model, note, card.ordinal);
+            let question = without_images(&question_markup);
+            let answer = without_images(&answer_markup);
+            let back = answer
+                .strip_prefix(question.as_str())
+                .unwrap_or(&answer)
+                .trim_start()
+                .to_owned();
             let deck = decks
                 .iter()
                 .find(|row| row.id == Some(card.deck_id))
@@ -867,7 +879,7 @@ impl AppState {
             rows.push(BrowseRow {
                 card_id: card.id,
                 front: question,
-                back: answer,
+                back,
                 deck,
                 meta: format!("{} / {}", model.name, queue_name(card.queue)),
             });

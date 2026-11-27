@@ -77,6 +77,24 @@ pub fn plain(text: &str) -> String {
     strip_markup(text, false)
 }
 
+/// Removes image tags from already rendered card text.
+#[must_use]
+pub fn without_images(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    while let Some(rest) = text.get(cursor..) {
+        let Some(relative) = find_image_tag(rest) else {
+            break;
+        };
+        let start = cursor.saturating_add(relative);
+        output.push_str(text.get(cursor..start).unwrap_or(""));
+        let (_, end) = image_media(text, start);
+        cursor = end;
+    }
+    output.push_str(text.get(cursor..).unwrap_or(""));
+    output
+}
+
 /// Returns image and sound file names in the order they appear.
 #[must_use]
 pub fn media_names(text: &str) -> Vec<String> {
@@ -480,14 +498,23 @@ fn decode_entity(entity: &str) -> Option<String> {
     char::from_u32(code).map(String::from)
 }
 
+#[expect(
+    clippy::excessive_nesting,
+    reason = "newline normalization uses one pending blank flag"
+)]
 fn normalize_newlines(text: &str) -> String {
-    let mut lines = text
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.trim().is_empty());
-    let mut output = lines.next().unwrap_or("").to_owned();
-    for line in lines {
-        output.push('\n');
+    let mut output = String::new();
+    let mut pending_blank = false;
+    for line in text.lines().map(str::trim_end) {
+        if line.trim().is_empty() {
+            pending_blank = !output.is_empty();
+            continue;
+        }
+        if !output.is_empty() {
+            let breaks = if pending_blank { "\n\n" } else { "\n" };
+            output.push_str(breaks);
+        }
+        pending_blank = false;
         output.push_str(line);
     }
     output.trim().to_owned()
