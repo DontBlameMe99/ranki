@@ -245,17 +245,22 @@ fn full_upload_sends_checkpointed_collection() -> TestResult {
     make_collection(&collection, (100, 100, 2))?;
     let seeded_key = fixture_key(&directory);
     write_state(&state_path, &seeded_state(&seeded_key))?;
-    let transport = MockTransport::new().with_response(
-        SyncMethod::Upload,
-        MockResponse::ok_bytes(b"OK".to_vec())?,
-    );
+    let transport = MockTransport::new()
+        .with_response(
+            SyncMethod::Upload,
+            MockResponse::ok_bytes(b"OK".to_vec())?,
+        )
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((400, 100, false, now_secs()?))?,
+        );
     let mut client =
         SyncClient::new(transport, &collection, &media, &state_path)?;
 
     client.full_upload()?;
 
     let requests = client.transport().requests();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     let request = requests
         .first()
         .ok_or_else(|| SyncError::State("missing upload request".to_owned()))?;
@@ -276,7 +281,8 @@ fn full_upload_sends_checkpointed_collection() -> TestResult {
     )?;
     assert_eq!(usn, 1);
     assert_eq!(pending, 0);
-    assert!(client.state().last_mod.is_some());
+    assert_eq!(client.state().last_mod, Some(400));
+    assert_eq!(client.state().last_local_mod, Some(100));
     Ok(())
 }
 
@@ -297,7 +303,15 @@ fn full_download_replaces_collection_and_keeps_media() -> TestResult {
             SyncMethod::Download,
             MockResponse::ok_bytes(fs::read(&source)?)?,
         )
-        .with_response(SyncMethod::MediaBegin, media_begin(0)?);
+        .with_response(SyncMethod::MediaBegin, media_begin(0)?)
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((900, 200, false, now_secs()?))?,
+        )
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((900, 200, false, now_secs()?))?,
+        );
     let mut client =
         SyncClient::new(transport, &collection, &media, &state_path)?;
 
@@ -320,6 +334,9 @@ fn full_download_replaces_collection_and_keeps_media() -> TestResult {
     assert_eq!(fs::read(media.join("image.png"))?, b"image");
     assert!(collection.with_extension("ranki-sync.bak").exists());
     assert_eq!(client.state().last_mod, Some(900));
+    assert_eq!(client.state().last_local_mod, Some(900));
+
+    assert_eq!(client.sync(None)?, SyncOutcome::NoChanges);
     Ok(())
 }
 
@@ -450,6 +467,10 @@ fn local_changes_upload_when_remote_is_unchanged() -> TestResult {
         .with_response(
             SyncMethod::Upload,
             MockResponse::ok_bytes(b"OK".to_vec())?,
+        )
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((250, 500, false, now_secs()?))?,
         );
     let mut client =
         SyncClient::new(transport, &collection, &media, &state_path)?;
@@ -458,11 +479,60 @@ fn local_changes_upload_when_remote_is_unchanged() -> TestResult {
 
     assert_eq!(outcome, SyncOutcome::Uploaded);
     let requests = client.transport().requests();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].method, SyncMethod::Meta);
     assert_eq!(requests[1].method, SyncMethod::Upload);
-    assert_eq!(client.state().last_mod, Some(200));
-    assert!(client.state().last_scm.is_some_and(|scm| scm > 100));
+    assert_eq!(requests[2].method, SyncMethod::Meta);
+    assert_eq!(client.state().last_mod, Some(250));
+    assert_eq!(client.state().last_local_mod, Some(200));
+    assert_eq!(client.state().last_scm, Some(500));
+    Ok(())
+}
+
+/// `AnkiWeb` re-stamps `col.mod` when it stores a collection. That new stamp
+/// must be read as the last sync, not as a second, remote change.
+#[test]
+fn server_restamp_after_upload_is_not_a_remote_change() -> TestResult {
+    let directory = TempDir::new()?;
+    let collection = directory.path().join("collection.anki2");
+    let media = directory.path().join("media");
+    let state_path = directory.path().join("sync.json");
+    make_collection(&collection, (200, 100, 1))?;
+    write_state(
+        &state_path,
+        &SyncState {
+            host_key: fixture_key(&directory),
+            last_mod: Some(100),
+            last_local_mod: Some(100),
+            last_scm: Some(100),
+            ..SyncState::default()
+        },
+    )?;
+    let transport = MockTransport::new()
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((100, 100, false, now_secs()?))?,
+        )
+        .with_response(
+            SyncMethod::Upload,
+            MockResponse::ok_bytes(b"OK".to_vec())?,
+        )
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((900, 100, false, now_secs()?))?,
+        )
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((900, 100, false, now_secs()?))?,
+        );
+    let mut client =
+        SyncClient::new(transport, &collection, &media, &state_path)?;
+
+    assert_eq!(client.sync(None)?, SyncOutcome::Uploaded);
+    assert_eq!(client.state().last_mod, Some(900));
+    assert_eq!(client.state().last_scm, Some(100));
+
+    assert_eq!(client.sync(None)?, SyncOutcome::NoChanges);
     Ok(())
 }
 
@@ -541,7 +611,11 @@ fn empty_local_collection_downloads_a_populated_remote() -> TestResult {
             SyncMethod::Download,
             MockResponse::ok_bytes(fs::read(&source)?)?,
         )
-        .with_response(SyncMethod::MediaBegin, media_begin(0)?);
+        .with_response(SyncMethod::MediaBegin, media_begin(0)?)
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((900, 500, false, now_secs()?))?,
+        );
     let mut client =
         SyncClient::new(transport, &collection, &media, &state_path)?;
 
@@ -586,6 +660,10 @@ fn full_download_restores_remote_media() -> TestResult {
         .with_response(
             SyncMethod::MediaDownload,
             MockResponse::ok_bytes(media_zip("flag.png", b"flag bytes")?)?,
+        )
+        .with_response(
+            SyncMethod::Meta,
+            meta_response((900, 200, false, now_secs()?))?,
         );
     let mut client =
         SyncClient::new(transport, &collection, &media, &state_path)?;
@@ -606,6 +684,7 @@ fn full_download_restores_remote_media() -> TestResult {
             SyncMethod::MediaBegin,
             SyncMethod::MediaChanges,
             SyncMethod::MediaDownload,
+            SyncMethod::Meta,
         ]
     );
     let begin = client

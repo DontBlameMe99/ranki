@@ -5,9 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::prelude::FluentBuilder;
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, SharedString,
+    Context, Div, InteractiveElement, IntoElement, ParentElement, SharedString,
     Styled, div, px,
 };
 use ranki_storage::ReopeningCollection;
@@ -19,8 +18,11 @@ use ranki_sync::{
 
 use crate::{
     app::{Root, ToastKind},
-    components::{ButtonTone, action_button, icon, panel},
-    theme::{Palette, SPACE_GROUP, SPACE_RELATED, SPACE_SECTION},
+    components::{ButtonTone, ClickHandler, action_button, dot, icon, panel},
+    theme::{
+        Palette, SPACE_BLOCK, SPACE_GROUP, SPACE_RELATED, SPACE_SECTION, Style,
+        alpha,
+    },
 };
 
 /// Reads the local sync state without changing it.
@@ -28,8 +30,24 @@ pub fn read_state(state_path: &Path) -> Option<SyncState> {
     SyncState::load(state_path).ok()
 }
 
-fn sync_status(busy: bool) -> Option<&'static str> {
-    busy.then_some("Syncing with AnkiWeb")
+/// The step a running sync is on, shown in place of the panel's actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncActivity {
+    SigningIn,
+    Syncing,
+    KeepingLocal,
+    KeepingRemote,
+}
+
+impl SyncActivity {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SigningIn => "Signing in to AnkiWeb",
+            Self::Syncing => "Syncing with AnkiWeb",
+            Self::KeepingLocal => "Keeping the local copy",
+            Self::KeepingRemote => "Keeping the AnkiWeb copy",
+        }
+    }
 }
 
 #[expect(
@@ -169,7 +187,7 @@ pub fn run_sync(
 }
 impl Root {
     pub(crate) fn sign_out(&mut self, cx: &mut Context<Self>) {
-        if self.sync.busy {
+        if self.sync.busy() {
             return;
         }
         if let Err(error) =
@@ -183,6 +201,7 @@ impl Root {
             return;
         }
         self.sync.signed_in = false;
+        self.sync.error = None;
         self.options.sync.enabled = false;
         self.options.sync.username = None;
         self.sync
@@ -208,7 +227,7 @@ impl Root {
     }
 
     pub(crate) fn sign_in(&mut self, cx: &mut Context<Self>) {
-        if self.sync.busy {
+        if self.sync.busy() {
             return;
         }
         let username = self.sync.username.read(cx).text().trim().to_owned();
@@ -221,7 +240,7 @@ impl Root {
             );
             return;
         }
-        self.sync.busy = true;
+        self.sync.running = Some(SyncActivity::SigningIn);
         cx.notify();
 
         let collection = self.options.paths.collection.clone();
@@ -261,7 +280,7 @@ impl Root {
                         }
                     }
                     Err(error) => {
-                        root.sync.busy = false;
+                        root.sync.running = None;
                         root.show_toast(
                             ToastKind::Error,
                             format!("AnkiWeb sign-in failed: {error}"),
@@ -280,12 +299,12 @@ impl Root {
             self.options.sync.enabled,
             self.options.sync.auto,
             self.sync.signed_in,
-            self.sync.busy,
+            self.sync.busy(),
             self.sync.conflict.is_some(),
         ) {
             return;
         }
-        self.sync.busy = true;
+        self.sync.running = Some(SyncActivity::Syncing);
         cx.notify();
 
         let collection = self.options.paths.collection.clone();
@@ -301,11 +320,11 @@ impl Root {
     }
 
     pub(crate) fn sync_now(&mut self, cx: &mut Context<Self>) {
-        if self.sync.busy || !self.sync.signed_in {
+        if self.sync.busy() || !self.sync.signed_in {
             return;
         }
         let reason = self.sync.conflict.clone();
-        self.sync.busy = true;
+        self.sync.running = Some(SyncActivity::Syncing);
         cx.notify();
 
         let collection = self.options.paths.collection.clone();
@@ -325,11 +344,15 @@ impl Root {
         keep_local: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.sync.busy {
+        if self.sync.busy() {
             return;
         }
         let reason = self.sync.conflict.clone();
-        self.sync.busy = true;
+        self.sync.running = Some(if keep_local {
+            SyncActivity::KeepingLocal
+        } else {
+            SyncActivity::KeepingRemote
+        });
         cx.notify();
 
         let collection = self.options.paths.collection.clone();
@@ -397,8 +420,15 @@ impl Root {
         quiet: bool,
         cx: &mut Context<Self>,
     ) {
-        self.sync.busy = false;
+        self.sync.running = None;
         self.sync.conflict = None;
+        self.sync.error = match &result {
+            Err(error) => Some(format!("Sync failed: {error}")),
+            Ok(SyncOutcome::RetryLater { reason }) => {
+                Some(format!("Sync failed: {reason}"))
+            }
+            Ok(_) => None,
+        };
         let (kind, message) = match &result {
             Ok(outcome) => {
                 if let SyncOutcome::Conflict { reason } = outcome {
@@ -442,16 +472,9 @@ impl Root {
 
     pub(crate) fn render_sync(&self) -> impl IntoElement {
         let colors = self.colors();
-        let enabled = self.options.sync.enabled;
+        let style = self.style();
         let signed_in = self.sync.signed_in;
-        let status = sync_status(self.sync.busy);
-        let note = if !signed_in {
-            "Optional. Sign in only if you want to sync with AnkiWeb."
-        } else if enabled {
-            "You are currently using AnkiWeb"
-        } else {
-            "Sync is off. Sign out and sign in again to resume."
-        };
+        let running = self.sync.running;
         let sign_in = self.action_click(crate::app::UiAction::SyncSignIn);
         let sign_out = self.action_click(crate::app::UiAction::SyncSignOut);
         let sync_now = self.action_click(crate::app::UiAction::SyncNow);
@@ -459,22 +482,39 @@ impl Root {
         let keep_remote =
             self.action_click(crate::app::UiAction::SyncKeepRemote);
 
-        let mut fields = div().flex().flex_col().gap(px(SPACE_RELATED));
-        if enabled && signed_in {
-            fields = fields.child(action_button(
-                "sync-now",
-                if self.sync.busy {
-                    "Syncing"
-                } else {
-                    "Sync now"
-                },
+        let mut header = div()
+            .flex()
+            .items_center()
+            .gap(px(SPACE_RELATED))
+            .child(icon("icon-clock", 18., colors.mauve))
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(18.))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child("AnkiWeb sync"),
+            );
+        if signed_in && running.is_none() {
+            header = header.child(action_button(
+                "sync-sign-out",
+                "Sign out",
                 ButtonTone::Neutral,
-                self.style(),
-                sync_now,
+                style,
+                sign_out,
             ));
         }
-        if !signed_in {
-            fields = fields
+
+        let body = if let Some(activity) = running {
+            activity_line(activity, colors, self.motion_ms(PULSE_MS))
+        } else if !signed_in {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_BLOCK))
+                .child(status_line(
+                    "Sign in to keep this collection in step with AnkiWeb.",
+                    colors,
+                ))
                 .child(labeled_input(
                     "Username",
                     self.sync.username.clone(),
@@ -485,132 +525,163 @@ impl Root {
                     self.sync.password.clone(),
                     colors,
                 ))
-                .child(
-                    div().flex().items_center().gap(px(SPACE_RELATED)).child(
-                        action_button(
-                            "sync-sign-in",
-                            if self.sync.busy {
-                                "Signing in"
-                            } else {
-                                "Sign in"
-                            },
-                            ButtonTone::Primary,
-                            self.style(),
-                            sign_in,
-                        ),
-                    ),
-                );
+                .child(div().flex().child(action_button(
+                    "sync-sign-in",
+                    "Sign in",
+                    ButtonTone::Primary,
+                    style,
+                    sign_in,
+                )))
+        } else if let Some(reason) = self.sync.conflict.as_deref() {
+            conflict_card(reason, colors, style, keep_local, keep_remote)
+        } else {
+            let note = if self.options.sync.enabled && self.options.sync.auto {
+                "Changes sync to AnkiWeb automatically."
+            } else {
+                "Use Sync now to send changes."
+            };
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(SPACE_SECTION))
+                .child(status_line(note, colors))
+                .child(action_button(
+                    "sync-now",
+                    "Sync now",
+                    ButtonTone::Neutral,
+                    style,
+                    sync_now,
+                ))
+        };
+
+        let mut column = div().flex().flex_col().gap(px(SPACE_RELATED));
+        column = column.child(body);
+        if let Some(error) = self.sync.error.as_deref()
+            && running.is_none()
+        {
+            column = column.child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(colors.red)
+                    .child(SharedString::from(error.to_owned())),
+            );
         }
 
         panel(colors)
             .id("settings-sync")
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(SPACE_RELATED))
-                    .child(icon("icon-clock", 18., colors.mauve))
-                    .child(
-                        div()
-                            .text_size(px(18.))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("AnkiWeb sync"),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(SPACE_SECTION))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(SPACE_GROUP))
-                            .child(
-                                div()
-                                    .text_size(px(14.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("Sync collection"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .text_color(colors.subtext)
-                                    .child(note),
-                            ),
-                    )
-                    .when(signed_in, |this| {
-                        this.child(action_button(
-                            "sync-sign-out",
-                            "Sign out",
-                            ButtonTone::Neutral,
-                            self.style(),
-                            sign_out,
-                        ))
-                    }),
-            )
-            .when_some(status, |this, status| {
-                this.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(SPACE_GROUP))
-                        .text_size(px(12.))
-                        .text_color(colors.subtext)
-                        .child(icon("icon-check", 14., colors.green))
-                        .child(SharedString::from(status)),
-                )
-            })
-            .when_some(self.sync.conflict.clone(), |this, reason| {
-                this.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(SPACE_RELATED))
-                        .child(
-                            div()
-                                .text_size(px(14.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(colors.red)
-                                .child("Sync conflict"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(colors.subtext)
-                                .child(reason),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(colors.subtext)
-                                .child("Choose which copy to keep. The other one is replaced."),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(SPACE_RELATED))
-                                .child(action_button(
-                                    "sync-keep-remote",
-                                    "Keep AnkiWeb copy",
-                                    ButtonTone::Primary,
-                                    self.style(),
-                                    keep_remote,
-                                ))
-                                .child(action_button(
-                                    "sync-keep-local",
-                                    "Keep local copy",
-                                    ButtonTone::Danger,
-                                    self.style(),
-                                    keep_local,
-                                )),
-                        ),
-                )
-            })
-            .child(fields)
+            .child(header)
+            .child(column)
     }
+}
+
+const PULSE_MS: u64 = 900;
+
+/// Thirteen-point line that carries the panel's current state.
+fn status_line(text: impl Into<SharedString>, colors: Palette) -> Div {
+    div()
+        .flex_1()
+        .min_w(px(0.))
+        .text_size(px(13.))
+        .text_color(colors.subtext)
+        .child(text.into())
+}
+
+/// Replaces the actions while a sync runs, so a long upload still looks alive.
+fn activity_line(
+    activity: SyncActivity,
+    colors: Palette,
+    motion_ms: u64,
+) -> Div {
+    use gpui::AnimationExt as _;
+
+    let marker = if motion_ms == 0 {
+        dot(colors.mauve, 8.).into_any_element()
+    } else {
+        dot(colors.mauve, 8.)
+            .with_animation(
+                "sync-activity",
+                gpui::Animation::new(Duration::from_millis(motion_ms))
+                    .repeat()
+                    .with_easing(|delta| {
+                        0.35 + 0.65 * (delta * std::f32::consts::PI).sin()
+                    }),
+                gpui::Styled::opacity,
+            )
+            .into_any_element()
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(SPACE_GROUP))
+        .text_size(px(13.))
+        .text_color(colors.text)
+        .child(marker)
+        .child(SharedString::from(format!("{}...", activity.label())))
+}
+
+/// The one decision the sync panel ever asks for.
+fn conflict_card(
+    reason: &str,
+    colors: Palette,
+    style: Style,
+    keep_local: ClickHandler,
+    keep_remote: ClickHandler,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(SPACE_RELATED))
+        .p(px(SPACE_BLOCK))
+        .rounded(px(16.))
+        .bg(alpha(colors.peach, 0.12))
+        .border_1()
+        .border_color(alpha(colors.peach, 0.4))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(SPACE_GROUP))
+                .text_size(px(14.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(dot(colors.peach, 8.))
+                .child("Sync conflict"),
+        )
+        .child(div().text_size(px(13.)).child(capitalized(reason)))
+        .child(
+            div()
+                .text_size(px(13.))
+                .text_color(colors.subtext)
+                .child("Choose the copy to keep. The other one is replaced."),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(SPACE_RELATED))
+                .child(action_button(
+                    "sync-keep-remote",
+                    "Keep AnkiWeb copy",
+                    ButtonTone::Primary,
+                    style,
+                    keep_remote,
+                ))
+                .child(action_button(
+                    "sync-keep-local",
+                    "Keep local copy",
+                    ButtonTone::Neutral,
+                    style,
+                    keep_local,
+                )),
+        )
+}
+
+/// Upper-cases the first letter so a stored reason reads as a sentence.
+fn capitalized(reason: &str) -> String {
+    let mut characters = reason.chars();
+    characters.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(characters).collect()
+    })
 }
 
 fn labeled_input(
@@ -652,8 +723,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        login_and_sync, read_state, refresh_message, retained_conflict,
-        should_auto_sync, sync_message, sync_status,
+        SyncActivity, capitalized, login_and_sync, read_state, refresh_message,
+        retained_conflict, should_auto_sync, sync_message,
     };
     #[test]
     fn footer_reads_the_last_sync_from_the_state_file() {
@@ -784,9 +855,30 @@ mod tests {
     }
 
     #[test]
-    fn idle_status_is_hidden() {
-        assert_eq!(sync_status(false), None);
-        assert_eq!(sync_status(true), Some("Syncing with AnkiWeb"));
+    fn activity_labels_name_the_running_step() {
+        let labels: Vec<&str> = [
+            SyncActivity::SigningIn,
+            SyncActivity::Syncing,
+            SyncActivity::KeepingLocal,
+            SyncActivity::KeepingRemote,
+        ]
+        .into_iter()
+        .map(SyncActivity::label)
+        .collect();
+        assert_eq!(labels[1], "Syncing with AnkiWeb");
+        assert_eq!(labels[2], "Keeping the local copy");
+        let unique: std::collections::HashSet<&str> =
+            labels.iter().copied().collect();
+        assert_eq!(unique.len(), labels.len());
+    }
+
+    #[test]
+    fn conflict_reasons_start_a_sentence() {
+        assert_eq!(
+            capitalized("both collections changed since the last sync"),
+            "Both collections changed since the last sync"
+        );
+        assert_eq!(capitalized(""), "");
     }
 
     #[test]

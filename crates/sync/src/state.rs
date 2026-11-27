@@ -28,6 +28,12 @@ pub struct SyncState {
     pub host_key: String,
     /// Last successful remote collection modification time in milliseconds.
     pub last_mod: Option<i64>,
+    /// Local collection modification time the last successful sync covered.
+    ///
+    /// `AnkiWeb` stamps its own `mod` on an upload or download, so comparing
+    /// the local file with `last_mod` alone reads every server re-stamp as a
+    /// local change too.
+    pub last_local_mod: Option<i64>,
     /// Last successful remote schema modification time in milliseconds.
     pub last_scm: Option<i64>,
     /// Last server USN observed during a successful sync.
@@ -50,6 +56,7 @@ impl Default for SyncState {
             endpoint: DEFAULT_ENDPOINT.to_owned(),
             host_key: String::new(),
             last_mod: None,
+            last_local_mod: None,
             last_scm: None,
             last_usn: 0,
             last_media_usn: 0,
@@ -68,6 +75,7 @@ impl fmt::Debug for SyncState {
             .field("endpoint", &self.endpoint)
             .field("host_key", &"<redacted>")
             .field("last_mod", &self.last_mod)
+            .field("last_local_mod", &self.last_local_mod)
             .field("last_scm", &self.last_scm)
             .field("last_usn", &self.last_usn)
             .field("last_media_usn", &self.last_media_usn)
