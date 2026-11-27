@@ -1,0 +1,24 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "dev.ranki.android"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "dev.ranki.android"
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName "0.1.0"
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix ".debug"
+        }
+        release {
+        }
+    }
+}
