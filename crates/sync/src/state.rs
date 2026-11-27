@@ -34,6 +34,9 @@ pub struct SyncState {
     pub last_usn: i32,
     /// Last media USN observed during a successful sync.
     pub last_media_usn: i32,
+    /// A media refill started and has not completed.
+    #[serde(default)]
+    pub media_refill_needed: bool,
     /// Last successful sync time in Unix seconds.
     pub last_success: Option<i64>,
     /// Number of consecutive failed attempts.
@@ -50,6 +53,7 @@ impl Default for SyncState {
             last_scm: None,
             last_usn: 0,
             last_media_usn: 0,
+            media_refill_needed: false,
             last_success: None,
             failures: 0,
         }
@@ -67,6 +71,7 @@ impl fmt::Debug for SyncState {
             .field("last_scm", &self.last_scm)
             .field("last_usn", &self.last_usn)
             .field("last_media_usn", &self.last_media_usn)
+            .field("media_refill_needed", &self.media_refill_needed)
             .field("last_success", &self.last_success)
             .field("failures", &self.failures)
             .finish()
