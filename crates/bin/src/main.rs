@@ -13,12 +13,9 @@ use ranki_core::FsrsScheduler;
 use ranki_format::export_apkg;
 use ranki_format::export_colpkg;
 use ranki_format::import_apkg;
-use ranki_model::Card;
 use ranki_model::Id;
 use ranki_model::NewNote;
 use ranki_model::Rating;
-use ranki_model::RevLog;
-use ranki_model::RevLogKind;
 use ranki_model::ReviewDecision;
 use ranki_model::StockModelKind;
 use ranki_model::Store;
@@ -462,7 +459,11 @@ fn maybe_optimize(config: &mut config::Config, settings: &config::Settings) {
         return;
     };
     let before = config.clone();
-    optimize::maybe_auto_optimize(&collection, config, now);
+    let Ok(timing) = collection.timing(now) else {
+        eprintln!("ranki: auto-optimize: cannot read collection timing");
+        return;
+    };
+    optimize::maybe_auto_optimize(&collection, config, &timing);
     if *config != before
         && let Err(error) = config::save(config)
     {
@@ -600,7 +601,7 @@ fn print_answer(
     scheduler: &FsrsScheduler,
 ) -> CliResult<()> {
     let decision =
-        answer_card(collection, card_id, rating, now_secs()?, scheduler)?;
+        answer_card(collection, card_id, rating, now_secs()?, scheduler, 0)?;
     println!("{}\t{}", card_id, decision.card.due);
     Ok(())
 }
@@ -985,13 +986,6 @@ pub(crate) fn now_secs() -> CliResult<i64> {
     unix_i64(duration.as_secs().into())
 }
 
-pub(crate) fn now_ms() -> CliResult<i64> {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| CliError::Message(error.to_string()))?;
-    unix_i64(duration.as_millis())
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "the shared answer helper needs store, card, rating, time, and scheduler"
@@ -1002,41 +996,22 @@ pub(crate) fn answer_card<S: Store>(
     rating: Rating,
     now: i64,
     scheduler: &FsrsScheduler,
+    answer_ms: u32,
 ) -> CliResult<ReviewDecision> {
     let card = store.card(card_id)?.ok_or_else(|| {
         CliError::Message(format!("card not found: {card_id}"))
     })?;
-    let collection_start_secs = store.collection_created()?;
+    let timing = store.timing(now)?;
+    let last_review_secs = store.last_review_secs(card_id)?;
     let deck_scheduler =
         ranki_core::scheduler_for_card(scheduler, store, &card);
-    let decision =
-        deck_scheduler.schedule(&card, rating, now, collection_start_secs);
+    let decision = deck_scheduler
+        .schedule_timed(&card, rating, &timing, last_review_secs, answer_ms)
+        .ok_or_else(|| {
+            CliError::Message(format!("card {card_id} is not due"))
+        })?;
     store.apply_review(&decision)?;
     Ok(decision)
-}
-
-pub(crate) fn save_card<S: Store>(store: &mut S, card: Card) -> CliResult<()> {
-    let expected_modified = card.modified;
-    let expected_usn = card.usn;
-    let log_id = ranki_model::next_id(now_ms()?);
-    let log = RevLog {
-        id: log_id,
-        card_id: card.id,
-        usn: 0,
-        ease: Rating::Good,
-        interval: card.interval,
-        last_interval: 0,
-        factor: card.factor,
-        time_ms: 0,
-        kind: RevLogKind::Manual,
-    };
-    store.apply_review(&ReviewDecision {
-        card,
-        revlog: log,
-        expected_modified,
-        expected_usn,
-    })?;
-    Ok(())
 }
 
 fn check(path: &Path) -> CliResult<()> {

@@ -19,7 +19,6 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use unicode_normalization::UnicodeNormalization;
 
-const DAY_SECS: i64 = 86_400;
 static GUID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const BASE91: &[u8; 91] =
     b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&()*+,-./:;<=>?@[]^_`{|}~";
@@ -42,14 +41,38 @@ pub fn now_ms() -> Result<i64, StoreError> {
         .map_err(|_| StoreError::Backend("clock overflow".into()))
 }
 
-pub fn day_number(
-    now_secs: i64,
-    collection_created: i64,
-) -> Result<i64, StoreError> {
-    now_secs
-        .checked_sub(collection_created)
-        .map(|elapsed| elapsed.div_euclid(DAY_SECS))
-        .ok_or_else(|| StoreError::InvalidData("invalid timestamp".into()))
+/// Minutes west of UTC in the local timezone, including daylight saving time.
+///
+/// # Errors
+/// Returns an error when the timestamp cannot be represented.
+pub fn local_minutes_west(now_secs: i64) -> Result<i32, StoreError> {
+    let stamp =
+        chrono::DateTime::from_timestamp(now_secs, 0).ok_or_else(|| {
+            StoreError::InvalidData(format!("invalid timestamp: {now_secs}"))
+        })?;
+    Ok(stamp
+        .with_timezone(&chrono::Local)
+        .offset()
+        .utc_minus_local()
+        .div_euclid(60))
+}
+
+fn conf_value(
+    conf: &str,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    serde_json::from_str::<serde_json::Value>(conf)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+}
+
+/// True when the collection metadata still declares the original scheduler.
+pub fn scheduler_v1_conf(conf: &str) -> bool {
+    conf_value(conf).is_some_and(|object| {
+        object
+            .get("schedVer")
+            .and_then(serde_json::Value::as_i64)
+            .is_none_or(|version| version < 2)
+    })
 }
 
 pub fn next_id() -> Result<Id, StoreError> {

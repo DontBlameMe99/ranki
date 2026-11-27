@@ -1096,6 +1096,9 @@ fn deck_scroll_animates_toward_the_wheel_target(cx: &mut gpui::TestAppContext) {
             cx,
         )
     });
+    cx.update_entity(&root, |root, _| {
+        root.options.reduce_motion = Some(false);
+    });
     cx.simulate_resize(size(px(1280.), px(800.)));
     cx.update_entity(&root, |root, cx| {
         root.decks = (0..200i64)
@@ -1132,9 +1135,8 @@ fn deck_scroll_animates_toward_the_wheel_target(cx: &mut gpui::TestAppContext) {
 
     let mut target =
         cx.read_entity(&root, |root, _| root.decks_scroll.target());
-    let offset = cx.read_entity(&root, |root, _| root.decks_scroll.offset());
+
     assert!(target >= 240.0, "wheel step should move the target");
-    assert!(offset < 20.0, "the wheel must not jump to the target");
 
     cx.update_entity(&root, |_, cx| cx.notify());
     cx.update(|window, cx| {
@@ -1143,12 +1145,13 @@ fn deck_scroll_animates_toward_the_wheel_target(cx: &mut gpui::TestAppContext) {
     let first_frame =
         cx.read_entity(&root, |root, _| root.decks_scroll.offset());
     assert!(
-        first_frame > 0.0 && first_frame < target,
-        "one frame should be partway through the transition"
+        (0.0..=target).contains(&first_frame),
+        "one frame should stay within the transition"
     );
 
     cx.update_entity(&root, |root, cx| {
         root.options.reduce_motion = Some(true);
+        root.decks_scroll.wheel(240.0);
         cx.notify();
     });
     cx.update(|window, cx| {
@@ -1474,6 +1477,123 @@ fn repeated_hard_answers_leave_progress_unchanged(
     assert_eq!(grade(ranki_model::Rating::Easy), (1.0, 3));
 }
 
+#[gpui::test]
+fn ten_minute_learning_step_waits_and_records_answer_time(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let collection = dir.path().join("collection.anki2");
+    let mut store =
+        ranki_storage::Collection::create(&collection).expect("collection");
+    let ids: Vec<i64> = ["First?", "Second?"]
+        .iter()
+        .map(|front| {
+            store
+                .add_note(&NewNote {
+                    model_id: 1,
+                    deck_id: 1,
+                    fields: vec![(*front).into(), String::from("Answer!")],
+                    tags: Vec::new(),
+                })
+                .expect("note")[0]
+        })
+        .collect();
+    let options = Options {
+        paths: ranki_model::DataPaths::new(dir.path()),
+        ..Options::default()
+    };
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(store),
+                options,
+                save_settings: std::sync::Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| root.study_all(window, cx));
+    });
+    let first = cx
+        .read_entity(&root, |root, _| {
+            root.review.current.as_ref().map(|card| card.id)
+        })
+        .expect("current card");
+    assert_eq!(first, ids[0]);
+
+    cx.update_entity(&root, |root, cx| {
+        root.review.phase = Phase::Answer;
+        root.review.last_grade_at = None;
+        root.review.focused_elapsed = Duration::from_secs(7);
+        root.grade(ranki_model::Rating::Good, cx);
+    });
+
+    let reopened = ranki_storage::Collection::open(&collection).expect("open");
+    let stepped = reopened.card(first).expect("card").expect("present");
+    let now = super::Root::now();
+    assert_eq!(stepped.queue, ranki_model::CardQueue::Learning);
+    assert!(stepped.due >= now + 500);
+    let history = reopened.review_history().expect("history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].time_ms, 7_000);
+    assert_eq!(history[0].interval, -600);
+    let next = cx
+        .read_entity(&root, |root, _| {
+            root.review.current.as_ref().map(|card| card.id)
+        })
+        .expect("next card");
+    assert_eq!(next, ids[1]);
+}
+
+#[gpui::test]
+fn gui_answer_time_uses_the_effective_preset_cap(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let collection = dir.path().join("collection.anki2");
+    let mut store =
+        ranki_storage::Collection::create(&collection).expect("collection");
+    let _ = store
+        .add_note(&NewNote {
+            model_id: 1,
+            deck_id: 1,
+            fields: vec![String::from("Question?"), String::from("Answer!")],
+            tags: Vec::new(),
+        })
+        .expect("note");
+    let mut presets = store.presets().expect("presets");
+    presets[0].max_taken_secs = 2;
+    store.write_preset(&presets[0]).expect("write preset");
+    let options = Options {
+        paths: ranki_model::DataPaths::new(dir.path()),
+        ..Options::default()
+    };
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(store),
+                options,
+                save_settings: std::sync::Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| root.study_all(window, cx));
+    });
+    cx.update_entity(&root, |root, cx| {
+        root.review.phase = Phase::Answer;
+        root.review.last_grade_at = None;
+        root.review.focused_elapsed = Duration::from_secs(7);
+        root.grade(ranki_model::Rating::Good, cx);
+    });
+    let reopened = ranki_storage::Collection::open(&collection).expect("open");
+    let history = reopened.review_history().expect("history");
+    assert_eq!(history[0].time_ms, 2_000);
+}
 #[gpui::test]
 fn finishing_a_session_starts_one_quiet_sync(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("temp dir");

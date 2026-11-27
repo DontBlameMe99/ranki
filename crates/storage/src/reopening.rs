@@ -22,6 +22,7 @@ use ranki_model::ReviewDecision;
 use ranki_model::StockModelKind;
 use ranki_model::Store;
 use ranki_model::StoreError;
+use ranki_model::Timing;
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
 use std::path::Path;
@@ -102,6 +103,9 @@ impl Store for ReopeningCollection {
         stats(deck_id: Option<Id>, now_secs: i64) -> Result<DeckStats, StoreError>;
         deck_stats(now_secs: i64) -> Result<DeckTotals, StoreError>;
         collection_created() -> Result<i64, StoreError>;
+        timing(now_secs: i64) -> Result<Timing, StoreError>;
+        max_taken_secs(deck_id: Id) -> Result<u32, StoreError>;
+        last_review_secs(card_id: Id) -> Result<Option<i64>, StoreError>;
     }
 
     write_methods! {
@@ -115,6 +119,7 @@ impl Store for ReopeningCollection {
         update_note(note: &Note, deck_id: Id) -> Result<(), StoreError>;
         remove_card(id: Id) -> Result<(), StoreError>;
         apply_review(decision: &ReviewDecision) -> Result<Id, StoreError>;
+        update_card(card: &Card, now_secs: i64) -> Result<(), StoreError>;
         undo_review(before: &Card, revlog_id: Id) -> Result<bool, StoreError>;
     }
 

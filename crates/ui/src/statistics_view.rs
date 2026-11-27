@@ -7,7 +7,7 @@ use gpui::{
     Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
     Rgba, StatefulInteractiveElement, Styled, Window, div, px,
 };
-use ranki_model::{Rating, RevLog, RevLogKind};
+use ranki_model::{RevLog, RevLogKind};
 
 use crate::{
     app::{Root, duration_label},
@@ -133,6 +133,7 @@ impl Statistics {
 }
 
 /// Anki numbers days from the collection's creation time, not from midnight.
+#[cfg(test)]
 #[must_use]
 pub fn day_number(timestamp_secs: i64, collection_start_secs: i64) -> i64 {
     timestamp_secs
@@ -219,13 +220,37 @@ pub fn forecast_days(
 
 /// Aggregates a full review log. Manual log entries are scheduling changes,
 /// not answers, so they stay out of every count.
+#[cfg(test)]
 #[must_use]
 pub fn build_statistics(
     history: &[RevLog],
     now_secs: i64,
     collection_start_secs: i64,
 ) -> Statistics {
-    let today = day_number(now_secs, collection_start_secs);
+    build_statistics_impl(
+        history,
+        day_number(now_secs, collection_start_secs),
+        |timestamp| day_number(timestamp, collection_start_secs),
+    )
+}
+
+/// Aggregates a full review log using Anki's day boundaries.
+#[must_use]
+pub fn build_statistics_timed(
+    history: &[RevLog],
+    timing: &ranki_model::Timing,
+) -> Statistics {
+    let today = i64::from(timing.days_elapsed);
+    build_statistics_impl(history, today, |timestamp| {
+        today.saturating_sub(i64::from(timing.elapsed_days_since(timestamp)))
+    })
+}
+
+fn build_statistics_impl(
+    history: &[RevLog],
+    today: i64,
+    day_of: impl Fn(i64) -> i64,
+) -> Statistics {
     let mut days = [DayReviews::default(); HEATMAP_DAYS];
     for (index, day) in days.iter_mut().enumerate() {
         day.day = today.saturating_sub(
@@ -236,21 +261,16 @@ pub fn build_statistics(
     let mut per_day: HashMap<i64, usize> = HashMap::new();
     let mut stats = Statistics::default();
     for log in history {
-        if log.kind == RevLogKind::Manual {
+        if matches!(log.kind, RevLogKind::Manual | RevLogKind::Rescheduled) {
             continue;
         }
-        let day = day_number(log.id / 1000, collection_start_secs);
+        let day = day_of(log.id / 1_000);
         let millis = u64::from(log.time_ms);
         *per_day.entry(day).or_default() += 1;
         stats.total_reviews += 1;
         stats.total_millis = stats.total_millis.saturating_add(millis);
 
-        let rating = match log.ease {
-            Rating::Again => 0,
-            Rating::Hard => 1,
-            Rating::Good => 2,
-            Rating::Easy => 3,
-        };
+        let rating = usize::from(log.ease.saturating_sub(1).min(3));
         let offset = today.saturating_sub(day);
         if day <= today && offset < i64::try_from(HEATMAP_DAYS).unwrap_or(168) {
             let index = HEATMAP_DAYS
@@ -829,7 +849,7 @@ mod tests {
             id: (START + day * 86_400) * 1000,
             card_id: 1,
             usn: 0,
-            ease: rating,
+            ease: rating.code(),
             interval: 1,
             last_interval: 0,
             factor: 2500,
@@ -871,6 +891,20 @@ mod tests {
         assert_eq!(stats.days[HEATMAP_DAYS - 2].reviews, 1);
     }
 
+    #[test]
+    fn rescheduled_logs_stay_out_of_review_counts() {
+        let mut rescheduled = log(3, Rating::Good, 1_000);
+        rescheduled.kind = RevLogKind::Rescheduled;
+        let mut manual = log(3, Rating::Good, 1_000);
+        manual.kind = RevLogKind::Manual;
+        let stats = build_statistics(
+            &[rescheduled, manual],
+            START + 3 * 86_400 + 100,
+            START,
+        );
+        assert_eq!(stats.total_reviews, 0);
+        assert_eq!(stats.total_millis, 0);
+    }
     #[test]
     fn heatmap_covers_the_full_window() {
         let logs: Vec<_> =

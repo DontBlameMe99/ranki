@@ -448,7 +448,18 @@ fn new_collections_use_the_full_shared_schema11_defaults() {
     assert_eq!(conf["curDeck"], 1);
     assert!(conf["curModel"].is_null());
     assert_eq!(conf["nextPos"], 1);
-    assert_eq!(conf["creationOffset"], 0);
+    assert_eq!(
+        conf["creationOffset"],
+        ranki_storage::local_minutes_west(
+            conn.query_row::<i64, _, _>(
+                "SELECT crt FROM col WHERE id = 1",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    );
     assert_eq!(
         ranki_storage::schema11_default_conf(None)["creationOffset"],
         Value::Null

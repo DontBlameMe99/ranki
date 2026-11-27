@@ -3,7 +3,7 @@
 
 mod fsrs;
 mod optimizer;
-mod shared;
+pub(crate) mod shared;
 
 #[cfg(test)]
 mod tests;
@@ -49,8 +49,6 @@ pub fn scheduler_for_card<S: Store + ?Sized>(
     card: &Card,
 ) -> FsrsScheduler {
     let steps = store.deck_steps(card.deck_id).unwrap_or_default();
-    scheduler.with_steps(&steps)
+    let max_taken = store.max_taken_secs(card.deck_id).unwrap_or(60);
+    scheduler.with_steps(&steps).with_max_taken_secs(max_taken)
 }
-
-/// Length of a day in the Unix time scale used by Anki's day numbers.
-const SECONDS_PER_DAY: i64 = 86_400;
