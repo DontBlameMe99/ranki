@@ -541,7 +541,9 @@ impl Root {
         let show_detail_side = width >= 900.0;
         let show_detail = width >= BROWSE_DETAIL_MIN_WIDTH;
         let smooth = self.motion_ms(1) > 0;
-        self.browse_smooth.advance(window, smooth);
+        if self.browse_smooth.advance(window, smooth) {
+            cx.notify();
+        }
         let colors = self.colors();
         let style = Style::new(colors, self.theme());
         let query = self.browse.search.read(cx).text();
@@ -638,6 +640,7 @@ impl Root {
                 .gap(px(SPACE_GROUP))
                 .px(px(SPACE_BLOCK))
                 .py(px(SPACE_RELATED))
+                .flex_none()
                 .text_size(px(12.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(colors.subtext)
@@ -723,6 +726,7 @@ impl Root {
                 .items_center()
                 .gap(px(SPACE_GROUP))
                 .h(px(CARD_HEIGHT))
+                .flex_none()
                 .px(px(SPACE_BLOCK))
                 .pl(px(SPACE_BLOCK + SPACE_SECTION))
                 .border_t_1()
@@ -891,6 +895,7 @@ impl Root {
             .items_center()
             .gap(px(SPACE_GROUP))
             .h(px(GROUP_HEIGHT))
+            .flex_none()
             .px(px(SPACE_BLOCK))
             .pl(px(SPACE_BLOCK + SPACE_SECTION * group.depth as f32))
             .border_t_1()
