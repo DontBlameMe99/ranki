@@ -4116,7 +4116,10 @@ impl Root {
                 self.grade(rating, cx);
                 self.restore_review_focus(window);
             }
-            UiAction::Retry => self.toggle_reveal(cx),
+            UiAction::Retry => {
+                self.toggle_reveal(cx);
+                self.restore_review_focus(window);
+            }
             UiAction::Reload => self.request_reload(window, cx),
             UiAction::RetryStatistics => {
                 if self.view == View::Statistics {
