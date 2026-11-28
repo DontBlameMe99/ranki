@@ -22,15 +22,15 @@ use ranki_storage::Collection;
 use ranki_storage::ReopeningCollection;
 use tempfile::TempDir;
 
-use crate::card::media_names;
-use crate::card::plain;
-use crate::card::sides;
-use crate::card::sides_text;
-use crate::platform;
-use crate::state::AppState;
-use crate::state::ReviewPhase;
-use crate::state::Screen;
-use crate::state::browse_answer;
+use crate::mobile::card::media_names;
+use crate::mobile::card::plain;
+use crate::mobile::card::sides;
+use crate::mobile::card::sides_text;
+use crate::mobile::platform;
+use crate::mobile::state::AppState;
+use crate::mobile::state::ReviewPhase;
+use crate::mobile::state::Screen;
+use crate::mobile::state::browse_answer;
 
 fn note(fields: &[&str], model_id: Id) -> Note {
     Note {

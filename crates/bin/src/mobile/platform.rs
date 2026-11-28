@@ -15,13 +15,13 @@ use ranki_model::config::parse;
 use ranki_storage::Collection;
 use ranki_storage::ReopeningCollection;
 
-use crate::state::AppState;
-use crate::ui::MobileApp;
+use crate::mobile::state::AppState;
+use crate::mobile::ui::MobileApp;
 
 #[cfg(target_os = "android")]
 use winit::platform::android::activity::AndroidApp;
 
-const APP_ID: &str = "ranki-mobile";
+const APP_ID: &str = "ranki";
 const WINDOW_WIDTH: f32 = 390.0;
 const WINDOW_HEIGHT: f32 = 844.0;
 
@@ -121,7 +121,7 @@ pub fn run() -> eframe::Result<()> {
 /// created or opened, or eframe cannot start the renderer.
 pub fn run_with_android_app(app: AndroidApp) -> eframe::Result<()> {
     if let Some(root) = app.internal_data_path() {
-        set_android_dir("RANKI_DATA_DIR", &root.join("data"));
+        set_android_dir("RANKI_DATA_DIR", &root.join("ranki"));
         set_android_dir("RANKI_CONFIG_DIR", &root.join("config"));
     }
     let mut options = native_options();
@@ -144,15 +144,15 @@ fn run_with_options(options: eframe::NativeOptions) -> eframe::Result<()> {
     eframe::run_native(APP_ID, options, Box::new(move |_| Ok(Box::new(app))))
 }
 
-fn build_app() -> crate::Result<MobileApp> {
+fn build_app() -> crate::mobile::Result<MobileApp> {
     let (maybe_data_dir, maybe_config_dir) = initial_paths();
     let data_dir = maybe_data_dir.ok_or_else(|| {
-        crate::MobileError::Message(String::from(
+        crate::mobile::MobileError::Message(String::from(
             "cannot resolve the data directory; set RANKI_DATA_DIR or HOME",
         ))
     })?;
     let config_dir = maybe_config_dir.ok_or_else(|| {
-        crate::MobileError::Message(String::from(
+        crate::mobile::MobileError::Message(String::from(
             "cannot resolve the config directory; set RANKI_CONFIG_DIR or HOME",
         ))
     })?;

@@ -18,8 +18,8 @@ use egui::{
 use ranki_model::{Card, CardType, Rating, ThemeChoice};
 use std::time::Duration;
 
-use crate::card::{render_side, sides};
-use crate::state::{AppState, DeckRow, ReviewPhase, Screen, ToastKind};
+use crate::mobile::card::{render_side, sides};
+use crate::mobile::state::{AppState, DeckRow, ReviewPhase, Screen, ToastKind};
 
 const PAGE_MARGIN: i8 = 16;
 const TAB_HEIGHT: f32 = 56.0;

@@ -1,3 +1,5 @@
+#![cfg(not(any(target_os = "android", target_os = "ios")))]
+
 //! Command line entry point for Ranki.
 
 mod config;
@@ -119,6 +121,8 @@ struct Cli {
         value_name = "PATH"
     )]
     bench_collection: Option<PathBuf>,
+    #[arg(long, global = true)]
+    mobile: bool,
     #[arg(long, global = true, conflicts_with = "no_sync")]
     sync: bool,
     #[arg(long, global = true, conflicts_with = "sync")]
@@ -343,7 +347,7 @@ fn run_with_sync(
     let result = match command {
         Command::Mcp => mcp::serve(&settings.paths, scheduler),
         #[cfg(feature = "desktop")]
-        Command::Gui => match open_gui(&settings, config) {
+        Command::Gui => match open_gui(&settings, config, cli.mobile) {
             Ok(ui_settings) => {
                 if let Some(settings_from_ui) = ui_settings {
                     final_settings = settings_from_ui;
@@ -627,10 +631,26 @@ fn print_stats(collection: &Collection, deck: Option<Id>) -> CliResult<()> {
 }
 
 #[cfg(feature = "desktop")]
+#[cfg(feature = "desktop")]
 fn open_gui(
     settings: &config::Settings,
     config: &config::Config,
+    mobile: bool,
 ) -> CliResult<Option<config::Settings>> {
+    if mobile {
+        #[cfg(feature = "mobile")]
+        {
+            ranki::mobile::platform::run()
+                .map_err(|error| CliError::Message(error.to_string()))?;
+            return Ok(None);
+        }
+        #[cfg(not(feature = "mobile"))]
+        {
+            return Err(CliError::Message(String::from(
+                "the mobile layout requires --features mobile",
+            )));
+        }
+    }
     let collection = open_or_create(&settings.paths.collection)?;
     drop(collection);
     let store = ReopeningCollection::new(&settings.paths.collection);

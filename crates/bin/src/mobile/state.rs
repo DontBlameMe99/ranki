@@ -23,8 +23,8 @@ use ranki_sync::{
     SyncOutcome, SyncState, SyncTransport, TransportConfig, clear_host_key,
 };
 
-use crate::card::{sides, sides_text};
-use crate::error::Result;
+use crate::mobile::card::{sides, sides_text};
+use crate::mobile::error::Result;
 use ranki_core::scheduler_for_card;
 
 const BROWSE_ROW_LIMIT: usize = 200;

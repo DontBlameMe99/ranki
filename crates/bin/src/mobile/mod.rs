@@ -1,7 +1,4 @@
-//! Touch-first Ranki UI built with egui.
-//!
-//! GPUI stays in the desktop crate. This crate owns the phone layout, the
-//! store-backed actions, and the Android and iOS entry points.
+//! Ranki's touch renderer and native mobile entry points.
 
 #![cfg_attr(
     any(target_os = "android", target_os = "ios"),
