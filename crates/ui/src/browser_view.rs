@@ -57,8 +57,6 @@ pub struct BrowserRow {
 #[derive(Clone, Debug)]
 pub struct BrowseGroup {
     pub path: String,
-    pub name: String,
-    pub depth: usize,
     /// Cards in this deck and all of its subdecks.
     pub count: usize,
     pub has_children: bool,
@@ -282,12 +280,8 @@ pub fn build_browse_entries(
         siblings.sort();
     }
     let mut entries = Vec::with_capacity(hits.len().saturating_mul(2));
-    let mut stack = roots
-        .into_iter()
-        .rev()
-        .map(|path| (path, 0usize))
-        .collect::<Vec<_>>();
-    while let Some((path, depth)) = stack.pop() {
+    let mut stack = roots.into_iter().rev().collect::<Vec<_>>();
+    while let Some(path) = stack.pop() {
         let cards = cards_by_path
             .get(path.as_str())
             .cloned()
@@ -295,10 +289,8 @@ pub fn build_browse_entries(
         let has_children = children.contains_key(&path);
         let open = expanded.contains(&path);
         entries.push(BrowseEntry::Group(BrowseGroup {
-            name: path.rsplit("::").next().unwrap_or(&path).to_owned(),
             count: counts.get(path.as_str()).copied().unwrap_or(0),
             path: path.clone(),
-            depth,
             has_children,
             expanded: open,
             key: SharedString::from(format!("browse-group-{path}")),
@@ -311,9 +303,7 @@ pub fn build_browse_entries(
             entries.push(BrowseEntry::Card { row: index });
         }
         if let Some(kids) = children.get(&path) {
-            for child in kids.iter().rev() {
-                stack.push((child.clone(), depth.saturating_add(1)));
-            }
+            stack.extend(kids.iter().rev().cloned());
         }
     }
     entries
@@ -897,7 +887,6 @@ impl Root {
             .h(px(GROUP_HEIGHT))
             .flex_none()
             .px(px(SPACE_BLOCK))
-            .pl(px(SPACE_BLOCK + SPACE_SECTION * group.depth as f32))
             .border_t_1()
             .border_color(colors.surface0)
             .bg(bg)
@@ -961,8 +950,8 @@ impl Root {
                         .text_ellipsis()
                         .text_size(px(14.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .font_family(crate::theme::font_for_text(&group.name))
-                        .child(group.name.clone()),
+                        .font_family(crate::theme::font_for_text(&group.path))
+                        .child(group.path.clone()),
                 )
                 .child(
                     div()
@@ -1289,10 +1278,7 @@ mod tests {
                 .iter()
                 .map(|entry| match entry {
                     BrowseEntry::Group(group) => {
-                        format!(
-                            "{}:{}:{}",
-                            group.path, group.count, group.depth
-                        )
+                        format!("{}:{}", group.path, group.count)
                     }
                     BrowseEntry::Card { row } => {
                         format!("card:{}", hits[*row].card_id)
@@ -1302,12 +1288,12 @@ mod tests {
             assert_eq!(
                 lines,
                 [
-                    "Languages:3:0",
+                    "Languages:3",
                     "card:4",
-                    "Languages::French:2:1",
+                    "Languages::French:2",
                     "card:1",
                     "card:3",
-                    "Math:1:0",
+                    "Math:1",
                     "card:2",
                 ]
             );
@@ -1535,8 +1521,6 @@ mod tests {
                 if index % 5 == 0 {
                     BrowseEntry::Group(BrowseGroup {
                         path: format!("Deck {index}"),
-                        name: format!("Deck {index}"),
-                        depth: 0,
                         count: 1,
                         has_children: false,
                         expanded: true,
