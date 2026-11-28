@@ -80,12 +80,13 @@ pub fn run(
                     ..Default::default()
                 },
                 |window, cx| {
-                    // Stop the loop before GPUI removes the window. A frame
-                    // callback still queued during close would otherwise log
-                    // "window not found" after the window is gone.
+                    // Keep the window alive until the event loop exits. A
+                    // close request still queues Wayland frame callbacks, and
+                    // those log "window not found" if GPUI removes the window
+                    // first. The process exit tears the window down.
                     window.on_window_should_close(cx, |_, app| {
                         app.quit();
-                        true
+                        false
                     });
                     let root = cx.new(|cx| {
                         let root = app::Root::new(

@@ -326,7 +326,8 @@ fn run_with_sync(
     let (auth, auto_sync) = sync::startup_credentials(&settings, manual_sync);
 
     if auto_sync
-        && sync_once_and_warn(transport, &settings, auth.as_ref()).is_some()
+        && sync_once_and_warn(transport, &settings, auth.as_ref(), true)
+            .is_some()
     {
         maybe_optimize(config, &settings);
     }
@@ -342,6 +343,10 @@ fn run_with_sync(
     let mut final_settings = settings.clone();
     #[cfg(not(feature = "desktop"))]
     let final_settings = settings.clone();
+    #[cfg(feature = "desktop")]
+    let warn_shutdown_sync = !matches!(&command, Command::Gui);
+    #[cfg(not(feature = "desktop"))]
+    let warn_shutdown_sync = true;
     let result = match command {
         Command::Mcp => mcp::serve(&settings.paths, scheduler),
         #[cfg(feature = "desktop")]
@@ -425,23 +430,33 @@ fn run_with_sync(
             transport,
             &final_settings,
             shutdown_auth.as_ref(),
+            warn_shutdown_sync,
         );
     }
     result
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the transport, settings, credentials, and warning flag are distinct inputs"
+)]
 fn sync_once_and_warn(
     transport: &mut dyn SyncTransport,
     settings: &config::Settings,
     auth: Option<&sync::SyncAuth>,
+    warn: bool,
 ) -> Option<SyncOutcome> {
     match sync::sync_once(sync::TransportRef(transport), settings, auth) {
         Ok(outcome) => {
-            sync::warn_outcome(&outcome);
+            if warn {
+                sync::warn_outcome(&outcome);
+            }
             Some(outcome)
         }
         Err(error) => {
-            eprintln!("ranki: sync: {error}");
+            if warn {
+                eprintln!("ranki: sync: {error}");
+            }
             None
         }
     }
