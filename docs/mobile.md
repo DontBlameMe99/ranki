@@ -10,6 +10,12 @@ The touch renderer shares `ranki-model`, `ranki-core`, `ranki-storage`,
 live in `crates/bin/Cargo.toml`. Android and iOS builds disable the default desktop
 feature, so they do not compile GPUI.
 
+Android uses AndroidX `GameActivity` and the vendored winit IME backport so text
+fields open the soft keyboard and receive composed text.
+
+The touch renderer includes deck creation, rename and removal, review with undo,
+note adding and editing, browse, statistics, settings, and AnkiWeb sync.
+
 ## Desktop preview
 
 ```bash

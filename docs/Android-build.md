@@ -5,6 +5,10 @@ loads `libranki.so` and calls the `android_main` symbol already exported by
 `crates/bin/src/mobile`. GameActivity provides the soft-keyboard input support
 that `NativeActivity` lacks. There is no custom Java or Kotlin source.
 
+The build uses the vendored winit 0.30.13 copy in `vendor/winit`. It backports
+Android `TextEvent` and `TextAction` delivery from upstream PR \#4451 and maps
+Android UTF-16 selection offsets to UTF-8 byte offsets.
+
 The build has two steps:
 
 1. `cargo-ndk` compiles `-p ranki --no-default-features --lib` for
