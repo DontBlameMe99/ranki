@@ -27,4 +27,7 @@ exclude-files = [
   "crates/bin/src/mobile/mod.rs",
   # Vendored only to patch one libc constant for xattr on Linux.
   "vendor/xattr/*",
+  # Upstream winit source with the Android IME backport. It is third-party code
+  # with its own tests, so it does not count toward Ranki's coverage.
+  "vendor/winit/*",
 ]
