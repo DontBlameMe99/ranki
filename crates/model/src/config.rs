@@ -95,6 +95,11 @@ impl Default for DataPaths {
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub paths: DataPaths,
+    /// Legacy benchmark fields. The benchmark harness is shared with older
+    /// commits, so these stay for the performance workflow. Production code
+    /// uses `paths`.
+    pub collection: PathBuf,
+    pub media_dir: PathBuf,
     pub theme: ThemeChoice,
     pub font_size: f32,
     pub review_batch_size: usize,
@@ -143,6 +148,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             paths: DataPaths::default(),
+            collection: PathBuf::new(),
+            media_dir: PathBuf::new(),
             theme: ThemeChoice::System,
             font_size: 16.0,
             review_batch_size: 20,
@@ -165,6 +172,8 @@ impl Settings {
     pub fn resolve(config: &Config, paths: DataPaths) -> Self {
         Self {
             paths,
+            collection: PathBuf::new(),
+            media_dir: PathBuf::new(),
             theme: config.ui.theme,
             font_size: config.ui.font_size,
             review_batch_size: config.ui.review_batch_size,

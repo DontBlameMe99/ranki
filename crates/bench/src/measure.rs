@@ -304,7 +304,8 @@ impl Fixture {
     #[cfg(feature = "gui")]
     fn options(&self) -> Settings {
         Settings {
-            paths: ranki_model::DataPaths::new(self.directory.path()),
+            collection: self.collection.clone(),
+            media_dir: self.media.clone(),
             ..Settings::default()
         }
     }
@@ -357,10 +358,16 @@ struct ConnectServer {
 }
 
 impl ConnectServer {
-    fn start(binary: &Path, data_dir: &Path) -> BenchResult<Self> {
+    fn start(
+        binary: &Path,
+        collection: &Path,
+        data_dir: &Path,
+    ) -> BenchResult<Self> {
         let port = free_port()?;
         let child = Command::new(binary)
             .env("RANKI_DATA_DIR", data_dir)
+            .args(["--collection"])
+            .arg(collection)
             .args(["connect", "--port", &port.to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -406,9 +413,15 @@ struct McpSession {
 }
 
 impl McpSession {
-    fn start(binary: &Path, data_dir: &Path) -> BenchResult<Self> {
+    fn start(
+        binary: &Path,
+        collection: &Path,
+        data_dir: &Path,
+    ) -> BenchResult<Self> {
         let spawned = Command::new(binary)
             .env("RANKI_DATA_DIR", data_dir)
+            .args(["--collection"])
+            .arg(collection)
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -780,6 +793,9 @@ pub fn run() -> BenchResult<Report> {
             binary.display()
         )));
     }
+    let collection_arg = collection
+        .to_str()
+        .ok_or_else(|| message("collection path is not valid UTF-8"))?;
     let data_dir = fixture.directory.path();
     recorder.measure(
         "process/cli/decks",
@@ -791,7 +807,7 @@ pub fn run() -> BenchResult<Report> {
         || {
             let output = Command::new(&binary)
                 .env("RANKI_DATA_DIR", data_dir)
-                .args(["decks"])
+                .args(["--collection", collection_arg, "decks"])
                 .output()?;
             if !output.status.success()
                 || !String::from_utf8_lossy(&output.stdout).contains("Default")
@@ -811,7 +827,7 @@ pub fn run() -> BenchResult<Report> {
         || {
             let output = Command::new(&binary)
                 .env("RANKI_DATA_DIR", data_dir)
-                .args(["search", "unique42"])
+                .args(["--collection", collection_arg, "search", "unique42"])
                 .output()?;
             if !output.status.success() {
                 return Err(message("ranki search failed"));
@@ -828,12 +844,12 @@ pub fn run() -> BenchResult<Report> {
         1,
         1,
         || {
-            let server = ConnectServer::start(&binary, data_dir)?;
+            let server = ConnectServer::start(&binary, collection, data_dir)?;
             drop(server);
             Ok(())
         },
     )?;
-    let connect = ConnectServer::start(&binary, data_dir)?;
+    let connect = ConnectServer::start(&binary, collection, data_dir)?;
     recorder.measure(
         "connect/roundtrip/version",
         "answer an AnkiConnect version request within 100 ms",
@@ -869,12 +885,12 @@ pub fn run() -> BenchResult<Report> {
         1,
         1,
         || {
-            let session = McpSession::start(&binary, data_dir)?;
+            let session = McpSession::start(&binary, collection, data_dir)?;
             drop(session);
             Ok(())
         },
     )?;
-    let mut mcp = McpSession::start(&binary, data_dir)?;
+    let mut mcp = McpSession::start(&binary, collection, data_dir)?;
     recorder.measure(
         "mcp/roundtrip/tools-list",
         "answer an MCP tools/list request within 100 ms",

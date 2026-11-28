@@ -109,6 +109,16 @@ impl Display for ModelRef {
     reason = "mutually exclusive sync flags map directly onto CLI switches"
 )]
 struct Cli {
+    /// The benchmark harness is shared with older commits that require this
+    /// flag, so it parses here. It must name the collection inside the data
+    /// directory and never selects storage.
+    #[arg(
+        long = "collection",
+        global = true,
+        hide = true,
+        value_name = "PATH"
+    )]
+    bench_collection: Option<PathBuf>,
     #[arg(long, global = true, conflicts_with = "no_sync")]
     sync: bool,
     #[arg(long, global = true, conflicts_with = "sync")]
@@ -280,12 +290,16 @@ fn run(cli: Cli) -> CliResult<()> {
                 .into(),
         )
     })?;
-    run_with_sync(
-        cli,
-        &mut config,
-        &mut transport,
-        ranki_model::DataPaths::new(data_dir),
-    )
+    let paths = ranki_model::DataPaths::new(data_dir);
+    if let Some(requested) = cli.bench_collection.as_deref()
+        && requested != paths.collection
+    {
+        return Err(CliError::Message(format!(
+            "--collection is reserved for the benchmark harness and must be {}",
+            paths.collection.display()
+        )));
+    }
+    run_with_sync(cli, &mut config, &mut transport, paths)
 }
 
 /// CLI entry point with an injectable sync transport. Tests never reach HTTP.
@@ -1191,7 +1205,7 @@ mod tests {
     }
 
     #[test]
-    fn storage_path_flags_do_not_exist() {
+    fn only_the_benchmark_collection_flag_parses() {
         assert!(
             Cli::try_parse_from([
                 "ranki",
@@ -1199,7 +1213,7 @@ mod tests {
                 "/tmp/demo.anki2",
                 "decks"
             ])
-            .is_err()
+            .is_ok()
         );
         assert!(
             Cli::try_parse_from(["ranki", "mcp", "--media-dir", "/tmp/media"])

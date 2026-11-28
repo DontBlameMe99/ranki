@@ -361,6 +361,19 @@ fn walk(root: &Path, dir: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
     }
 }
 
+/// Runs the binary as if `home` were the only storage input.
+fn ranki_with_home(home: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ranki"));
+    command
+        .env("HOME", home)
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("RANKI_DATA_DIR")
+        .env_remove("RANKI_CONFIG_DIR")
+        .env_remove("RANKI_COLLECTION");
+    command
+}
+
 #[test]
 fn ranki_leaves_a_local_anki_profile_untouched() {
     let dir = tempfile::tempdir().unwrap();
@@ -374,22 +387,26 @@ fn ranki_leaves_a_local_anki_profile_untouched() {
         .unwrap();
     let before = snapshot(&anki);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ranki"))
-        .env("HOME", &home)
-        .env_remove("XDG_DATA_HOME")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("RANKI_DATA_DIR")
-        .env_remove("RANKI_CONFIG_DIR")
-        .env_remove("RANKI_COLLECTION")
-        .args(["decks"])
-        .output()
-        .unwrap();
-
+    let output = ranki_with_home(&home).args(["decks"]).output().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(home.join(".local/share/ranki/collection.anki2").is_file());
+    assert_eq!(snapshot(&anki), before);
+
+    let output = ranki_with_home(&home)
+        .args(["--collection"])
+        .arg(anki.join("User 1/collection.anki2"))
+        .args(["decks"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--collection"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(snapshot(&anki), before);
 }
