@@ -2034,12 +2034,13 @@ impl Root {
 
     /// Rebuilds the collection-wide review summary from the store's log.
     fn refresh_statistics(&mut self, cx: &mut Context<Self>) {
+        self.statistics_generation = self.statistics_generation.wrapping_add(1);
         let timing = self.timing(Self::now());
+        let modified = self.store.collection_modified().unwrap_or(0);
         match self.store.review_history() {
             Ok(history) => {
                 self.statistics = build_statistics_timed(&history, &timing);
-                self.statistics_modified =
-                    self.store.collection_modified().unwrap_or(0);
+                self.statistics_modified = modified;
                 self.statistics_next_day_at = timing.next_day_at;
             }
             Err(error) => {
@@ -2073,8 +2074,8 @@ impl Root {
         let collection = self.options.paths.collection.clone();
         let task = cx.background_executor().spawn(async move {
             let store = ranki_storage::ReopeningCollection::new(&collection);
-            let history = Store::review_history(&store)?;
             let modified = Store::collection_modified(&store)?;
+            let history = Store::review_history(&store)?;
             Ok::<_, ranki_model::StoreError>((
                 build_statistics_timed(&history, &timing),
                 modified,
@@ -3776,6 +3777,7 @@ impl Root {
             }
             UiAction::OpenStatistics => {
                 self.view = next_view(self.view, View::Statistics);
+                self.refresh_stats();
                 self.schedule_statistics_refresh(cx);
                 cx.notify();
             }
