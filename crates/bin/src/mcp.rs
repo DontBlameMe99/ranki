@@ -1427,7 +1427,7 @@ impl RankiMcp {
             let store = self.store()?;
             store.checkpoint()?;
         }
-        ranki_format::export_apkg(
+        ranki_format::export_apkg_new(
             &self.paths.collection,
             &self.media_dir(),
             &path,

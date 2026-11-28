@@ -12,8 +12,6 @@ mod sync;
 use clap::Parser;
 use clap::Subcommand;
 use ranki_core::FsrsScheduler;
-use ranki_format::export_apkg;
-use ranki_format::export_colpkg;
 use ranki_format::import_apkg;
 use ranki_model::Id;
 use ranki_model::NewNote;
@@ -1000,7 +998,7 @@ fn import_package(
 }
 
 type Exporter =
-    fn(&Path, &Path, &Path) -> Result<(), ranki_format::FormatError>;
+    fn(&Path, &Path, &Path, bool) -> Result<(), ranki_format::FormatError>;
 
 #[expect(
     clippy::too_many_arguments,
@@ -1022,39 +1020,27 @@ fn export_with_checkpoint(
     let collection = open_or_create(path)?;
     collection.checkpoint()?;
     collection.close()?;
-    let placeholder = reserve_export_path(package, force)?;
-    if let Err(error) = exporter(path, media_dir, package) {
-        if placeholder {
-            let _ = fs::remove_file(package);
-        }
-        return Err(error.into());
+    if let Err(error) = exporter(path, media_dir, package, force) {
+        return Err(CliError::Message(export_error(package, force, &error)));
     }
     println!("exported\t{}", package.display());
     Ok(())
 }
 
-/// Claims a free destination so a concurrent export cannot take it while the
-/// package is built. `--force` may replace an existing file.
-fn reserve_export_path(package: &Path, force: bool) -> CliResult<bool> {
-    if force {
-        return Ok(false);
-    }
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(package)
-    {
-        Ok(file) => {
-            drop(file);
-            Ok(true)
-        }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            Err(CliError::Message(format!(
-                "export destination already exists: {}; pass --force to overwrite",
-                package.display()
-            )))
-        }
-        Err(error) => Err(error.into()),
+/// The writer publishes without replacing an existing destination unless
+/// `--force` was passed, so a file created after the preflight check survives.
+fn export_error(
+    package: &Path,
+    force: bool,
+    error: &ranki_format::FormatError,
+) -> String {
+    if !force && fs::symlink_metadata(package).is_ok() {
+        format!(
+            "export destination already exists: {}; pass --force to overwrite",
+            package.display()
+        )
+    } else {
+        error.to_string()
     }
 }
 
@@ -1101,7 +1087,19 @@ fn export_package(
     package: &Path,
     force: bool,
 ) -> CliResult<()> {
-    export_with_checkpoint(path, media_dir, package, force, export_apkg)
+    export_with_checkpoint(
+        path,
+        media_dir,
+        package,
+        force,
+        |collection, media, destination, overwrite| {
+            if overwrite {
+                ranki_format::export_apkg(collection, media, destination)
+            } else {
+                ranki_format::export_apkg_new(collection, media, destination)
+            }
+        },
+    )
 }
 
 #[expect(
@@ -1114,7 +1112,19 @@ fn export_colpkg_package(
     package: &Path,
     force: bool,
 ) -> CliResult<()> {
-    export_with_checkpoint(path, media_dir, package, force, export_colpkg)
+    export_with_checkpoint(
+        path,
+        media_dir,
+        package,
+        force,
+        |collection, media, destination, overwrite| {
+            if overwrite {
+                ranki_format::export_colpkg(collection, media, destination)
+            } else {
+                ranki_format::export_colpkg_new(collection, media, destination)
+            }
+        },
+    )
 }
 
 fn run_deck_command(

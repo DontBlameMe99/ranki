@@ -92,7 +92,22 @@ pub fn export_apkg(
     media_dir: &Path,
     destination: &Path,
 ) -> Result<(), FormatError> {
-    package::write_apkg(collection, media_dir, destination)
+    package::write_apkg(collection, media_dir, destination, true)
+}
+
+/// Export a collection and publish without replacing a file that appeared
+/// after the caller checked the destination.
+///
+/// # Errors
+///
+/// Returns an error when the collection or media cannot be read, or the
+/// destination already exists.
+pub fn export_apkg_new(
+    collection: &Path,
+    media_dir: &Path,
+    destination: &Path,
+) -> Result<(), FormatError> {
+    package::write_apkg(collection, media_dir, destination, false)
 }
 
 /// Export one deck and its subdecks into an `.apkg` file Anki can import.
@@ -131,7 +146,7 @@ pub fn export_deck_apkg(
     filter_deck_metadata(&connection, &subtree)?;
     let media = referenced_media(&connection, media_dir)?;
     drop(connection);
-    package::write_apkg_files(snapshot.path(), &media, destination)
+    package::write_apkg_files(snapshot.path(), &media, destination, true)
 }
 
 fn deck_snapshot(collection: &Path) -> Result<NamedTempFile, FormatError> {
@@ -372,7 +387,21 @@ pub fn export_colpkg(
     media_dir: &Path,
     destination: &Path,
 ) -> Result<(), FormatError> {
-    package::write_colpkg(collection, media_dir, destination)
+    package::write_colpkg(collection, media_dir, destination, true)
+}
+
+/// Export a colpkg and publish without replacing an existing destination.
+///
+/// # Errors
+///
+/// Returns an error when the collection or media cannot be read, or the
+/// destination already exists.
+pub fn export_colpkg_new(
+    collection: &Path,
+    media_dir: &Path,
+    destination: &Path,
+) -> Result<(), FormatError> {
+    package::write_colpkg(collection, media_dir, destination, false)
 }
 
 /// Extract a `.colpkg` backup without overwriting existing files.

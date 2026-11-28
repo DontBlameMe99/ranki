@@ -71,19 +71,29 @@ pub fn read_apkg(
     Ok(ApkgPackage { collection, media })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the destination and publish policy are independent inputs"
+)]
 pub fn write_apkg(
     collection: &Path,
     media_dir: &Path,
     destination: &Path,
+    overwrite: bool,
 ) -> Result<(), FormatError> {
     let media_files = collect_media_files(media_dir)?;
-    write_apkg_files(collection, &media_files, destination)
+    write_apkg_files(collection, &media_files, destination, overwrite)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the destination and publish policy are independent inputs"
+)]
 pub fn write_apkg_files(
     collection: &Path,
     media_files: &[MediaFile],
     destination: &Path,
+    overwrite: bool,
 ) -> Result<(), FormatError> {
     schema::ensure_parent(destination)?;
     let database = snapshot_collection(collection)?;
@@ -122,21 +132,32 @@ pub fn write_apkg_files(
     )))?;
     drop(output);
 
-    temp.persist(destination).map_err(|error| {
+    let persisted = if overwrite {
+        temp.persist(destination).map_err(|error| error.error)
+    } else {
+        temp.persist_noclobber(destination)
+            .map_err(|error| error.error)
+    };
+    persisted.map_err(|error| {
         FormatError::with_source(
             format!("cannot persist package {}", destination.display()),
-            error.error,
+            error,
         )
     })?;
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the destination and publish policy are independent inputs"
+)]
 pub fn write_colpkg(
     collection: &Path,
     media_dir: &Path,
     destination: &Path,
+    overwrite: bool,
 ) -> Result<(), FormatError> {
-    write_apkg(collection, media_dir, destination)
+    write_apkg(collection, media_dir, destination, overwrite)
 }
 
 pub fn extract_colpkg(
