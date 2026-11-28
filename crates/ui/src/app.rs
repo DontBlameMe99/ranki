@@ -604,6 +604,12 @@ pub struct Root {
     /// Cards scheduled in each of the next seven Anki days, today first.
     pub(crate) forecast: Vec<usize>,
     pub(crate) statistics: Statistics,
+    /// Collection stamp the cached statistics were built from.
+    pub(crate) statistics_modified: i64,
+    /// Day boundary the cached statistics were built for.
+    pub(crate) statistics_next_day_at: i64,
+    /// Ignores background refreshes started before the latest click.
+    pub(crate) statistics_generation: u64,
     /// Anki day shown in the heatmap's hover details.
     pub(crate) heatmap_hover: Option<i64>,
     pub(crate) deck_rows: Vec<DeckRow>,
@@ -1118,6 +1124,9 @@ impl Root {
             stats: Vec::new(),
             forecast: Vec::new(),
             statistics: Statistics::default(),
+            statistics_modified: 0,
+            statistics_next_day_at: 0,
+            statistics_generation: 0,
             heatmap_hover: None,
             deck_rows: Vec::new(),
             deck_rows_rev: 0,
@@ -2025,13 +2034,19 @@ impl Root {
 
     /// Rebuilds the collection-wide review summary from the store's log.
     fn refresh_statistics(&mut self, cx: &mut Context<Self>) {
+        self.statistics_generation = self.statistics_generation.wrapping_add(1);
         let timing = self.timing(Self::now());
+        let modified = self.store.collection_modified().unwrap_or(0);
         match self.store.review_history() {
             Ok(history) => {
                 self.statistics = build_statistics_timed(&history, &timing);
+                self.statistics_modified = modified;
+                self.statistics_next_day_at = timing.next_day_at;
             }
             Err(error) => {
                 self.statistics = build_statistics_timed(&[], &timing);
+                self.statistics_modified = 0;
+                self.statistics_next_day_at = 0;
                 self.show_toast(
                     ToastKind::Error,
                     format!("Could not load review history: {error}"),
@@ -2039,6 +2054,55 @@ impl Root {
                 );
             }
         }
+    }
+
+    /// Refreshes the review summary after the statistics view is on screen.
+    ///
+    /// Reading a large review log can take hundreds of milliseconds, so the
+    /// click only switches views. A separate store reads the log on a
+    /// background thread and closes the file between calls.
+    fn schedule_statistics_refresh(&mut self, cx: &mut Context<Self>) {
+        let timing = self.timing(Self::now());
+        let modified = self.store.collection_modified().unwrap_or(0);
+        if modified == self.statistics_modified
+            && timing.next_day_at == self.statistics_next_day_at
+        {
+            return;
+        }
+        let generation = self.statistics_generation.wrapping_add(1);
+        self.statistics_generation = generation;
+        let collection = self.options.paths.collection.clone();
+        let task = cx.background_executor().spawn(async move {
+            let store = ranki_storage::ReopeningCollection::new(&collection);
+            let modified = Store::collection_modified(&store)?;
+            let history = Store::review_history(&store)?;
+            Ok::<_, ranki_model::StoreError>((
+                build_statistics_timed(&history, &timing),
+                modified,
+            ))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |root, cx| {
+                if root.statistics_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok((statistics, modified)) => {
+                        root.statistics = statistics;
+                        root.statistics_modified = modified;
+                        root.statistics_next_day_at = timing.next_day_at;
+                        cx.notify();
+                    }
+                    Err(error) => root.show_toast(
+                        ToastKind::Error,
+                        format!("Could not load review history: {error}"),
+                        cx,
+                    ),
+                }
+            });
+        })
+        .detach();
     }
 
     /// Reports a completed action. The toast retires on its own after
@@ -3714,7 +3778,7 @@ impl Root {
             UiAction::OpenStatistics => {
                 self.view = next_view(self.view, View::Statistics);
                 self.refresh_stats();
-                self.refresh_statistics(cx);
+                self.schedule_statistics_refresh(cx);
                 cx.notify();
             }
             UiAction::OpenBrowse => {
