@@ -5,6 +5,7 @@ use std::fs;
 use std::fs::File;
 use std::io::BufWriter;
 use std::io::Read;
+use std::io::Seek;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -70,29 +71,46 @@ pub fn read_apkg(
     Ok(ApkgPackage { collection, media })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the destination and publish policy are independent inputs"
+)]
 pub fn write_apkg(
     collection: &Path,
     media_dir: &Path,
     destination: &Path,
+    overwrite: bool,
 ) -> Result<(), FormatError> {
     let media_files = collect_media_files(media_dir)?;
-    write_apkg_files(collection, &media_files, destination)
+    write_apkg_files(collection, &media_files, destination, overwrite)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the destination and publish policy are independent inputs"
+)]
 pub fn write_apkg_files(
     collection: &Path,
     media_files: &[MediaFile],
     destination: &Path,
+    overwrite: bool,
 ) -> Result<(), FormatError> {
     schema::ensure_parent(destination)?;
     let database = snapshot_collection(collection)?;
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temp = Builder::new()
+        .prefix(".ranki-export-")
+        .suffix(".apkg.tmp")
+        .tempfile_in(parent)
+        .map_err(io_error(format!(
+            "cannot create temporary package in {}",
+            parent.display()
+        )))?;
 
-    let file = File::create(destination).map_err(io_error(format!(
-        "cannot create package {}",
-        destination.display()
-    )))?;
-    let mut writer = ZipWriter::new(BufWriter::new(file));
-
+    let mut writer = ZipWriter::new(BufWriter::new(temp.as_file_mut()));
     write_zip_entry(&mut writer, "collection.anki21", &database)?;
     let mapping = media_mapping(media_files);
     write_json_entry(&mut writer, "media", &mapping)?;
@@ -105,24 +123,41 @@ pub fn write_apkg_files(
     }
     write_zip_entry(&mut writer, "meta", PACKAGE_META_LEGACY_2)?;
 
-    let output = writer
+    let mut output = writer
         .finish()
         .map_err(zip_error("cannot finish apkg package"))?;
-    output.into_inner().map_err(|error| {
+    output.flush().map_err(io_error(format!(
+        "cannot flush package {}",
+        destination.display()
+    )))?;
+    drop(output);
+
+    let persisted = if overwrite {
+        temp.persist(destination).map_err(|error| error.error)
+    } else {
+        temp.persist_noclobber(destination)
+            .map_err(|error| error.error)
+    };
+    persisted.map_err(|error| {
         FormatError::with_source(
-            format!("cannot flush package {}", destination.display()),
-            error.into_error(),
+            format!("cannot persist package {}", destination.display()),
+            error,
         )
     })?;
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the destination and publish policy are independent inputs"
+)]
 pub fn write_colpkg(
     collection: &Path,
     media_dir: &Path,
     destination: &Path,
+    overwrite: bool,
 ) -> Result<(), FormatError> {
-    write_apkg(collection, media_dir, destination)
+    write_apkg(collection, media_dir, destination, overwrite)
 }
 
 pub fn extract_colpkg(
@@ -611,8 +646,8 @@ fn zip_options() -> SimpleFileOptions {
     SimpleFileOptions::default().compression_method(CompressionMethod::Deflated)
 }
 
-fn write_zip_entry(
-    writer: &mut ZipWriter<BufWriter<File>>,
+fn write_zip_entry<W: Write + Seek>(
+    writer: &mut ZipWriter<W>,
     name: &str,
     bytes: &[u8],
 ) -> Result<(), FormatError> {
@@ -625,8 +660,8 @@ fn write_zip_entry(
     Ok(())
 }
 
-fn write_json_entry<T: Serialize>(
-    writer: &mut ZipWriter<BufWriter<File>>,
+fn write_json_entry<T: Serialize, W: Write + Seek>(
+    writer: &mut ZipWriter<W>,
     name: &str,
     value: &T,
 ) -> Result<(), FormatError> {
