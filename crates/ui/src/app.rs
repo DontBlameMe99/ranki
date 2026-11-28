@@ -3880,6 +3880,12 @@ impl Root {
             UiAction::SyncKeepLocal => self.resolve_sync_conflict(true, cx),
             UiAction::SyncKeepRemote => self.resolve_sync_conflict(false, cx),
         }
+        if self.view == View::Review
+            && self.confirmation.is_none()
+            && !self.create_modal
+        {
+            window.focus(&self.focus);
+        }
         if self.state_snapshot(cx) != self.options.ui_state {
             self.persist_state(cx);
         }
