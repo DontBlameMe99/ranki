@@ -44,6 +44,10 @@ impl MobileApp {
 
 impl eframe::App for MobileApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let _ = self.state.poll_sync();
+        if self.state.sync.busy {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         apply_style(ctx, self.state.settings.theme);
         let reviewing = self.state.screen == Screen::Review
             && self.state.review.current.is_some();
@@ -948,13 +952,20 @@ fn render_add(app: &mut AppState, ui: &mut Ui, p: &Palette) {
 
 fn render_browse(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     title(ui, "Browse", p);
-    let mut query = app.browse.query.clone();
-    let search = TextEdit::singleline(&mut query)
+    let mut draft = app.browse.draft.clone();
+    let search = TextEdit::singleline(&mut draft)
         .hint_text("Search cards, tags, or decks")
         .desired_width(ui.available_width())
         .min_size(vec2(0.0, TAP_HEIGHT));
-    if ui.add(search).changed() {
-        let _ = app.set_browse_query(query);
+    let response = ui.add(search);
+    if response.changed() {
+        app.browse.draft.clone_from(&draft);
+    }
+    let commit = response.lost_focus()
+        || (response.has_focus()
+            && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+    if commit && draft != app.browse.query {
+        let _ = app.set_browse_query(draft);
     }
     ui.add_space(10.0);
     let count = if app.browse.total == 1 {

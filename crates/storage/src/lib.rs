@@ -280,6 +280,7 @@ impl Collection {
         .map_err(backend)?;
         register_collations(&conn)?;
         register_functions(&conn)?;
+        configure_connection(&conn)?;
         let transaction = conn.transaction().map_err(backend)?;
         for statement in schema::CREATE_STATEMENTS {
             transaction.execute(statement, []).map_err(backend)?;
@@ -333,6 +334,7 @@ impl Collection {
         .map_err(backend)?;
         register_collations(&conn)?;
         register_functions(&conn)?;
+        configure_connection(&conn)?;
         if !records::table_exists(&conn, "col")? {
             return Err(invalid("not an Anki collection"));
         }
@@ -648,7 +650,7 @@ params![stamp.modified, stamp.scm, json],
         self.conn
             .execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_ranki_cards_queue_due ON cards (queue, due, id); \
-                 CREATE INDEX IF NOT EXISTS idx_ranki_cards_queue_ord ON cards (queue, ord, due)",
+                 CREATE INDEX IF NOT EXISTS idx_ranki_cards_queue_ord ON cards (queue, ord, due)"
             )
             .map_err(backend)?;
         let _ = self.due_index.set(());
@@ -1513,6 +1515,18 @@ impl Store for Collection {
         rows.collect::<Result<Vec<_>, _>>().map_err(backend)
     }
 
+    fn review_count_since(&self, cutoff_ms: i64) -> Result<u32, StoreError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM revlog WHERE id > ?1",
+                [cutoff_ms],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
     fn deck_steps(&self, deck_id: Id) -> Result<DeckSteps, StoreError> {
         read_deck_steps(&self.conn, deck_id)
     }
@@ -1698,6 +1712,25 @@ fn minutes_to_seconds(minutes: f64) -> Option<u32> {
     )]
     let value = seconds as u32;
     Some(value)
+}
+
+fn configure_connection(conn: &Connection) -> Result<(), StoreError> {
+    // Anki expects WAL. NORMAL avoids an fsync on every grade.
+    let journal: String = conn
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .map_err(backend)?;
+    if !journal.eq_ignore_ascii_case("wal") {
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(backend)?;
+    }
+    let synchronous: i64 = conn
+        .pragma_query_value(None, "synchronous", |row| row.get(0))
+        .map_err(backend)?;
+    if synchronous != 1 {
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(backend)?;
+    }
+    Ok(())
 }
 
 /// Registers the case-insensitive collation used by schema-18 table indexes.

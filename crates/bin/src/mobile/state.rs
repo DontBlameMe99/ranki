@@ -3,11 +3,10 @@
 #![expect(
     clippy::excessive_nesting,
     clippy::too_many_arguments,
-    reason = "store loading and synchronous sync keep their inputs explicit"
+    reason = "store loading and background sync keep their inputs explicit"
 )]
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::env;
 use std::fs;
 use std::io;
@@ -27,6 +26,9 @@ use ranki_sync::{
     Credentials, DEFAULT_ENDPOINT, HttpTransport, RetryPolicy, SyncClient,
     SyncOutcome, SyncState, SyncTransport, TransportConfig, clear_host_key,
 };
+use std::result::Result as StdResult;
+use std::sync::mpsc;
+use std::thread;
 
 use crate::mobile::card::{sides, sides_text};
 use crate::mobile::error::Result;
@@ -162,6 +164,8 @@ pub struct DeckDraft {
 #[derive(Clone, Debug, Default)]
 pub struct BrowseState {
     pub query: String,
+    /// Text being typed; the query runs when the field is committed.
+    pub draft: String,
     pub rows: Vec<BrowseRow>,
     pub total: usize,
 }
@@ -216,6 +220,18 @@ pub struct SyncUiState {
     pub status: String,
     pub conflict: bool,
 }
+#[derive(Clone, Debug)]
+enum SyncKind {
+    SignIn { username: String, password: String },
+    Sync,
+    Conflict { keep_remote: bool },
+}
+
+#[derive(Debug)]
+struct SyncJob {
+    kind: SyncKind,
+    results: mpsc::Receiver<StdResult<SyncOutcome, String>>,
+}
 
 /// Tone of a short status message.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -251,6 +267,7 @@ pub struct AppState {
     pub statistics: Statistics,
     pub toast: Option<Toast>,
     files: Option<Persistence>,
+    sync_job: Option<SyncJob>,
 }
 
 impl AppState {
@@ -323,7 +340,8 @@ impl AppState {
             add: AddState::default(),
             deck_draft: DeckDraft::default(),
             browse: BrowseState {
-                query: browse_query,
+                query: browse_query.clone(),
+                draft: browse_query,
                 rows: Vec::new(),
                 total: 0,
             },
@@ -334,6 +352,7 @@ impl AppState {
             statistics: Statistics::default(),
             toast: None,
             files,
+            sync_job: None,
         };
         state.refresh()?;
         if state.screen == Screen::Review {
@@ -451,7 +470,8 @@ impl AppState {
     ///
     /// Store failures are reported as toasts; this call still succeeds.
     pub fn rate(&mut self, rating: Rating) -> Result<()> {
-        if self.screen != Screen::Review
+        if self.sync.busy
+            || self.screen != Screen::Review
             || self.review.phase != ReviewPhase::Answer
         {
             return Ok(());
@@ -590,7 +610,7 @@ impl AppState {
     ///
     /// Store failures are reported as toasts; this call still succeeds.
     pub fn undo(&mut self) -> Result<()> {
-        if self.screen != Screen::Review {
+        if self.sync.busy || self.screen != Screen::Review {
             return Ok(());
         }
         let Some(last) = self.review.last.take() else {
@@ -697,6 +717,9 @@ impl AppState {
     ///
     /// Store failures are reported as toasts; this call still succeeds.
     pub fn save_note(&mut self) -> Result<()> {
+        if self.sync.busy {
+            return Ok(());
+        }
         let Some(deck) = self.add.decks.get(self.add.deck_index).cloned()
         else {
             self.fail(String::from("Choose a deck first"));
@@ -962,13 +985,14 @@ impl AppState {
     ///
     /// Store failures are reported as toasts; this call still succeeds.
     pub fn set_browse_query(&mut self, value: String) -> Result<()> {
-        self.browse.query = value;
+        self.browse.query.clone_from(&value);
+        self.browse.draft = value;
         self.refresh_browse();
         self.persist_ui_state();
         Ok(())
     }
 
-    /// Signs in to `AnkiWeb` and runs one synchronous sync.
+    /// Signs in to `AnkiWeb` and starts one background sync.
     ///
     /// # Errors
     ///
@@ -987,38 +1011,11 @@ impl AppState {
         self.sync.conflict = false;
         self.sync.busy = true;
         self.sync.status = String::from("Signing in to AnkiWeb");
-        let result = Self::login_and_sync(
-            &self.settings.paths.collection,
-            &self.settings.paths.media_dir,
-            &self.settings.paths.sync_state,
-            self.settings.sync.retries,
-            self.settings.sync.backoff_ms,
-            &username,
-            &password,
-        );
-        match result {
-            Ok(outcome) => {
-                self.sync.signed_in = true;
-                self.settings.sync.enabled = true;
-                self.settings.sync.username = Some(username);
-                self.persist_sync();
-                self.sync.password.clear();
-                self.finish_sync(&outcome);
-                self.load_sync_state()?;
-            }
-            Err(error) => {
-                self.sync.busy = false;
-                let message = format!("AnkiWeb sign-in failed: {error}");
-                self.sync.status.clone_from(&message);
-                self.fail(message);
-                self.load_sync_state()?;
-            }
-        }
+        self.start_sync_job(SyncKind::SignIn { username, password });
         Ok(())
     }
 
-    /// Runs one synchronous automatic sync.
-    ///
+    /// Starts one background automatic sync.
     /// # Errors
     ///
     /// Never propagates failures; they are reported as toasts.
@@ -1032,25 +1029,7 @@ impl AppState {
         }
         self.sync.busy = true;
         self.sync.status = String::from("Syncing with AnkiWeb");
-        let result = Self::run_sync(
-            &self.settings.paths.collection,
-            &self.settings.paths.media_dir,
-            &self.settings.paths.sync_state,
-            self.settings.sync.retries,
-            self.settings.sync.backoff_ms,
-        );
-        match result {
-            Ok(outcome) => {
-                self.finish_sync(&outcome);
-                self.refresh()?;
-            }
-            Err(error) => {
-                self.sync.busy = false;
-                let message = format!("Sync failed: {error}");
-                self.sync.status.clone_from(&message);
-                self.fail(message);
-            }
-        }
+        self.start_sync_job(SyncKind::Sync);
         Ok(())
     }
 
@@ -1082,7 +1061,7 @@ impl AppState {
     ///
     /// # Errors
     ///
-    /// Network failures are reported as toasts; this call still succeeds.
+    /// Network failures are reported as toasts. This call succeeds.
     pub fn resolve_conflict(&mut self, keep_remote: bool) -> Result<()> {
         if self.sync.busy || !self.sync.conflict {
             return Ok(());
@@ -1093,28 +1072,97 @@ impl AppState {
         } else {
             String::from("Uploading the local collection")
         };
-        let result = Self::run_conflict(
-            &self.settings.paths.collection,
-            &self.settings.paths.media_dir,
-            &self.settings.paths.sync_state,
-            self.settings.sync.retries,
-            self.settings.sync.backoff_ms,
-            keep_remote,
-        );
-        match result {
-            Ok(outcome) => {
+        self.start_sync_job(SyncKind::Conflict { keep_remote });
+        Ok(())
+    }
+    pub(crate) fn poll_sync(&mut self) -> Result<()> {
+        let Some(job) = self.sync_job.take() else {
+            return Ok(());
+        };
+        let result = match job.results.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => {
+                self.sync_job = Some(job);
+                return Ok(());
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err(String::from("sync worker stopped"))
+            }
+        };
+        match (&job.kind, result) {
+            (SyncKind::SignIn { username, .. }, Ok(outcome)) => {
+                self.sync.signed_in = true;
+                self.settings.sync.enabled = true;
+                self.settings.sync.username = Some(username.clone());
+                self.sync.password.clear();
+                self.persist_sync();
+                self.finish_sync(&outcome);
+                self.load_sync_state()?;
+            }
+            (SyncKind::SignIn { .. }, Err(error)) => {
+                self.sync.busy = false;
+                let message = format!("AnkiWeb sign-in failed: {error}");
+                self.sync.status.clone_from(&message);
+                self.fail(message);
+                self.load_sync_state()?;
+            }
+            (SyncKind::Sync | SyncKind::Conflict { .. }, Ok(outcome)) => {
                 self.finish_sync(&outcome);
                 self.refresh()?;
             }
-            Err(error) => {
+            (SyncKind::Sync | SyncKind::Conflict { .. }, Err(error)) => {
                 self.sync.busy = false;
-                let message =
-                    format!("Could not resolve sync conflict: {error}");
+                let message = if matches!(&job.kind, SyncKind::Conflict { .. })
+                {
+                    format!("Could not resolve sync conflict: {error}")
+                } else {
+                    format!("Sync failed: {error}")
+                };
                 self.sync.status.clone_from(&message);
                 self.fail(message);
             }
         }
         Ok(())
+    }
+
+    fn start_sync_job(&mut self, kind: SyncKind) {
+        let paths = self.settings.paths.clone();
+        let retries = self.settings.sync.retries;
+        let backoff_ms = self.settings.sync.backoff_ms;
+        let (sender, results) = mpsc::channel();
+        let worker_kind = kind.clone();
+        thread::spawn(move || {
+            let result = match worker_kind {
+                SyncKind::SignIn { username, password } => {
+                    Self::login_and_sync(
+                        &paths.collection,
+                        &paths.media_dir,
+                        &paths.sync_state,
+                        retries,
+                        backoff_ms,
+                        &username,
+                        &password,
+                    )
+                }
+                SyncKind::Sync => Self::run_sync(
+                    &paths.collection,
+                    &paths.media_dir,
+                    &paths.sync_state,
+                    retries,
+                    backoff_ms,
+                ),
+                SyncKind::Conflict { keep_remote } => Self::run_conflict(
+                    &paths.collection,
+                    &paths.media_dir,
+                    &paths.sync_state,
+                    retries,
+                    backoff_ms,
+                    keep_remote,
+                ),
+            };
+            let _ = sender.send(result.map_err(|error| error.to_string()));
+        });
+        self.sync_job = Some(SyncJob { kind, results });
     }
 
     /// Shows a success toast.
@@ -1325,37 +1373,23 @@ impl AppState {
         self.browse.total = ids.len();
         let decks = self.decks.clone();
         let models = self.add.models.clone();
-        let mut notes = HashMap::new();
         let mut rows = Vec::with_capacity(ids.len().min(BROWSE_ROW_LIMIT));
-        for id in ids.into_iter().take(BROWSE_ROW_LIMIT) {
-            let card = match self.store.card(id) {
-                Ok(Some(card)) => card,
-                Ok(None) => continue,
-                Err(error) => {
-                    self.fail(format!("Could not load card: {error}"));
-                    break;
-                }
-            };
-            let cached_note = match notes.entry(card.note_id) {
-                Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => match self.store.note(card.note_id) {
-                    Ok(Some(note)) => entry.insert(Some(note)),
-                    Ok(None) => entry.insert(None),
-                    Err(error) => {
-                        self.fail(format!("Could not load note: {error}"));
-                        break;
-                    }
-                },
-            };
-            let Some(note) = cached_note else {
-                continue;
-            };
+        let visible = ids.len().min(BROWSE_ROW_LIMIT);
+        let visible_ids = ids.get(..visible).unwrap_or(&ids);
+        let loaded = match self.store.cards_with_notes(visible_ids) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.fail(format!("Could not load cards: {error}"));
+                return;
+            }
+        };
+        for (card, note) in loaded {
             let Some(model) =
                 models.iter().find(|model| model.id == note.model_id)
             else {
                 continue;
             };
-            let (question, answer) = sides_text(model, note, card.ordinal);
+            let (question, answer) = sides_text(model, &note, card.ordinal);
             let repeats_front =
                 model.template_for(card.ordinal).is_some_and(|template| {
                     template.answer_format.contains("{{FrontSide}}")
@@ -1731,5 +1765,45 @@ const fn queue_name(queue: CardQueue) -> &'static str {
         CardQueue::Suspended => "Suspended",
         CardQueue::Buried | CardQueue::ManuallyBuried => "Buried",
         CardQueue::Preview => "Preview",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ranki_model::DataPaths;
+    use ranki_storage::Collection;
+
+    #[test]
+    fn sync_job_polls_without_blocking_the_ui() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = DataPaths::new(directory.path());
+        let _collection = Collection::create(&paths.collection).unwrap();
+        let settings = Settings {
+            paths,
+            ..Settings::default()
+        };
+        let mut state = AppState::new(
+            ReopeningCollection::new(&settings.paths.collection),
+            settings,
+        )
+        .unwrap();
+        let (sender, results) = mpsc::channel();
+        state.sync.busy = true;
+        state.sync.status = String::from("Syncing with AnkiWeb");
+        state.sync_job = Some(SyncJob {
+            kind: SyncKind::Sync,
+            results,
+        });
+
+        state.poll_sync().unwrap();
+        assert!(state.sync.busy);
+        assert!(state.sync_job.is_some());
+
+        sender.send(Ok(SyncOutcome::NoChanges)).unwrap();
+        state.poll_sync().unwrap();
+        assert!(!state.sync.busy);
+        assert_eq!(state.sync.status, "Already up to date");
+        assert!(state.sync_job.is_none());
     }
 }

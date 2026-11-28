@@ -2732,3 +2732,45 @@ fn malformed_conf_does_not_start_an_upgrade() {
     let mut store = Collection::open(&path).expect("open");
     assert!(!store.upgrade_scheduler_v2().expect("no upgrade"));
 }
+
+#[test]
+fn reopening_store_batches_cards_and_counts_reviews() {
+    let (_directory, path) = fixture();
+    let mut collection = Collection::open(&path).expect("open");
+    let ids = collection
+        .add_note(&NewNote {
+            model_id: 1,
+            deck_id: 1,
+            fields: vec![String::from("front"), String::from("back")],
+            tags: Vec::new(),
+        })
+        .expect("add note");
+    let card = collection.card(ids[0]).expect("card").expect("card");
+    drop(collection);
+
+    let store = ReopeningCollection::new(&path);
+    let loaded = store
+        .cards_with_notes(&[card.id, card.id.saturating_add(1_000)])
+        .expect("batch load");
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].0.id, card.id);
+    assert_eq!(loaded[0].1.id, card.note_id);
+
+    let connection = Connection::open(&path).expect("write connection");
+    connection
+        .execute(
+            "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type)
+             VALUES (100, ?1, 0, 3, 1, 0, 2500, 1000, 0)",
+            [card.id],
+        )
+        .expect("insert review");
+    connection
+        .execute(
+            "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type)
+             VALUES (200, ?1, 0, 3, 1, 0, 2500, 1000, 0)",
+            [card.id],
+        )
+        .expect("insert reviews");
+    drop(connection);
+    assert_eq!(store.review_count_since(150).expect("count"), 1);
+}

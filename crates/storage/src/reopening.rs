@@ -10,6 +10,7 @@ use crate::Collection;
 use ranki_model::AddNoteOptions;
 use ranki_model::BrowseCard;
 use ranki_model::Card;
+use ranki_model::CardWithNote;
 use ranki_model::Deck;
 use ranki_model::DeckStats;
 use ranki_model::DeckSteps;
@@ -26,6 +27,7 @@ use ranki_model::StoreError;
 use ranki_model::Timing;
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -107,7 +109,34 @@ impl Store for ReopeningCollection {
         collection_created() -> Result<i64, StoreError>;
         timing(now_secs: i64) -> Result<Timing, StoreError>;
         max_taken_secs(deck_id: Id) -> Result<u32, StoreError>;
+        review_count_since(cutoff_ms: i64) -> Result<u32, StoreError>;
         last_review_secs(card_id: Id) -> Result<Option<i64>, StoreError>;
+    }
+    fn cards_with_notes(
+        &self,
+        ids: &[Id],
+    ) -> Result<Vec<CardWithNote>, StoreError> {
+        self.read(|store| {
+            let mut notes: HashMap<Id, Option<Note>> = HashMap::new();
+            let mut loaded = Vec::with_capacity(ids.len());
+            for id in ids {
+                let Some(card) = Store::card(store, *id)? else {
+                    continue;
+                };
+                let cached_note = if let Some(note) = notes.get(&card.note_id) {
+                    note.clone()
+                } else {
+                    let stored_note = Store::note(store, card.note_id)?;
+                    let _ = notes.insert(card.note_id, stored_note.clone());
+                    stored_note
+                };
+                let Some(note) = cached_note else {
+                    continue;
+                };
+                loaded.push((card, note));
+            }
+            Ok(loaded)
+        })
     }
 
     write_methods! {

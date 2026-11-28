@@ -94,6 +94,9 @@ pub struct BrowseState {
     pub error: Option<String>,
     pub generation: u64,
     pub loading: bool,
+    /// Query and collection stamp used to reuse the current result set.
+    pub query: Option<String>,
+    pub modified: Option<i64>,
     /// Last known table viewport height, used to clamp after result changes.
     pub viewport: Option<f32>,
 }
@@ -399,6 +402,12 @@ impl Root {
     /// Cards are not read here: the table renders the lines it shows.
     pub(crate) fn refresh_browse(&mut self, cx: &mut Context<Self>) {
         let query = self.browse.search.read(cx).text();
+        if self.browse.query.as_deref() == Some(query.as_str())
+            && self.browse.modified == Some(self.collection_modified)
+        {
+            self.browse.loading = false;
+            return;
+        }
         let mut matches = match self.store.browse_cards(&query) {
             Ok(matches) => matches,
             Err(error) => {
@@ -408,6 +417,8 @@ impl Root {
                 self.browse.selected = None;
                 self.browse.error =
                     Some(format!("Could not search cards: {error}"));
+                self.browse.query = None;
+                self.browse.modified = None;
                 self.browse.loading = false;
                 cx.notify();
                 return;
@@ -440,6 +451,8 @@ impl Root {
         self.browse.hits = hits;
         self.browse.rows.clear();
         self.rebuild_browse_entries();
+        self.browse.query = Some(query);
+        self.browse.modified = Some(self.collection_modified);
         self.browse.error = None;
         self.browse.loading = false;
         cx.notify();
@@ -480,8 +493,19 @@ impl Root {
                 needed.push(self.browse.hits[*row].card_id);
             }
         }
-        for id in needed {
-            let _ = self.ensure_browse_row(id);
+        needed.retain(|id| !self.browse.rows.contains_key(id));
+        needed.sort_unstable();
+        needed.dedup();
+        if needed.is_empty() {
+            return;
+        }
+        let loaded = self.store.cards_with_notes(&needed).unwrap_or_default();
+        for (card, note) in loaded {
+            if let Some(row) =
+                browser_row(&card, &note, &self.decks, &self.models)
+            {
+                let _ = self.browse.rows.insert(card.id, row);
+            }
         }
     }
 

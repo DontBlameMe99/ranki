@@ -4,6 +4,7 @@
 )]
 //! Auto-optimization at session and sync boundaries.
 
+use ranki_core::AUTO_OPTIMIZE_MIN_REVIEWS;
 use ranki_core::FsrsParams;
 use ranki_core::MIN_TRAINING_ITEMS;
 use ranki_core::OptimizationInput;
@@ -24,9 +25,8 @@ const MILLIS_PER_DAY: i64 = 86_400_000;
 /// The config is updated with the fitted weights and reset counters when a
 /// pass ran. The config-only part of the trigger policy is checked before the
 /// review log is read, so the day gate rejects most sessions without a query.
-/// Review counters refresh once that gate passes. Loading the whole log after
-/// the gate costs one query per session, because the [`Store`] trait exposes
-/// no review count.
+/// Review counters refresh once that gate passes. A count query rejects sessions
+/// below the review threshold before the full history is loaded.
 pub(super) fn maybe_auto_optimize(
     store: &dyn Store,
     config: &mut Config,
@@ -37,6 +37,20 @@ pub(super) fn maybe_auto_optimize(
     }
     let today = timing.days_elapsed;
     if !day_gate(u64::from(today), u64::from(config.scheduler.last_optimized)) {
+        return;
+    }
+    let cutoff = u64::from(config.scheduler.last_optimized)
+        .saturating_mul(u64::try_from(MILLIS_PER_DAY).unwrap_or(u64::MAX));
+    let cutoff_ms = i64::try_from(cutoff).unwrap_or(i64::MAX);
+    let reviews_since = match store.review_count_since(cutoff_ms) {
+        Ok(count) => count,
+        Err(error) => {
+            eprintln!("ranki: auto-optimize: {error}");
+            return;
+        }
+    };
+    config.scheduler.reviews_since = reviews_since;
+    if reviews_since < AUTO_OPTIMIZE_MIN_REVIEWS {
         return;
     }
     let history = match store.review_history() {
@@ -59,8 +73,6 @@ pub(super) fn maybe_auto_optimize(
                 )
         })
         .count();
-    let reviews_since =
-        reviews_since(&history, config.scheduler.last_optimized);
     let trigger = ranki_core::OptimizationTrigger {
         days_since_last_optimization: today
             .saturating_sub(config.scheduler.last_optimized),
@@ -68,7 +80,6 @@ pub(super) fn maybe_auto_optimize(
         usable_items,
         optimization_running: false,
     };
-    config.scheduler.reviews_since = reviews_since;
     if !should_auto_optimize(trigger) {
         return;
     }
@@ -89,16 +100,6 @@ pub(super) fn maybe_auto_optimize(
 #[cfg(test)]
 fn day_number(now_secs: i64) -> u32 {
     u32::try_from(now_secs.div_euclid(SECONDS_PER_DAY)).unwrap_or(u32::MAX)
-}
-
-fn reviews_since(history: &[RevLog], last_optimized: u32) -> u32 {
-    let cutoff = u64::from(last_optimized)
-        .saturating_mul(u64::try_from(MILLIS_PER_DAY).unwrap_or(u64::MAX));
-    let count = history
-        .iter()
-        .filter(|log| u64::try_from(log.id).unwrap_or_default() > cutoff)
-        .count();
-    u32::try_from(count).unwrap_or(u32::MAX)
 }
 
 fn review_records(history: &[RevLog]) -> Vec<ReviewRecord> {

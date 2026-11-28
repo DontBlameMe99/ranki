@@ -1146,6 +1146,8 @@ impl Root {
                 error: None,
                 generation: 0,
                 loading: false,
+                query: None,
+                modified: None,
                 viewport: None,
             },
             create_field,
@@ -3081,15 +3083,15 @@ impl Root {
         if self.view != View::Review {
             return;
         }
+        if self.review.phase != Phase::Answer {
+            self.reveal(cx);
+            return;
+        }
         let Some(current) = self.review.current.clone() else {
             return;
         };
         let card =
             refreshed_card(&current, |id| self.store.card(id).ok().flatten());
-        if self.review.phase != Phase::Answer {
-            self.reveal(cx);
-            return;
-        }
         let now = Instant::now();
         if self
             .review
@@ -3293,8 +3295,8 @@ impl Root {
                         }
                         self.browse.selected = None;
                         self.refresh_stats();
-                        self.refresh_browse(cx);
                         self.record_local_write();
+                        self.refresh_browse(cx);
                         self.refresh_known_tags();
                         self.show_toast(ToastKind::Success, "Card removed", cx);
                     }
@@ -3596,8 +3598,8 @@ impl Root {
                     self.add.errors.clear();
                     self.reset_fields(cx);
                     self.refresh_stats();
-                    self.refresh_browse(cx);
                     self.record_local_write();
+                    self.refresh_browse(cx);
                     self.refresh_known_tags();
                     self.view = View::Browse;
                     self.show_toast(ToastKind::Success, "Card updated", cx);

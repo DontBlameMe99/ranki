@@ -322,7 +322,7 @@ impl<T: SyncTransport> SyncClient<T> {
         self.backup_collection()?;
         file.persist(&self.collection)
             .map_err(|error| SyncError::Io(error.to_string()))?;
-        self.adopt_server_stamps(info.mod_time)?;
+        self.adopt_download_stamps(info);
         self.record_success()?;
         Ok(())
     }
@@ -652,6 +652,12 @@ impl<T: SyncTransport> SyncClient<T> {
         self.state.last_local_mod = Some(local_mod);
         Ok(())
     }
+    const fn adopt_download_stamps(&mut self, info: LocalInfo) {
+        self.state.last_mod = Some(info.mod_time);
+        self.state.last_scm = Some(info.scm);
+        self.state.last_usn = info.usn;
+        self.state.last_local_mod = Some(info.mod_time);
+    }
 
     fn record_success(&mut self) -> Result<()> {
         self.state.last_success = Some(now_secs()?);
@@ -703,7 +709,16 @@ impl<T: SyncTransport> SyncClient<T> {
             return Ok(());
         }
         let backup = self.collection.with_extension("ranki-sync.bak");
-        fs::copy(&self.collection, &backup)?;
+        {
+            let connection = Connection::open(&self.collection)?;
+            checkpoint(&connection)?;
+        }
+        if backup.exists() {
+            fs::remove_file(&backup)?;
+        }
+        if fs::hard_link(&self.collection, &backup).is_err() {
+            fs::copy(&self.collection, &backup)?;
+        }
         Ok(())
     }
 }
@@ -776,6 +791,7 @@ const fn cont_true() -> SyncFlag {
 struct LocalInfo {
     mod_time: i64,
     scm: i64,
+    usn: i32,
     cards: u64,
 }
 
@@ -997,10 +1013,10 @@ fn register_collations(connection: &Connection) -> Result<()> {
 }
 
 fn local_info(connection: &Connection) -> Result<LocalInfo> {
-    let (mod_time, scm): (i64, i64) = connection.query_row(
-        "SELECT mod, scm FROM col WHERE id = 1",
+    let (mod_time, scm, usn): (i64, i64, i32) = connection.query_row(
+        "SELECT mod, scm, usn FROM col WHERE id = 1",
         [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     let cards = if table_exists(connection, "cards")? {
         let count: i64 =
@@ -1014,6 +1030,7 @@ fn local_info(connection: &Connection) -> Result<LocalInfo> {
     Ok(LocalInfo {
         mod_time,
         scm,
+        usn,
         cards,
     })
 }
