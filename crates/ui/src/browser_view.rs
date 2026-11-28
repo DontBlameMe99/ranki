@@ -71,7 +71,7 @@ pub struct BrowseGroup {
 #[derive(Clone, Debug)]
 pub enum BrowseEntry {
     Group(BrowseGroup),
-    Card { row: usize, depth: usize },
+    Card { row: usize },
 }
 
 /// One search match, before its card and note are read.
@@ -308,10 +308,7 @@ pub fn build_browse_entries(
             continue;
         }
         for index in cards {
-            entries.push(BrowseEntry::Card {
-                row: index,
-                depth: depth + 1,
-            });
+            entries.push(BrowseEntry::Card { row: index });
         }
         if let Some(kids) = children.get(&path) {
             for child in kids.iter().rev() {
@@ -489,7 +486,7 @@ impl Root {
             needed.push(id);
         }
         for entry in &self.browse.entries[visible.first..visible.last] {
-            if let BrowseEntry::Card { row, .. } = entry {
+            if let BrowseEntry::Card { row } = entry {
                 needed.push(self.browse.hits[*row].card_id);
             }
         }
@@ -691,11 +688,7 @@ impl Root {
                 table = table.child(self.render_browse_group(group, cx));
                 continue;
             }
-            let BrowseEntry::Card {
-                row: index,
-                depth: entry_depth,
-            } = entry
-            else {
+            let BrowseEntry::Card { row: index } = entry else {
                 continue;
             };
             let Some(row) =
@@ -731,7 +724,7 @@ impl Root {
                 .gap(px(SPACE_GROUP))
                 .h(px(CARD_HEIGHT))
                 .px(px(SPACE_BLOCK))
-                .pl(px(SPACE_BLOCK + SPACE_SECTION * *entry_depth as f32))
+                .pl(px(SPACE_BLOCK + SPACE_SECTION))
                 .border_t_1()
                 .border_color(colors.surface0)
                 .bg(if active {
@@ -1296,8 +1289,8 @@ mod tests {
                             group.path, group.count, group.depth
                         )
                     }
-                    BrowseEntry::Card { row, depth } => {
-                        format!("card:{}:{}", hits[*row].card_id, depth)
+                    BrowseEntry::Card { row } => {
+                        format!("card:{}", hits[*row].card_id)
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1305,12 +1298,12 @@ mod tests {
                 lines,
                 [
                     "Languages:3:0",
-                    "card:4:1",
+                    "card:4",
                     "Languages::French:2:1",
-                    "card:1:2",
-                    "card:3:2",
+                    "card:1",
+                    "card:3",
                     "Math:1:0",
-                    "card:2:1",
+                    "card:2",
                 ]
             );
         }
@@ -1548,10 +1541,7 @@ mod tests {
                         )),
                     })
                 } else {
-                    BrowseEntry::Card {
-                        row: index,
-                        depth: 1,
-                    }
+                    BrowseEntry::Card { row: index }
                 }
             })
             .collect::<Vec<_>>();
