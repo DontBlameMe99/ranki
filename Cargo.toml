@@ -45,6 +45,10 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 [patch.crates-io]
 taffy = { path = "vendor/taffy" }
 xattr = { path = "vendor/xattr" }
+# winit 0.30.13 drops android-activity TextEvent/TextAction, so GameActivity
+# cannot deliver soft-keyboard input to egui. This copy backports IME events
+# from upstream winit PR #4451, with UTF-16 to UTF-8 selection offset mapping.
+winit = { path = "vendor/winit" }
 
 [workspace.lints.rust]
 unsafe_code      = "deny"
