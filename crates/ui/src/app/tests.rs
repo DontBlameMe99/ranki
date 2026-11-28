@@ -3569,6 +3569,108 @@ fn space_reveals_after_clicking_a_deck_row(cx: &mut gpui::TestAppContext) {
     let phase = cx.read_entity(&root, |root, _| root.review.phase);
     assert_eq!(phase, Phase::Answer);
 }
+#[gpui::test]
+fn space_reveals_after_pointer_leaves_and_returns(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("collection.anki2");
+    let mut store =
+        ranki_storage::Collection::create(&path).expect("collection");
+    for question in ["First question?", "Second question?"] {
+        store
+            .add_note(&NewNote {
+                model_id: 1,
+                deck_id: 1,
+                fields: vec![String::from(question), String::from("Answer!")],
+                tags: Vec::new(),
+            })
+            .expect("note");
+    }
+    let options = Options {
+        paths: ranki_model::DataPaths::new(dir.path()),
+        ..Options::default()
+    };
+    let save_settings: crate::SettingsSaver = Arc::new(|_| Ok(()));
+    cx.update(|cx| cx.bind_keys(super::key_bindings()));
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(store),
+                options,
+                save_settings,
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let row = cx
+        .debug_bounds("deck-row-Default")
+        .expect("deck row bounds");
+    cx.simulate_click(row.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let state = cx.read_entity(&root, |root, _| {
+        (root.view, root.review.current.is_some(), root.review.phase)
+    });
+    assert_eq!(state.0, View::Review);
+    assert!(state.1, "a card must be loaded");
+    assert_eq!(state.2, Phase::Question);
+
+    let reveal = point(px(640.), px(680.));
+    cx.simulate_click(reveal, gpui::Modifiers::none());
+    assert_eq!(
+        cx.read_entity(&root, |root, _| root.review.phase),
+        Phase::Answer
+    );
+
+    cx.update_entity(&root, |root, _| root.review.last_grade_at = None);
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let good = point(px(775.), px(680.));
+    cx.simulate_click(good, gpui::Modifiers::none());
+    assert_eq!(
+        cx.read_entity(&root, |root, _| root.review.phase),
+        Phase::Question
+    );
+
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let reveal = point(px(640.), px(680.));
+    cx.simulate_mouse_move(reveal, None, gpui::Modifiers::none());
+    cx.simulate_event(gpui::MouseExitEvent {
+        position: reveal,
+        pressed_button: None,
+        modifiers: gpui::Modifiers::none(),
+    });
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    cx.simulate_mouse_move(reveal, None, gpui::Modifiers::none());
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+
+    cx.simulate_keystrokes("space");
+
+    assert_eq!(
+        cx.read_entity(&root, |root, _| root.review.phase),
+        Phase::Answer
+    );
+}
 
 #[gpui::test]
 fn space_reveals_after_study_all_from_focused_search(
