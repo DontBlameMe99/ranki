@@ -1361,10 +1361,6 @@ impl Store for Collection {
         Ok(cards)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "note updates keep validation and writes in one transaction"
-    )]
     fn update_note(
         &mut self,
         note: &Note,

@@ -833,13 +833,11 @@ fn print_note_edit(
     } else if !tags.is_empty() {
         note.tags = tags;
     }
-    match deck {
-        Some(selected) => {
-            let deck_id = resolve_deck(collection, selected)?;
-            collection.update_note(&note, deck_id)?;
-        }
-        None => collection.update_note_checked(&note, None, None)?,
-    }
+    let deck_id = deck
+        .as_ref()
+        .map(|selected| resolve_deck(collection, selected))
+        .transpose()?;
+    collection.update_note_checked(&note, deck_id, expected_modified)?;
     let modified = collection
         .note(note_id)?
         .map(|saved| saved.modified)
@@ -1021,18 +1019,43 @@ fn export_with_checkpoint(
             package.display()
         )));
     }
-    if package.exists() && !force {
-        return Err(CliError::Message(format!(
-            "export destination already exists: {}; pass --force to overwrite",
-            package.display()
-        )));
-    }
     let collection = open_or_create(path)?;
     collection.checkpoint()?;
     collection.close()?;
-    exporter(path, media_dir, package)?;
+    let placeholder = reserve_export_path(package, force)?;
+    if let Err(error) = exporter(path, media_dir, package) {
+        if placeholder {
+            let _ = fs::remove_file(package);
+        }
+        return Err(error.into());
+    }
     println!("exported\t{}", package.display());
     Ok(())
+}
+
+/// Claims a free destination so a concurrent export cannot take it while the
+/// package is built. `--force` may replace an existing file.
+fn reserve_export_path(package: &Path, force: bool) -> CliResult<bool> {
+    if force {
+        return Ok(false);
+    }
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(package)
+    {
+        Ok(file) => {
+            drop(file);
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            Err(CliError::Message(format!(
+                "export destination already exists: {}; pass --force to overwrite",
+                package.display()
+            )))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn resolved_path(path: &Path) -> PathBuf {

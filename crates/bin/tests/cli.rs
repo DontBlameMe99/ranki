@@ -996,6 +996,23 @@ fn note_edit_moves_cards_to_a_deck_by_name_or_id() {
     assert_eq!(card.deck_id, second_id);
 }
 
+#[cfg(unix)]
+#[test]
+fn export_refuses_a_dangling_symlink_destination() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = Isolated::new(&dir, "app");
+    app.run(&["decks"]);
+    let target = dir.path().join("missing-target.apkg");
+    let link = dir.path().join("backup.apkg");
+    symlink(&target, &link).unwrap();
+
+    let stderr = app.failure(&["export", link.to_str().unwrap()]);
+    assert!(stderr.contains("already exists"), "{stderr}");
+    assert!(!target.exists());
+}
+
 #[test]
 fn note_edit_without_a_deck_leaves_split_cards_in_place() {
     let dir = tempfile::tempdir().unwrap();

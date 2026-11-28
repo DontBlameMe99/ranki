@@ -155,20 +155,6 @@ mod tests {
         ranki_model::Timing::v1(now, 0)
     }
 
-    fn review(id: i64) -> RevLog {
-        RevLog {
-            id,
-            card_id: 1,
-            usn: 0,
-            ease: 3,
-            interval: 1,
-            last_interval: 0,
-            factor: 2_500,
-            time_ms: 100,
-            kind: RevLogKind::Review,
-        }
-    }
-
     fn collection_with_reviews(path: &Path, count: usize) -> Collection {
         let mut collection =
             Collection::create(&path.join("collection.anki2")).unwrap();
