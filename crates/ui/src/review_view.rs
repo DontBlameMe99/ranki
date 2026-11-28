@@ -634,7 +634,7 @@ impl Root {
     }
 }
 
-/// Height available to the scrolling stage body below the tag row.
+/// Height available to the scrolling stage body inside the stage padding.
 const fn stage_content_height(stage_height: f32) -> f32 {
     (stage_height - 2.0 * STAGE_PADDING - 56.0).max(0.0)
 }
@@ -1123,7 +1123,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_body_reserves_the_tag_row_and_padding() {
+    fn stage_body_keeps_the_stage_padding() {
         assert_eq!(
             super::stage_content_height(440.0),
             440.0 - 2.0 * super::STAGE_PADDING - 56.0
