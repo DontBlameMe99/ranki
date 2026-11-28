@@ -1,14 +1,15 @@
 # Android APK build
 
-`android/` packages the existing `ranki-mobile` cdylib into an APK. Android's
-`NativeActivity` loads `libranki_mobile.so` and calls the `android_main` symbol
-already exported by `crates/mobile`, so there is no new Rust wrapper crate and no
-Java or Kotlin source.
+`android/` packages the `ranki` cdylib into an APK. AndroidX `GameActivity`
+loads `libranki.so` and calls the `android_main` symbol already exported by
+`crates/bin/src/mobile`. GameActivity provides the soft-keyboard input support
+that `NativeActivity` lacks. There is no custom Java or Kotlin source.
 
 The build has two steps:
 
-1. `cargo-ndk` compiles `-p ranki-mobile --lib` for `aarch64-linux-android` with
-   API 26 and copies the library into `android/app/src/main/jniLibs/arm64-v8a/`.
+1. `cargo-ndk` compiles `-p ranki --no-default-features --lib` for
+   `aarch64-linux-android` with API 26 and copies the library into
+   `android/app/src/main/jniLibs/arm64-v8a/`.
 2. The Gradle wrapper runs `assembleDebug` or `assembleRelease` with Android Gradle
    Plugin 8.13.2 and SDK platform 36.
 

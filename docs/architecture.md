@@ -15,10 +15,11 @@ collection.
   `graves` tables.
 - `crates/format` (`ranki-format`): `.apkg` import/export and media mapping.
 - `crates/sync` (`ranki-sync`): AnkiWeb v11 sync client.
-- `crates/ui` (`ranki-ui`): GPUI application with Wayland support; deck list,
-  review screen, editor, stats.
+- `crates/ui` (`ranki-ui`): GPUI application with Wayland support and responsive
+  desktop, deck, review, editor, browse, sync, and statistics views.
 - `crates/bench` (`ranki-bench`): headless benchmark harness for Ranki surfaces.
-- `crates/bin` (`ranki`): CLI and AnkiConnect-compatible JSON-RPC server.
+- `crates/bin` (`ranki`): CLI, AnkiConnect-compatible JSON-RPC server, touch
+  renderer, and Android/iOS library entry points.
 
 ## Storage layout
 
@@ -33,8 +34,9 @@ between apps.
 That directory is the portability seam. A mobile entry point supplies the
 platform's app data and config directories through `RANKI_DATA_DIR` and
 `RANKI_CONFIG_DIR`, or by constructing `DataPaths` directly. Building `ranki`
-with `--no-default-features` leaves GPUI and the Wayland window out of the
-binary.
+with `--no-default-features --features cli` leaves both UI renderers out of the
+CLI. Android builds use `--no-default-features` and enter through the library's
+`android_main` symbol.
 
 ## Contract
 

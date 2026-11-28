@@ -640,7 +640,8 @@ fn open_gui(
     if mobile {
         #[cfg(feature = "mobile")]
         {
-            ranki::mobile::platform::run()
+            use ranki::mobile::platform;
+            platform::run()
                 .map_err(|error| CliError::Message(error.to_string()))?;
             return Ok(None);
         }

@@ -27,6 +27,12 @@ assert_not_contains() {
   fi
 }
 
+assert_contains "$REPO_ROOT/android/app/src/main/AndroidManifest.xml" \
+  "com.google.androidgamesdk.GameActivity"
+assert_contains "$REPO_ROOT/android/app/build.gradle" \
+  "androidx.games:games-activity:4.4.0"
+assert_contains "$REPO_ROOT/crates/bin/Cargo.toml" '"android-game-activity"'
+
 SDK="$TMP/sdk"
 PROJECT="$TMP/project"
 mkdir -p "$SDK/ndk/25.2.9519653" "$SDK/ndk/27.1.12297006" "$TMP/bin"
@@ -53,9 +59,9 @@ for arg in "$@"; do
   previous="$arg"
 done
 [[ -n "$output" ]] || exit 1
-[[ ! -e "$output/arm64-v8a/libranki_mobile.so" ]] || exit 1
+[[ ! -e "$output/arm64-v8a/libranki.so" ]] || exit 1
 mkdir -p "$output/arm64-v8a"
-: > "$output/arm64-v8a/libranki_mobile.so"
+: > "$output/arm64-v8a/libranki.so"
 STUB
 
 cat > "$PROJECT/android/gradlew" <<'STUB'
@@ -92,15 +98,15 @@ unset ANDROID_SDK_ROOT ANDROID_NDK_HOME NDK_HOME
 : > "$GRADLE_LOG"
 "$SCRIPT" debug > "$TMP/output.log"
 assert_contains "$CARGO_LOG" "NDK=$SDK/ndk/27.1.12297006"
-assert_contains "$CARGO_LOG" "CARGO=ndk --target arm64-v8a --platform 26 --output-dir $PROJECT/android/app/src/main/jniLibs build --manifest-path $PROJECT/Cargo.toml --package ranki-mobile --lib"
-assert_not_contains "$CARGO_LOG" "CARGO=ndk --target arm64-v8a --platform 26 --output-dir $PROJECT/android/app/src/main/jniLibs build --manifest-path $PROJECT/Cargo.toml --package ranki-mobile --lib --release"
+assert_contains "$CARGO_LOG" "CARGO=ndk --target arm64-v8a --platform 26 --output-dir $PROJECT/android/app/src/main/jniLibs build --manifest-path $PROJECT/Cargo.toml --package ranki --no-default-features --lib"
+assert_not_contains "$CARGO_LOG" "CARGO=ndk --target arm64-v8a --platform 26 --output-dir $PROJECT/android/app/src/main/jniLibs build --manifest-path $PROJECT/Cargo.toml --package ranki --no-default-features --lib --release"
 assert_contains "$GRADLE_LOG" "GRADLE=-p $PROJECT/android --no-daemon assembleDebug"
 assert_contains "$TMP/output.log" "APK: $PROJECT/android/app/build/outputs/apk/debug/app-debug.apk"
 
 : > "$CARGO_LOG"
 : > "$GRADLE_LOG"
 "$SCRIPT" release > "$TMP/output.log"
-assert_contains "$CARGO_LOG" "CARGO=ndk --target arm64-v8a --platform 26 --output-dir $PROJECT/android/app/src/main/jniLibs build --manifest-path $PROJECT/Cargo.toml --package ranki-mobile --lib --release"
+assert_contains "$CARGO_LOG" "CARGO=ndk --target arm64-v8a --platform 26 --output-dir $PROJECT/android/app/src/main/jniLibs build --manifest-path $PROJECT/Cargo.toml --package ranki --no-default-features --lib --release"
 assert_contains "$GRADLE_LOG" "GRADLE=-p $PROJECT/android --no-daemon assembleRelease"
 assert_contains "$TMP/output.log" "APK: $PROJECT/android/app/build/outputs/apk/release/app-release-unsigned.apk"
 

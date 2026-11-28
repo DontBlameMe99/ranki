@@ -5,7 +5,7 @@ usage() {
   cat <<'EOF'
 Usage: android/scripts/build-apk.sh [debug|release]
 
-Builds the existing ranki-mobile cdylib for arm64-v8a with cargo-ndk, then
+Builds the existing ranki cdylib for arm64-v8a with cargo-ndk, then
 assembles the APK with Gradle. The default variant is debug.
 EOF
 }
@@ -63,11 +63,11 @@ command -v "$CARGO" >/dev/null 2>&1 || die "cargo not found. Run this script ins
 [[ -x "$GRADLEW" ]] || die "Gradle wrapper not found or not executable: $GRADLEW"
 
 JNI_DIR="$ANDROID_DIR/app/src/main/jniLibs"
-SO="$JNI_DIR/arm64-v8a/libranki_mobile.so"
+SO="$JNI_DIR/arm64-v8a/libranki.so"
 rm -f "$SO"
 CARGO_ARGS=(
   ndk --target arm64-v8a --platform 26 --output-dir "$JNI_DIR"
-  build --manifest-path "$REPO_ROOT/Cargo.toml" --package ranki-mobile --lib
+  build --manifest-path "$REPO_ROOT/Cargo.toml" --package ranki --no-default-features --lib
 )
 if [[ "$MODE" == release ]]; then
   CARGO_ARGS+=(--release)

@@ -19,8 +19,8 @@ path       = "src/lib.rs"
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [features]
-default = ["desktop", "cli"]
-desktop = ["cli", "dep:ranki-ui"]
+default = ["desktop"]
+desktop = ["cli", "mobile", "dep:ranki-ui"]
 cli     = []
 mobile  = ["dep:egui", "dep:eframe", "dep:image", "dep:winit"]
 
@@ -59,7 +59,7 @@ egui  = "0.32"
 eframe = { version = "0.32", default-features = false, features = [
   "wgpu",
   "default_fonts",
-  "android-native-activity",
+  "android-game-activity",
 ] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 winit = { version = "0.30", default-features = false }

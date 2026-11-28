@@ -55,9 +55,9 @@ chmod +x "$dir/bin/ydotool" "$dir/bin/xdotool"
 repo="$PWD"
 target_dir="${CARGO_TARGET_DIR:-$repo/target}"
 host_target="$(nix develop --command rustc -vV | sed -n 's/^host: //p')"
-nix develop --command env CARGO_TARGET_DIR="$target_dir" cargo build --target "$host_target" -p ranki -p ranki-mobile >/dev/null
+nix develop --command env CARGO_TARGET_DIR="$target_dir" cargo build --target "$host_target" -p ranki >/dev/null
 seed_bin="$target_dir/$host_target/debug/ranki"
-mobile_bin="$target_dir/$host_target/debug/ranki-mobile"
+mobile_bin="$seed_bin"
 
 cat > "$config/ranki/config.toml" <<EOF
 [ui]
@@ -125,14 +125,14 @@ capture() {
     RANKI_MOBILE_DEV_WIDTH="$width" RANKI_MOBILE_DEV_HEIGHT="$height" \
     nix develop --command nix shell "${nix_packages[@]}" --command env \
     XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$display" \
-    "$mobile_bin" >"$dir/$name.log" 2>&1 &
+    "$mobile_bin" --mobile >"$dir/$name.log" 2>&1 &
   app_pid=$!
   active_app_pid=$app_pid
 
   local ready=0
   for _ in {1..60}; do
     if hidden swaymsg -t get_tree 2>/dev/null \
-      | grep -q '"app_id": "ranki-mobile"'; then
+      | grep -q '"app_id": "ranki"'; then
       ready=1
       break
     fi
@@ -158,6 +158,7 @@ capture answer review 1
 capture add add
 capture browse browse
 capture settings settings
+capture statistics statistics
 
 printf 'Screenshots:\n'
 printf 'Viewport: %sx%s\n' "$width" "$height"

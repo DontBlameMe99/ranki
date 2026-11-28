@@ -743,7 +743,7 @@ fn media_cache_key(media_dir: &Path, name: &str) -> String {
 
 fn show_image(ui: &mut Ui, media_dir: &Path, name: &str) {
     let key = media_cache_key(media_dir, name);
-    let id = Id::new("ranki-mobile-card-images");
+    let id = Id::new("ranki-card-images");
     let cached = ui
         .ctx()
         .memory(|memory| memory.data.get_temp::<MediaCache>(id))

@@ -3,14 +3,14 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <application android:label="Ranki" android:hasCode="false">
+    <application android:label="Ranki" android:theme="@style/RankiTheme">
         <activity
-            android:name="android.app.NativeActivity"
+            android:name="com.google.androidgamesdk.GameActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|locale|uiMode"
             android:exported="true">
             <meta-data
                 android:name="android.app.lib_name"
-                android:value="ranki_mobile" />
+                android:value="ranki" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

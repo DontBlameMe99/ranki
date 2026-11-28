@@ -247,7 +247,7 @@ capture() {
   active_app_pid=''
 }
 
-capture decks
+capture decks decks
 capture question question
 capture answer answer 1
 capture add add
@@ -255,6 +255,15 @@ capture add add
 hidden swaymsg output '*' resolution 900x600 >/dev/null
 capture small question
 
+
+hidden swaymsg output '*' resolution 390x844 >/dev/null
+capture phone-decks decks
+capture phone-question question
+capture phone-answer answer 1
+capture phone-add add
+capture phone-browse browse
+capture phone-statistics statistics
+capture phone-settings settings
 printf 'Screenshots:\n'
 printf '%s\n' "$dir"/*.png
 printf 'Temporary directory: %s\n' "$dir"
