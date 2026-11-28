@@ -98,7 +98,10 @@ impl SmoothScroll {
 
     /// Advances the visible offset one frame. With motion disabled the
     /// container's own wheel handler owns the offset, so this only tracks it.
-    pub fn advance(&mut self, window: &Window, smooth: bool) {
+    /// Returns whether the offset moved, so callers can rebuild content that
+    /// depends on the scroll position.
+    pub fn advance(&mut self, window: &Window, smooth: bool) -> bool {
+        let before = self.offset;
         self.sync_external();
         let max = self.max_offset();
         self.offset = self.offset.clamp(0.0, max);
@@ -125,7 +128,9 @@ impl SmoothScroll {
         if self.tick.is_some() {
             window.request_animation_frame();
         }
+        (self.offset - before).abs() > 0.01
     }
+
     fn step(&mut self, elapsed_seconds: f32) {
         let remaining = self.target - self.offset;
         if remaining.abs() <= SETTLE_PX {

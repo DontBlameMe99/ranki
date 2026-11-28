@@ -171,6 +171,26 @@ impl BrowseStore {
         );
         id
     }
+
+    fn with_cards(count: usize) -> Self {
+        let mut store = Self {
+            decks: vec![Deck {
+                id: 10,
+                name: String::from("Default"),
+                description: String::new(),
+            }],
+            models: ranki_model::stock_models(),
+            cards: HashMap::new(),
+            notes: HashMap::new(),
+            ids: Vec::new(),
+            card_reads: Arc::new(AtomicUsize::new(0)),
+            fail_reads: false,
+        };
+        for _ in 0..count {
+            let _ = store.push_card(10);
+        }
+        store
+    }
 }
 
 impl ranki_model::Store for BrowseStore {
@@ -486,6 +506,52 @@ fn browse_reads_only_the_cards_it_shows(cx: &mut gpui::TestAppContext) {
     assert!(
         cx.debug_bounds("browse-row-1500").is_some(),
         "a card deep in the table must appear when scrolled down"
+    );
+}
+
+#[gpui::test]
+fn browse_rows_fill_the_table_at_the_bottom(cx: &mut gpui::TestAppContext) {
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(BrowseStore::with_cards(2_000)),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(size(px(1400.), px(900.)));
+    cx.update_entity(&root, |root, cx| {
+        root.view = View::Browse;
+        let _ = root.browse.expanded.insert(String::from("Default"));
+        root.rebuild_browse_entries();
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let max = cx.read_entity(&root, |root, _| {
+        f32::from(root.browse_smooth.handle().max_offset().height)
+    });
+    cx.update_entity(&root, |root, _| {
+        root.browse_smooth
+            .handle()
+            .set_offset(point(px(0.), px(-max)));
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let row = cx
+        .debug_bounds("browse-row-2000")
+        .expect("the last card at the bottom");
+    let table = cx.debug_bounds("browse-table").expect("browse table");
+    assert_eq!(row.size.height, px(52.0), "rows must not shrink in flex");
+    assert!(
+        row.bottom() >= table.bottom() - px(2.0),
+        "the last row must reach the bottom of the table"
     );
 }
 
