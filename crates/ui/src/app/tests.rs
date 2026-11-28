@@ -2,7 +2,7 @@ use gpui::AppContext as _;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicI64, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
@@ -107,6 +107,86 @@ impl ranki_model::Store for ModalStore {
 
     fn collection_modified(&self) -> Result<i64, StoreError> {
         Ok(0)
+    }
+
+    fn collection_created(&self) -> Result<i64, StoreError> {
+        Ok(0)
+    }
+}
+
+#[derive(Default)]
+struct StatisticsStore {
+    reads: Arc<AtomicUsize>,
+    modified: Arc<AtomicI64>,
+}
+
+impl ranki_model::Store for StatisticsStore {
+    fn decks(&self) -> Result<Vec<Deck>, StoreError> {
+        ModalStore.decks()
+    }
+
+    fn create_deck(&mut self, name: &str) -> Result<Deck, StoreError> {
+        ModalStore.create_deck(name)
+    }
+
+    fn models(&self) -> Result<Vec<NoteModel>, StoreError> {
+        ModalStore.models()
+    }
+
+    fn find_cards(&self, query: &str) -> Result<Vec<Id>, StoreError> {
+        ModalStore.find_cards(query)
+    }
+
+    fn browse_cards(
+        &self,
+        query: &str,
+    ) -> Result<Vec<ranki_model::BrowseCard>, StoreError> {
+        ModalStore.browse_cards(query)
+    }
+
+    fn due_cards(
+        &self,
+        deck_id: Option<Id>,
+        limit: usize,
+        now: i64,
+    ) -> Result<Vec<Card>, StoreError> {
+        ModalStore.due_cards(deck_id, limit, now)
+    }
+
+    fn card(&self, id: Id) -> Result<Option<Card>, StoreError> {
+        ModalStore.card(id)
+    }
+
+    fn note(&self, id: Id) -> Result<Option<Note>, StoreError> {
+        ModalStore.note(id)
+    }
+
+    fn add_note(&mut self, note: &NewNote) -> Result<Vec<Id>, StoreError> {
+        ModalStore.add_note(note)
+    }
+
+    fn apply_review(
+        &mut self,
+        decision: &ReviewDecision,
+    ) -> Result<Id, StoreError> {
+        ModalStore.apply_review(decision)
+    }
+
+    fn stats(
+        &self,
+        deck_id: Option<Id>,
+        now: i64,
+    ) -> Result<ranki_model::DeckStats, StoreError> {
+        ModalStore.stats(deck_id, now)
+    }
+
+    fn review_history(&self) -> Result<Vec<ranki_model::RevLog>, StoreError> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        Ok(Vec::new())
+    }
+
+    fn collection_modified(&self) -> Result<i64, StoreError> {
+        Ok(self.modified.load(Ordering::Relaxed))
     }
 
     fn collection_created(&self) -> Result<i64, StoreError> {
@@ -618,6 +698,42 @@ fn escape_closes_the_create_deck_modal(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("escape");
 
     assert!(!cx.update(|_, app| root.read(app).create_modal));
+}
+#[gpui::test]
+fn opening_statistics_uses_the_cached_summary(cx: &mut gpui::TestAppContext) {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let modified = Arc::new(AtomicI64::new(7));
+    let mut options = Options::default();
+    options.paths.collection =
+        std::path::PathBuf::from("no-such-collection.anki2");
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(StatisticsStore {
+                    reads: Arc::clone(&reads),
+                    modified: Arc::clone(&modified),
+                }),
+                options,
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    let before = reads.load(Ordering::Relaxed);
+    assert!(before > 0, "startup should build the summary");
+
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| {
+            root.dispatch(UiAction::OpenStatistics, window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(reads.load(Ordering::Relaxed), before);
+    assert_eq!(cx.update(|_, app| root.read(app).view), View::Statistics);
+    assert!(cx.update(|_, app| root.read(app).toast.is_none()));
 }
 #[gpui::test]
 fn create_deck_error_lives_by_the_input_until_the_name_changes(
