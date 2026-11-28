@@ -50,7 +50,7 @@ pub fn import_apkg(
     schema::ensure_parent(collection)?;
     let contents = package::read_apkg(imported_package, scratch_dir)?;
     let source_crt = package_creation_time(contents.collection.path())?;
-    let renames = media::copy_media(media_dir, &contents.media)?;
+    let copied_media = media::copy_media(media_dir, &contents.media)?;
     let media_count = contents.media.len();
 
     let mut connection = schema::open_or_create(collection, Some(source_crt))?;
@@ -59,12 +59,16 @@ pub fn import_apkg(
         .execute("ATTACH DATABASE ? AS incoming", params![incoming])
         .map_err(error::db_error("cannot open package collection"))?;
 
-    let result =
-        merge::merge_collection(&mut connection, &renames, media_count);
+    let result = merge::merge_collection(
+        &mut connection,
+        copied_media.renames(),
+        media_count,
+    );
     let detach = connection
         .execute_batch("DETACH DATABASE incoming")
         .map_err(error::db_error("cannot close package collection"));
     let report = result?;
+    copied_media.keep();
     detach?;
     Ok(report)
 }

@@ -28,6 +28,31 @@ pub struct MediaRename {
     pub to: String,
 }
 
+/// Tracks media written during one import and removes it unless kept.
+#[derive(Debug, Default)]
+pub struct MediaCopy {
+    renames: Vec<MediaRename>,
+    created: Vec<PathBuf>,
+}
+
+impl MediaCopy {
+    pub fn renames(&self) -> &[MediaRename] {
+        &self.renames
+    }
+
+    pub fn keep(mut self) {
+        self.created.clear();
+    }
+}
+
+impl Drop for MediaCopy {
+    fn drop(&mut self) {
+        for path in &self.created {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 /// A media file found in a media directory during export.
 #[derive(Debug, Clone)]
 pub struct MediaFile {
@@ -136,14 +161,14 @@ pub fn collect_media_files(
 pub fn copy_media(
     media_dir: &Path,
     entries: &[MediaEntry],
-) -> Result<Vec<MediaRename>, FormatError> {
+) -> Result<MediaCopy, FormatError> {
     fs::create_dir_all(media_dir).map_err(io_error(format!(
         "cannot create media directory {}",
         media_dir.display()
     )))?;
 
     let mut cache = MediaCache::new(media_dir);
-    let mut renames = Vec::new();
+    let mut copied = MediaCopy::default();
     for entry in entries {
         let preferred = sanitize_filename(&entry.name);
         if preferred.is_empty() {
@@ -160,6 +185,7 @@ pub fn copy_media(
             let context = format!("media file {}", destination.display());
             write_new_file(&destination, &entry.bytes, &context)?;
             cache.record(&final_name, hash);
+            copied.created.push(destination);
         }
 
         let mut sources = vec![entry.name.as_str()];
@@ -168,14 +194,14 @@ pub fn copy_media(
         }
         for source in sources {
             if source != final_name {
-                renames.push(MediaRename {
+                copied.renames.push(MediaRename {
                     from: source.to_owned(),
                     to: final_name.clone(),
                 });
             }
         }
     }
-    Ok(renames)
+    Ok(copied)
 }
 
 pub fn write_new_file(
@@ -188,8 +214,11 @@ pub fn write_new_file(
         .create_new(true)
         .open(path)
         .map_err(io_error(format!("cannot create {context}")))?;
-    file.write_all(bytes)
-        .map_err(io_error(format!("cannot write {context}")))
+    if let Err(error) = file.write_all(bytes) {
+        let _ = fs::remove_file(path);
+        return Err(io_error(format!("cannot write {context}"))(error));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
