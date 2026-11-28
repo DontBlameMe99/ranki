@@ -31,19 +31,21 @@ nix build .#default      # packaged binary in ./result/bin/ranki
 ./result/bin/ranki --help
 ```
 
-The desktop UI uses GPUI and stays the default. The touch UI is a separate
-crate with no GPUI dependency:
+The desktop UI uses GPUI and adapts to phone-width windows. The same `ranki`
+package also builds the touch renderer and Android entry point:
 
 ```bash
-nix develop --command cargo run -p ranki-mobile
-CC_aarch64_linux_android=gcc CRATE_CC_NO_DEFAULTS=1 \
-  nix develop --command cargo check -p ranki-mobile --target aarch64-linux-android
+nix develop --command cargo run
+nix develop --command cargo run -- --mobile
+nix develop --command bash -lc \
+  'nix shell nixpkgs#cargo-ndk --command cargo ndk --target arm64-v8a --platform 26 check --package ranki --no-default-features --lib'
 CC_aarch64_apple_ios=clang CRATE_CC_NO_DEFAULTS=1 \
-  nix develop --command cargo check -p ranki-mobile --target aarch64-apple-ios
+  nix develop --command cargo check -p ranki --no-default-features --target aarch64-apple-ios
 ```
 
-See `docs/mobile.md` for the mobile data directories, platform entry points,
-and visual check command.
+`cargo run` opens the desktop layout. `cargo run -- --mobile` opens the touch
+layout in a phone-sized window. Android APK commands are in
+`docs/Android-build.md`.
 
 ## Home Manager
 

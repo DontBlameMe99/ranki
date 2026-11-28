@@ -1346,6 +1346,7 @@ impl Root {
             .detach();
         }
         match env::var("RANKI_UI_DEV_VIEW").as_deref() {
+            Ok("decks") => root.view = View::Decks,
             Ok("statistics") => root.view = View::Statistics,
             Ok("add") => root.view = View::AddCard,
             Ok("settings") => root.view = View::Settings,
@@ -3917,7 +3918,9 @@ impl Render for Root {
                 self.render_statistics(window, cx).into_any_element()
             }
         };
-        let root = div()
+        let mobile_nav = view != View::Review
+            && theme::is_mobile_width(f32::from(window.viewport_size().width));
+        let root_base = div()
             .id("root")
             .size_full()
             .flex()
@@ -4100,12 +4103,23 @@ impl Render for Root {
             }))
             .on_action(cx.listener(|this, _: &SyncKeepRemote, window, cx| {
                 this.dispatch(UiAction::SyncKeepRemote, window, cx);
-            }))
-            .when(view != View::Review, |this| {
-                this.child(self.render_nav(window, cx))
-            })
-            .child(div().flex_1().overflow_hidden().child(main))
-            .children(self.render_overlay(window, cx));
+            }));
+        let nav = if view == View::Review {
+            None
+        } else {
+            Some(self.render_nav(window, cx).into_any_element())
+        };
+        let page = div()
+            .flex_1()
+            .overflow_hidden()
+            .when(mobile_nav, |this| this.pb(px(theme::MOBILE_NAV_HEIGHT)))
+            .child(main);
+        let overlays = self.render_overlay(window, cx);
+        let root = if mobile_nav {
+            root_base.child(page).children(nav).children(overlays)
+        } else {
+            root_base.children(nav).child(page).children(overlays)
+        };
         let bars: Vec<_> = self
             .active_scrollbars(window)
             .into_iter()

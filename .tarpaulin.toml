@@ -22,9 +22,12 @@ exclude-files = [
   "crates/ui/src/theme.rs",
   # egui view builders and platform entry points need a GPU surface or a real
   # mobile host, so they are covered by target checks and PR screenshots.
-  "crates/mobile/src/ui.rs",
-  "crates/mobile/src/platform.rs",
-  "crates/mobile/src/lib.rs",
+  "crates/bin/src/mobile/ui.rs",
+  "crates/bin/src/mobile/platform.rs",
+  "crates/bin/src/mobile/mod.rs",
   # Vendored only to patch one libc constant for xattr on Linux.
   "vendor/xattr/*",
+  # Upstream winit source with the Android IME backport. It is third-party code
+  # with its own tests, so it does not count toward Ranki's coverage.
+  "vendor/winit/*",
 ]

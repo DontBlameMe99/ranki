@@ -1,13 +1,12 @@
 //! Statistics screen: a review heatmap, a seven-day forecast, and card counts.
 
-use std::{collections::HashMap, time::Duration};
-
 use chrono::{Datelike, NaiveDate};
 use gpui::{
     Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
     Rgba, StatefulInteractiveElement, Styled, Window, div, px,
 };
-use ranki_model::{Id, RevLog, RevLogKind};
+use ranki_model::{RevLog, RevLogKind};
+use std::time::Duration;
 
 use crate::{
     app::{Root, duration_label},
@@ -258,7 +257,6 @@ fn build_statistics_impl(
         );
     }
 
-    let mut per_day: HashMap<i64, usize> = HashMap::new();
     let mut stats = Statistics::default();
     for log in history {
         if matches!(log.kind, RevLogKind::Manual | RevLogKind::Rescheduled) {
@@ -266,9 +264,6 @@ fn build_statistics_impl(
         }
         let day = day_of(log.id / 1_000);
         let millis = u64::from(log.time_ms);
-        if day <= today {
-            *per_day.entry(day).or_default() += 1;
-        }
         stats.total_reviews += 1;
         stats.total_millis = stats.total_millis.saturating_add(millis);
 
@@ -291,87 +286,8 @@ fn build_statistics_impl(
     }
     stats.days = days;
 
-    stats.streak =
-        streak_days(&per_day, &due_ranges(history, &day_of, today), today);
+    stats.streak = ranki_model::review_streak(history, &day_of, today);
     stats
-}
-
-/// Spans where at least one card was due, rebuilt from the review log: an
-/// answer makes its card due `interval` days later, and the card stays due
-/// until the next answer. Learning intervals are seconds, so those cards only
-/// fall due again on the day they were answered.
-fn due_ranges(
-    history: &[RevLog],
-    day_of: &impl Fn(i64) -> i64,
-    today: i64,
-) -> Vec<(i64, i64)> {
-    let mut answers: HashMap<Id, Vec<(i64, i32)>> = HashMap::new();
-    for log in history {
-        if matches!(log.kind, RevLogKind::Manual | RevLogKind::Rescheduled) {
-            continue;
-        }
-        answers
-            .entry(log.card_id)
-            .or_default()
-            .push((day_of(log.id / 1_000), log.interval));
-    }
-    let mut ranges = Vec::with_capacity(answers.len());
-    for queue in answers.values_mut() {
-        queue.sort_unstable();
-        for (index, &(day, interval)) in queue.iter().enumerate() {
-            let start = day.saturating_add(i64::from(interval.max(0)));
-            let end = queue
-                .get(index.saturating_add(1))
-                .map_or(today, |next| next.0);
-            if start < end {
-                ranges.push((start, end));
-            }
-        }
-    }
-    ranges.sort_unstable();
-    let mut merged: Vec<(i64, i64)> = Vec::with_capacity(ranges.len());
-    for (start, end) in ranges {
-        match merged.last_mut() {
-            Some(last) if start <= last.1 => last.1 = last.1.max(end),
-            _ => merged.push((start, end)),
-        }
-    }
-    merged
-}
-
-/// Counts reviewed days back from today. A day with nothing due had nothing to
-/// study, so it neither adds to the streak nor ends it. An unanswered due day
-/// ends it. Today is never counted against the streak because it may still be
-/// in progress.
-fn streak_days(
-    reviewed: &HashMap<i64, usize>,
-    due: &[(i64, i64)],
-    today: i64,
-) -> usize {
-    let Some(oldest) = reviewed.keys().copied().min() else {
-        return 0;
-    };
-    let is_due = |day: i64| {
-        due.partition_point(|&(start, _)| start <= day)
-            .checked_sub(1)
-            .is_some_and(|index| {
-                due.get(index).is_some_and(|&(_, end)| day < end)
-            })
-    };
-    let mut streak = 0;
-    let mut day = today;
-    loop {
-        if reviewed.contains_key(&day) {
-            streak += 1;
-        } else if day != today && is_due(day) {
-            break;
-        }
-        if day <= oldest {
-            break;
-        }
-        day = day.saturating_sub(1);
-    }
-    streak
 }
 
 impl Root {

@@ -14,8 +14,9 @@ use crate::{
         keycap, panel, secondary_button,
     },
     theme::{
-        NAV_DIVIDER_WIDTH, SPACE_BLOCK, SPACE_GROUP, SPACE_INLINE,
-        SPACE_RELATED, SPACE_SECTION, Style, alpha, visible_nav_width,
+        MOBILE_NAV_HEIGHT, MOBILE_TOUCH_TARGET, NAV_DIVIDER_WIDTH, SPACE_BLOCK,
+        SPACE_GROUP, SPACE_INLINE, SPACE_RELATED, SPACE_SECTION, Style, alpha,
+        is_mobile_width, visible_nav_width,
     },
 };
 
@@ -29,6 +30,10 @@ impl Root {
         let style = Style::new(colors, self.theme());
         let active = self.view;
         let viewport_width = f32::from(window.viewport_size().width);
+        if is_mobile_width(viewport_width) {
+            return self.render_mobile_nav().into_any_element();
+        }
+
         let nav_width = visible_nav_width(viewport_width, self.nav_width);
         let auto_compact =
             viewport_width < crate::theme::NAV_AUTO_COMPACT_WIDTH;
@@ -194,6 +199,80 @@ impl Root {
                 true,
             ))
             .children((!auto_compact).then(|| self.render_nav_divider(cx)))
+            .into_any_element()
+    }
+
+    /// Bottom bar used at phone widths. Each tab keeps a 44px touch target.
+    fn render_mobile_nav(&mut self) -> impl IntoElement {
+        let colors = self.colors();
+        let active = self.view;
+        let tab = |label: &'static str,
+                   icon_name: &'static str,
+                   item: View,
+                   action: UiAction| {
+            let selected = active == item;
+            let ink = if selected {
+                colors.mauve
+            } else {
+                colors.subtext
+            };
+            let mut button = div()
+                .id(SharedString::from(format!("nav-{label}")))
+                .debug_selector(move || format!("nav-{label}"))
+                .flex()
+                .flex_1()
+                .min_w(px(MOBILE_TOUCH_TARGET))
+                .h(px(MOBILE_TOUCH_TARGET))
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(SPACE_INLINE))
+                .rounded(px(10.))
+                .text_size(px(10.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(ink)
+                .cursor_pointer();
+            if selected {
+                button = button.bg(alpha(colors.mauve, 0.16));
+            }
+            Interaction::tinted(colors, colors.mauve)
+                .apply(button)
+                .on_click(self.action_click(action))
+                .child(icon(icon_name, 20., ink))
+                .child(label)
+        };
+        div()
+            .id("mobile-nav")
+            .debug_selector(|| String::from("mobile-nav"))
+            .absolute()
+            .bottom(px(0.))
+            .left(px(0.))
+            .right(px(0.))
+            .h(px(MOBILE_NAV_HEIGHT))
+            .flex()
+            .items_center()
+            .gap(px(SPACE_INLINE))
+            .px(px(SPACE_INLINE))
+            .bg(colors.crust)
+            .border_t_1()
+            .border_color(colors.surface0)
+            .children([
+                tab("Decks", "icon-grid", View::Decks, UiAction::OpenDecks),
+                tab("Browse", "icon-book", View::Browse, UiAction::OpenBrowse),
+                tab("Add", "icon-plus", View::AddCard, UiAction::OpenAdd),
+                tab(
+                    "Statistics",
+                    "icon-chart",
+                    View::Statistics,
+                    UiAction::OpenStatistics,
+                ),
+                tab(
+                    "Settings",
+                    "icon-settings",
+                    View::Settings,
+                    UiAction::OpenSettings,
+                ),
+            ])
     }
 
     /// Grab strip on the rail's edge, drawn over the last few pixels.

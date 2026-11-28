@@ -656,6 +656,12 @@ pub const NAV_WIDTH_MAX: f32 = 280.0;
 pub const NAV_COMPACT_WIDTH: f32 = 180.0;
 /// Windows narrower than this always show the icon-only rail.
 pub const NAV_AUTO_COMPACT_WIDTH: f32 = 840.0;
+/// Below this width the rail becomes a bottom bar with no side gutter.
+pub const MOBILE_WIDTH: f32 = 640.0;
+/// Height of the bottom navigation bar.
+pub const MOBILE_NAV_HEIGHT: f32 = 56.0;
+/// Smallest tappable side of a mobile navigation item.
+pub const MOBILE_TOUCH_TARGET: f32 = 44.0;
 /// Grab strip on the rail's right edge.
 pub const NAV_DIVIDER_WIDTH: f32 = 4.0;
 pub const TOPBAR_HEIGHT: f32 = 72.0;
@@ -697,11 +703,19 @@ pub fn nav_width(width: f32) -> f32 {
     width.clamp(NAV_WIDTH_MIN, NAV_WIDTH_MAX)
 }
 
-/// Width the rail gets in this window. Small windows collapse it to icons so
-/// the page keeps enough room for its content; the saved width stays intact.
+/// True when a window is narrow enough to use the bottom navigation bar.
+#[must_use]
+pub const fn is_mobile_width(viewport_width: f32) -> bool {
+    viewport_width < MOBILE_WIDTH
+}
+
+/// Width the side rail gets in this window. Phone widths use a bottom bar
+/// instead, so the page keeps its full width; the saved width stays intact.
 #[must_use]
 pub fn visible_nav_width(viewport_width: f32, nav_width: f32) -> f32 {
-    if viewport_width < NAV_AUTO_COMPACT_WIDTH {
+    if is_mobile_width(viewport_width) {
+        0.0
+    } else if viewport_width < NAV_AUTO_COMPACT_WIDTH {
         NAV_WIDTH_MIN
     } else {
         nav_width
@@ -770,15 +784,16 @@ mod tests {
 
     use super::{
         ADD_GAP, BUTTON_HEIGHT, BUTTON_PADDING_X, BUTTON_RADIUS,
-        BUTTON_TEXT_SIZE, LATTE, MOCHA, MOTION_PROGRESS_MS, MOTION_QUICK_MS,
+        BUTTON_TEXT_SIZE, LATTE, MOBILE_NAV_HEIGHT, MOBILE_TOUCH_TARGET,
+        MOBILE_WIDTH, MOCHA, MOTION_PROGRESS_MS, MOTION_QUICK_MS,
         NAV_AUTO_COMPACT_WIDTH, NAV_COMPACT_WIDTH, NAV_WIDTH, NAV_WIDTH_MAX,
         NAV_WIDTH_MIN, PAGE_X, PAGE_Y, PROGRESS_HEIGHT, PROGRESS_WIDTH,
         RATING_GAP, SPACE_BLOCK, SPACE_GROUP, SPACE_GUTTER, SPACE_INLINE,
         SPACE_RELATED, SPACE_SECTION, STAGE_HEIGHT, STAGE_PADDING,
         STAGE_RADIUS, STAGE_WIDTH, Theme, accent_hover, accent_press, alpha,
         blend, card_colors, contrast, font_candidates, gtk_animations_disabled,
-        interval_label, kde_animations_disabled, keycap_ink, nav_width,
-        page_width, palette, parse_flag_bool, parse_hex_color,
+        interval_label, is_mobile_width, kde_animations_disabled, keycap_ink,
+        nav_width, page_width, palette, parse_flag_bool, parse_hex_color,
         placeholder_color, rating_fill, rating_label, reduced_motion,
         resolve_theme, stage_width, visible_nav_width, xdg_config_dir,
     };
@@ -868,6 +883,29 @@ mod tests {
         );
         assert_eq!(page_width(640.0, NAV_WIDTH), 640.0 - NAV_WIDTH_MIN - 64.0);
         assert_eq!(page_width(64.0, NAV_WIDTH), 0.0);
+    }
+
+    #[test]
+    fn phone_widths_drop_the_rail_and_keep_the_page_wide() {
+        assert!(is_mobile_width(390.0));
+        assert!(is_mobile_width(MOBILE_WIDTH - 1.0));
+        assert!(!is_mobile_width(MOBILE_WIDTH));
+
+        assert_eq!(visible_nav_width(390.0, NAV_WIDTH), 0.0);
+        assert_eq!(page_width(390.0, NAV_WIDTH), 390.0 - 2.0 * PAGE_X);
+        assert_eq!(
+            page_width(640.0, NAV_WIDTH),
+            640.0 - NAV_WIDTH_MIN - 2.0 * PAGE_X
+        );
+    }
+
+    #[test]
+    fn bottom_bar_fits_five_finger_sized_tabs() {
+        const {
+            assert!(MOBILE_NAV_HEIGHT >= MOBILE_TOUCH_TARGET);
+            assert!(MOBILE_TOUCH_TARGET >= 44.0);
+            assert!(320.0 >= 5.0 * MOBILE_TOUCH_TARGET);
+        }
     }
 
     #[test]

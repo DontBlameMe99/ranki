@@ -2,7 +2,7 @@
 
 Research note for one focused UI worktree. It describes the current state machine, external patterns, and a prioritized change list. It does not propose a rewrite of the scheduler, storage, or transports.
 
-This note is scoped to the desktop review worktree. The separate mobile UI path in `crates/mobile` intentionally adds touch layout, browse, add-note and sync screens; see `docs/mobile.md`.
+This note is scoped to the desktop review worktree. The separate mobile UI path in `crates/bin/src/mobile` intentionally adds touch layout, browse, add-note and sync screens; see `docs/mobile.md`.
 
 ## Internal baseline
 

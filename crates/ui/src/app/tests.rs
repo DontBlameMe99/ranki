@@ -850,6 +850,51 @@ fn dragging_the_divider_resizes_the_rail_between_icons_and_the_cap(
 }
 
 #[gpui::test]
+fn phone_width_switches_to_bottom_navigation(cx: &mut gpui::TestAppContext) {
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        super::Root::new(
+            super::Launch {
+                store: Box::new(ModalStore),
+                options: Options::default(),
+                save_settings: Arc::new(|_| Ok(())),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(size(px(390.), px(844.)));
+    cx.draw(point(px(0.), px(0.)), size(px(390.), px(844.)), |_, _| {
+        root.clone()
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    assert!(cx.debug_bounds("mobile-nav").is_some());
+    assert!(cx.debug_bounds("nav-divider").is_none());
+    let tab = cx.debug_bounds("nav-Browse").expect("browse tab");
+    assert!(tab.size.height >= px(44.));
+    assert!(tab.size.width >= px(44.));
+    assert!(tab.bottom() <= px(844.));
+
+    cx.simulate_click(tab.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_entity(&root, |root, _| root.view),
+        super::View::Browse
+    );
+
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, _| {
+        root.clone()
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(cx.debug_bounds("nav-divider").is_some());
+}
+
+#[gpui::test]
 fn deck_picker_floats_above_the_form(cx: &mut gpui::TestAppContext) {
     let (root, cx) = cx.add_window_view(|window, cx| {
         super::Root::new(

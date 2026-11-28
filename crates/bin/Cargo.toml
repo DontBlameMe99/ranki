@@ -6,28 +6,69 @@ edition.workspace    = true
 license.workspace    = true
 default-run          = "ranki"
 
+autobins = false
+
+[[bin]]
+name              = "ranki"
+path              = "src/main.rs"
+required-features = ["cli"]
+
+[lib]
+name       = "ranki"
+path       = "src/lib.rs"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
 [features]
 default = ["desktop"]
-desktop = ["dep:ranki-ui"]
+desktop = ["cli", "mobile", "dep:ranki-ui"]
+cli     = []
+mobile  = ["dep:egui", "dep:eframe", "dep:image", "dep:winit"]
 
 [dependencies]
-ranki-model.workspace = true
-ranki-core.workspace = true
+ranki-model.workspace   = true
+ranki-core.workspace    = true
 ranki-storage.workspace = true
-ranki-sync = { path = "../sync" }
-ranki-format.workspace = true
-ranki-ui = { workspace = true, optional = true }
-clap.workspace = true
-serde.workspace = true
-toml = "0.9"
-serde_json.workspace = true
-tiny_http.workspace = true
-tracing.workspace = true
+ranki-sync              = { path = "../sync" }
+ranki-format.workspace  = true
+ranki-ui                = { workspace = true, optional = true }
+clap.workspace          = true
+serde.workspace         = true
+toml                    = "0.9"
+serde_json.workspace    = true
+tiny_http.workspace     = true
+tracing.workspace       = true
 tracing-subscriber.workspace = true
-thiserror.workspace = true
-rmcp = { version = "=3.11.0", features = ["transport-io"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-unicode-normalization = "0.1"
+thiserror.workspace     = true
+rmcp                    = { version = "=3.11.0", features = ["transport-io"] }
+tokio                   = { version = "1", features = ["macros", "rt-multi-thread"] }
+unicode-normalization   = "0.1"
+egui                    = { version = "0.32", optional = true }
+image                   = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
+winit                   = { version = "0.30", default-features = false, optional = true }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+eframe = { version = "0.32", default-features = false, features = [
+  "glow",
+  "default_fonts",
+  "wayland",
+  "x11",
+], optional = true }
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+egui  = "0.32"
+eframe = { version = "0.32", default-features = false, features = [
+  "wgpu",
+  "default_fonts",
+  "android-game-activity",
+] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+winit = { version = "0.30", default-features = false }
+
+[target.'cfg(target_os = "android")'.dependencies]
+wgpu = { version = "25", default-features = false, features = ["vulkan", "gles"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+wgpu = { version = "25", default-features = false, features = ["metal"] }
 
 [dev-dependencies]
 tempfile.workspace = true

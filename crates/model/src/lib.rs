@@ -10,6 +10,7 @@ pub mod image_occlusion;
 pub mod occlusion;
 pub mod options;
 pub mod raw;
+mod review;
 pub mod stock;
 pub use cloze::cloze_markers;
 pub use cloze::cloze_ordinal;
@@ -26,6 +27,7 @@ pub use options::{
 };
 pub use raw::decode_hex;
 pub use raw::encode_hex;
+pub use review::review_streak;
 use std::collections::BTreeSet;
 pub use stock::StockModelKind;
 pub use stock::stock_models;
