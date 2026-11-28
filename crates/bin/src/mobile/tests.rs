@@ -1065,3 +1065,40 @@ fn focused_answer_time_freezes_when_the_screen_is_not_focused() {
         Duration::from_secs(60)
     );
 }
+
+#[test]
+fn image_occlusion_notes_need_the_desktop_editor() {
+    let mut fixture = fixture();
+    let model = fixture
+        .state
+        .store
+        .ensure_model(StockModelKind::ImageOcclusion)
+        .expect("image occlusion model");
+    fixture.state.refresh().expect("refresh");
+    let index = fixture
+        .state
+        .add
+        .models
+        .iter()
+        .position(|candidate| candidate.id == model.id)
+        .expect("image occlusion model in add state");
+    fixture.state.set_add_model(index);
+    let before = fixture.state.store.find_cards("").expect("cards").len();
+
+    fixture.state.save_note().expect("save note");
+
+    assert!(matches!(
+        fixture.state.toast.as_ref().map(|toast| toast.kind),
+        Some(ToastKind::Error)
+    ));
+    assert_eq!(
+        fixture
+            .state
+            .store
+            .find_cards("")
+            .expect("cards after save")
+            .len(),
+        before
+    );
+    drop(fixture.dir);
+}

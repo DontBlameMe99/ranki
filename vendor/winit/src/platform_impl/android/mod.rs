@@ -538,7 +538,6 @@ impl<T: 'static> EventLoop<T> {
                         selection: TextSpan { start: 0, end: 0 },
                         compose_region: None,
                     });
-                    self.android_app.hide_soft_input(true);
                     callback(event, self.window_target());
 
                     let event = event::Event::WindowEvent {

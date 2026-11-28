@@ -1,5 +1,6 @@
 [workspace]
 members  = ["crates/*"]
+default-members = ["crates/bin"]
 resolver = "3"
 
 [workspace.metadata.crane]

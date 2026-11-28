@@ -708,6 +708,10 @@ impl AppState {
             self.fail(String::from("Choose a note type first"));
             return Ok(());
         };
+        if model.is_image_occlusion() {
+            self.fail("Image occlusion notes cannot be created here");
+            return Ok(());
+        }
         if self.add.fields.len() != model.fields.len() {
             self.add.fields.resize(model.fields.len(), String::new());
         }

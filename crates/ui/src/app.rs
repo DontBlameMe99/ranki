@@ -1346,6 +1346,7 @@ impl Root {
             .detach();
         }
         match env::var("RANKI_UI_DEV_VIEW").as_deref() {
+            Ok("decks") => root.view = View::Decks,
             Ok("statistics") => root.view = View::Statistics,
             Ok("add") => root.view = View::AddCard,
             Ok("settings") => root.view = View::Settings,

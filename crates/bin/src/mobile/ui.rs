@@ -29,12 +29,16 @@ const RATING_HEIGHT: f32 = 60.0;
 /// egui app that owns the mobile state.
 pub struct MobileApp {
     pub state: AppState,
+    last_ime_focus: Option<egui::Id>,
 }
 
 impl MobileApp {
     #[must_use]
     pub const fn new(state: AppState) -> Self {
-        Self { state }
+        Self {
+            state,
+            last_ime_focus: None,
+        }
     }
 }
 
@@ -55,6 +59,14 @@ impl eframe::App for MobileApp {
             }
         }
         render(&mut self.state, ctx);
+        let ime_focus = ctx.memory(egui::Memory::focused);
+        if ime_focus != self.last_ime_focus {
+            if ime_focus.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(true));
+            }
+            self.last_ime_focus = ime_focus;
+        }
     }
 }
 
@@ -1070,7 +1082,7 @@ fn render_statistics(app: &AppState, ui: &mut Ui, p: &Palette) {
 
 fn streak_label(streak: usize) -> String {
     format!(
-        "Streak: {} day{}",
+        "Days studied: {} day{}",
         streak,
         if streak == 1 { "" } else { "s" }
     )
