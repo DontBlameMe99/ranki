@@ -4,17 +4,16 @@ use std::env;
 #[cfg(not(target_os = "android"))]
 use std::ffi::OsString;
 use std::fs;
-use std::io::ErrorKind;
+#[cfg(target_os = "android")]
 use std::path::Path;
 use std::path::PathBuf;
 
-use ranki_model::Config;
 use ranki_model::config::DataPaths;
-use ranki_model::config::Settings;
-use ranki_model::config::parse;
 use ranki_storage::Collection;
 use ranki_storage::ReopeningCollection;
 
+use crate::mobile::MobileError;
+use crate::mobile::Result;
 use crate::mobile::state::AppState;
 use crate::mobile::ui::MobileApp;
 
@@ -144,15 +143,15 @@ fn run_with_options(options: eframe::NativeOptions) -> eframe::Result<()> {
     eframe::run_native(APP_ID, options, Box::new(move |_| Ok(Box::new(app))))
 }
 
-fn build_app() -> crate::mobile::Result<MobileApp> {
+fn build_app() -> Result<MobileApp> {
     let (maybe_data_dir, maybe_config_dir) = initial_paths();
     let data_dir = maybe_data_dir.ok_or_else(|| {
-        crate::mobile::MobileError::Message(String::from(
+        MobileError::Message(String::from(
             "cannot resolve the data directory; set RANKI_DATA_DIR or HOME",
         ))
     })?;
     let config_dir = maybe_config_dir.ok_or_else(|| {
-        crate::mobile::MobileError::Message(String::from(
+        MobileError::Message(String::from(
             "cannot resolve the config directory; set RANKI_CONFIG_DIR or HOME",
         ))
     })?;
@@ -162,27 +161,16 @@ fn build_app() -> crate::mobile::Result<MobileApp> {
 
     let paths = DataPaths::new(data_dir);
     fs::create_dir_all(&paths.media_dir)?;
-    let settings = Settings::resolve(&load_config(&config_dir), paths);
 
-    let collection_path = &settings.paths.collection;
+    let collection_path = paths.collection.clone();
     let collection = if collection_path.exists() {
-        Collection::open(collection_path)?
+        Collection::open(&collection_path)?
     } else {
-        Collection::create(collection_path)?
+        Collection::create(&collection_path)?
     };
     drop(collection);
 
-    let store = ReopeningCollection::new(collection_path);
-    Ok(MobileApp::new(AppState::new(store, settings)?))
-}
-
-fn load_config(config_dir: &Path) -> Config {
-    match fs::read_to_string(config_dir.join("config.toml")) {
-        Ok(text) => parse(&text),
-        Err(error) if error.kind() == ErrorKind::NotFound => Config::default(),
-        Err(error) => {
-            eprintln!("ranki mobile: config: cannot read config.toml: {error}");
-            Config::default()
-        }
-    }
+    let store = ReopeningCollection::new(&collection_path);
+    let state = AppState::open(store, paths, &config_dir)?;
+    Ok(MobileApp::new(state))
 }

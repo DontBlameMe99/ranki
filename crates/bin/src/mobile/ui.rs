@@ -186,6 +186,9 @@ pub fn render(app: &mut AppState, ctx: &egui::Context) {
                                 Screen::Review => render_review(app, ui, &p),
                                 Screen::Add => render_add(app, ui, &p),
                                 Screen::Browse => render_browse(app, ui, &p),
+                                Screen::Statistics => {
+                                    render_statistics(app, ui, &p);
+                                }
                                 Screen::Settings => {
                                     render_settings(app, ui, &p);
                                 }
@@ -273,16 +276,17 @@ fn render_tabs(app: &mut AppState, ui: &mut Ui, p: &Palette) {
         (Screen::Decks, "Decks"),
         (Screen::Add, "Add"),
         (Screen::Browse, "Browse"),
+        (Screen::Statistics, "Stats"),
         (Screen::Settings, "Settings"),
     ];
     let width = (ui.available_width() - ((tabs.len() as f32) - 1.0) * 8.0)
         / (tabs.len() as f32);
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        ui.spacing_mut().button_padding = vec2(4.0, 8.0);
+        ui.spacing_mut().button_padding = vec2(2.0, 8.0);
         ui.style_mut()
             .text_styles
-            .insert(TextStyle::Button, FontId::proportional(15.0));
+            .insert(TextStyle::Button, FontId::proportional(14.0));
         ui.horizontal(|ui| {
             for (screen, label) in tabs {
                 let selected = app.screen == screen;
@@ -393,17 +397,21 @@ fn render_decks(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     }
 }
 
-fn stat(ui: &mut Ui, label: &str, value: usize, p: &Palette) {
+fn metric(ui: &mut Ui, label: &str, value: String, p: &Palette) {
     EguiFrame::new()
         .fill(p.panel_alt)
         .inner_margin(Margin::symmetric(10, 8))
         .corner_radius(CornerRadius::same(10))
         .show(ui, |ui| {
             ui.vertical(|ui| {
-                ui.label(RichText::new(format!("{value}")).size(18.0).strong());
+                ui.label(RichText::new(value).size(18.0).strong());
                 ui.label(RichText::new(label).size(13.0).color(p.muted));
             });
         });
+}
+
+fn stat(ui: &mut Ui, label: &str, value: usize, p: &Palette) {
+    metric(ui, label, value.to_string(), p);
 }
 
 fn render_review(app: &mut AppState, ui: &mut Ui, p: &Palette) {
@@ -816,6 +824,117 @@ fn render_browse(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     }
 }
 
+fn render_statistics(app: &AppState, ui: &mut Ui, p: &Palette) {
+    title(ui, "Statistics", p);
+    let stats = app.statistics.clone();
+
+    EguiFrame::new()
+        .fill(p.panel)
+        .stroke(Stroke::new(1.0_f32, p.border))
+        .inner_margin(Margin::same(12))
+        .corner_radius(CornerRadius::same(12))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(RichText::new("Today").size(20.0).strong());
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                stat(ui, "Reviews", stats.reviews_today, p);
+                metric(ui, "Time", duration_label(stats.millis_today), p);
+                metric(
+                    ui,
+                    "Accuracy",
+                    stats.accuracy_percent().map_or_else(
+                        || String::from("-"),
+                        |value| format!("{value}%"),
+                    ),
+                    p,
+                );
+            });
+            ui.add_space(8.0);
+            ui.label(RichText::new(streak_label(stats.streak)).color(p.text));
+            if stats.reviews_today == 0 {
+                ui.label(RichText::new("No reviews yet today.").color(p.muted));
+            }
+        });
+    ui.add_space(14.0);
+
+    EguiFrame::new()
+        .fill(p.panel)
+        .stroke(Stroke::new(1.0_f32, p.border))
+        .inner_margin(Margin::same(12))
+        .corner_radius(CornerRadius::same(12))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(RichText::new("Forecast").size(20.0).strong());
+            ui.label(
+                RichText::new("Cards due over the next seven days")
+                    .size(13.0)
+                    .color(p.muted),
+            );
+            ui.add_space(8.0);
+            if stats.forecast.is_empty() {
+                ui.label(
+                    RichText::new("The due forecast is unavailable.")
+                        .color(p.muted),
+                );
+                return;
+            }
+            for (offset, due) in stats.forecast.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(forecast_label(offset)).color(p.muted),
+                    );
+                    ui.with_layout(
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            ui.label(RichText::new(due.to_string()).strong());
+                        },
+                    );
+                });
+            }
+        });
+}
+
+fn streak_label(streak: usize) -> String {
+    format!(
+        "Streak: {} day{}",
+        streak,
+        if streak == 1 { "" } else { "s" }
+    )
+}
+
+fn forecast_label(offset: usize) -> String {
+    match offset {
+        0 => String::from("Today"),
+        1 => String::from("Tomorrow"),
+        _ => format!("+{offset} days"),
+    }
+}
+
+fn duration_label(millis: u64) -> String {
+    let seconds = millis.checked_div(1_000).unwrap_or_default();
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    if seconds < 3_600 {
+        return format!(
+            "{}m {}s",
+            seconds.checked_div(60).unwrap_or_default(),
+            seconds.checked_rem(60).unwrap_or_default()
+        );
+    }
+    format!(
+        "{}h {}m",
+        seconds.checked_div(3_600).unwrap_or_default(),
+        seconds
+            .checked_rem(3_600)
+            .unwrap_or_default()
+            .checked_div(60)
+            .unwrap_or_default()
+    )
+}
+
 fn render_settings(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     title(ui, "Settings", p);
 
@@ -847,7 +966,7 @@ fn render_settings(app: &mut AppState, ui: &mut Ui, p: &Palette) {
                     );
                 });
             if theme != app.settings.theme {
-                app.settings.theme = theme;
+                app.set_theme(theme);
                 app.say(format!("Theme set to {}", theme_name(theme)));
             }
         });

@@ -4,6 +4,7 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
@@ -15,9 +16,16 @@ use ranki_model::Id;
 use ranki_model::NewNote;
 use ranki_model::Note;
 use ranki_model::Rating;
+use ranki_model::RevLog;
+use ranki_model::RevLogKind;
 use ranki_model::Settings;
 use ranki_model::StockModelKind;
 use ranki_model::Store;
+use ranki_model::ThemeChoice;
+use ranki_model::Timing;
+use ranki_model::UiState;
+use ranki_model::UiView;
+use ranki_model::config::parse;
 use ranki_storage::Collection;
 use ranki_storage::ReopeningCollection;
 use tempfile::TempDir;
@@ -30,7 +38,9 @@ use crate::mobile::platform;
 use crate::mobile::state::AppState;
 use crate::mobile::state::ReviewPhase;
 use crate::mobile::state::Screen;
+use crate::mobile::state::Statistics;
 use crate::mobile::state::browse_answer;
+use crate::mobile::state::summarize;
 
 fn note(fields: &[&str], model_id: Id) -> Note {
     Note {
@@ -121,13 +131,12 @@ struct Fixture {
     deck_id: Id,
 }
 
-fn fixture() -> Fixture {
-    let dir = tempfile::tempdir().expect("temp directory");
-    let data = dir.path().join("data");
+fn seeded_collection(dir: &Path) -> (PathBuf, Id) {
+    let data = dir.join("data");
     fs::create_dir_all(data.join("ranki").join("collection.media"))
         .expect("data directory");
 
-    let collection_path = DataPaths::new(data.clone()).collection;
+    let collection_path = DataPaths::new(data).collection;
     let mut collection =
         Collection::create(&collection_path).expect("new collection");
     let deck = collection.create_deck("Mobile Deck").expect("deck");
@@ -146,16 +155,43 @@ fn fixture() -> Fixture {
         })
         .expect("seed note");
     collection.close().expect("close collection");
+    (collection_path, deck.id)
+}
 
+fn fixture() -> Fixture {
+    let dir = tempfile::tempdir().expect("temp directory");
+    let (collection_path, deck_id) = seeded_collection(dir.path());
+    let data = dir.path().join("data");
     let settings = Settings::resolve(&Config::default(), DataPaths::new(data));
     let state =
         AppState::new(ReopeningCollection::new(&collection_path), settings)
             .expect("app state");
-
     Fixture {
         dir,
         state,
-        deck_id: deck.id,
+        deck_id,
+    }
+}
+
+fn file_fixture(config: &str, ui_state: &str) -> Fixture {
+    let dir = tempfile::tempdir().expect("temp directory");
+    let (collection_path, deck_id) = seeded_collection(dir.path());
+    let config_dir = dir.path().join("config");
+    fs::create_dir_all(&config_dir).expect("config directory");
+    fs::write(config_dir.join("config.toml"), config).expect("config file");
+    fs::write(config_dir.join("ui-state.toml"), ui_state)
+        .expect("ui state file");
+    let paths = DataPaths::new(dir.path().join("data"));
+    let state = AppState::open(
+        ReopeningCollection::new(&collection_path),
+        paths,
+        &config_dir,
+    )
+    .expect("app state");
+    Fixture {
+        dir,
+        state,
+        deck_id,
     }
 }
 
@@ -625,4 +661,176 @@ fn browse_answer_keeps_independent_answers() {
         browse_answer("Question?", "Question?\nAnswer!", true),
         "Answer!"
     );
+}
+
+const START: i64 = 1_700_000_000;
+const SECONDS_PER_DAY: i64 = 86_400;
+
+fn log(day: i64, rating: Rating, millis: u32) -> RevLog {
+    RevLog {
+        id: START
+            .saturating_add(day.saturating_mul(SECONDS_PER_DAY))
+            .saturating_add(3_600)
+            .saturating_mul(1_000),
+        card_id: 1,
+        usn: 0,
+        ease: rating.code(),
+        interval: 1,
+        last_interval: 0,
+        factor: 2_500,
+        time_ms: millis,
+        kind: RevLogKind::Review,
+    }
+}
+
+#[test]
+fn statistics_start_empty() {
+    let timing = Timing::v1(START, START);
+
+    let stats = summarize(&[], &timing);
+
+    assert_eq!(stats, Statistics::default());
+    assert_eq!(stats.accuracy_percent(), None);
+}
+
+#[test]
+fn statistics_count_today_time_accuracy_and_streak() {
+    let now = START
+        .saturating_add(SECONDS_PER_DAY.saturating_mul(2))
+        .saturating_add(3_600);
+    let timing = Timing::v1(now, START);
+    let history = [
+        log(0, Rating::Good, 1_000),
+        log(1, Rating::Again, 500),
+        log(2, Rating::Good, 2_000),
+        log(2, Rating::Easy, 3_000),
+    ];
+
+    let stats = summarize(&history, &timing);
+
+    assert_eq!(stats.reviews_today, 2);
+    assert_eq!(stats.millis_today, 5_000);
+    assert_eq!(stats.ratings_today, [0, 0, 1, 1]);
+    assert_eq!(stats.accuracy_percent(), Some(100));
+    assert_eq!(stats.streak, 3);
+    assert_eq!(stats.forecast, Vec::<usize>::new());
+}
+
+#[test]
+fn statistics_treat_manual_logs_as_scheduling_only() {
+    let timing = Timing::v1(START, START);
+    let mut manual = log(0, Rating::Again, 1_000);
+    manual.kind = RevLogKind::Manual;
+
+    let stats = summarize(&[manual], &timing);
+
+    assert_eq!(stats.reviews_today, 0);
+    assert_eq!(stats.accuracy_percent(), None);
+    assert_eq!(stats.streak, 0);
+}
+
+#[test]
+fn statistics_screen_loads_totals_and_forecast() {
+    let mut fixture = fixture();
+    fixture
+        .state
+        .set_screen(Screen::Statistics)
+        .expect("statistics screen");
+    assert_eq!(fixture.state.statistics.reviews_today, 0);
+    assert_eq!(fixture.state.statistics.streak, 0);
+    assert_eq!(fixture.state.statistics.accuracy_percent(), None);
+    assert_eq!(fixture.state.statistics.forecast.len(), 7);
+
+    fixture
+        .state
+        .start_review(Some(fixture.deck_id))
+        .expect("start review");
+    fixture.state.reveal();
+    fixture.state.rate(Rating::Good).expect("rate card");
+    fixture
+        .state
+        .set_screen(Screen::Statistics)
+        .expect("statistics screen");
+
+    assert_eq!(fixture.state.statistics.reviews_today, 1);
+    assert_eq!(fixture.state.statistics.accuracy_percent(), Some(100));
+    assert_eq!(fixture.state.statistics.streak, 1);
+    assert_eq!(fixture.state.statistics.forecast.len(), 7);
+    drop(fixture.dir);
+}
+
+#[test]
+fn settings_and_ui_state_load_from_the_config_directory() {
+    let fixture = file_fixture(
+        "[ui]\ntheme = \"light\"\n",
+        "view = \"browse\"\ndeck_query = \"fraction\"\nbrowse_query = \"tag:hard\"\nreview_all_decks = true\n",
+    );
+
+    assert_eq!(fixture.state.settings.theme, ThemeChoice::Light);
+    assert_eq!(fixture.state.deck_query, "fraction");
+    assert_eq!(fixture.state.browse.query, "tag:hard");
+    assert_eq!(fixture.state.review_scope, None);
+    drop(fixture.dir);
+}
+
+#[test]
+fn theme_and_ui_state_are_saved_beside_the_config() {
+    let mut fixture = file_fixture("", "");
+    let config_dir = fixture.dir.path().join("config");
+
+    fixture.state.set_theme(ThemeChoice::Dark);
+    fixture.state.set_deck_query(String::from("fraction"));
+    fixture
+        .state
+        .set_browse_query(String::from("tag:hard"))
+        .expect("browse query");
+    fixture
+        .state
+        .set_screen(Screen::Statistics)
+        .expect("statistics screen");
+
+    let text = fs::read_to_string(config_dir.join("ui-state.toml"))
+        .expect("ui state file");
+    let saved: UiState = toml::from_str(&text).expect("parsed ui state");
+    assert_eq!(saved.theme, Some(ThemeChoice::Dark));
+    assert_eq!(saved.view, UiView::Statistics);
+    assert_eq!(saved.deck_query, "fraction");
+    assert_eq!(saved.browse_query, "tag:hard");
+    drop(fixture.dir);
+}
+
+#[test]
+fn signing_out_updates_the_config_sync_identity() {
+    let mut fixture =
+        file_fixture("[sync]\nenabled = true\nusername = \"alice\"\n", "");
+    let config_dir = fixture.dir.path().join("config");
+    assert!(fixture.state.settings.sync.enabled);
+    assert_eq!(
+        fixture.state.settings.sync.username.as_deref(),
+        Some("alice")
+    );
+
+    fixture.state.sign_out().expect("sign out");
+
+    let text = fs::read_to_string(config_dir.join("config.toml"))
+        .expect("config file");
+    let saved = parse(&text);
+    assert!(!saved.sync.enabled);
+    assert_eq!(saved.sync.username, None);
+    assert!(!text.contains("password"));
+    drop(fixture.dir);
+}
+
+#[test]
+fn saved_views_round_trip_through_the_ui_state() {
+    for view in [
+        UiView::Decks,
+        UiView::Browse,
+        UiView::Review,
+        UiView::AddCard,
+        UiView::Settings,
+        UiView::Statistics,
+    ] {
+        assert_eq!(UiView::from(Screen::from(view)), view);
+    }
 }

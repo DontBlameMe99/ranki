@@ -7,15 +7,21 @@
 )]
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::env;
+use std::fs;
+use std::io;
+use std::io::ErrorKind;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ranki_core::{FsrsScheduler, from_settings};
 use ranki_model::{
-    Card, CardQueue, Deck, DeckStats, Id, NewNote, Note, NoteModel, Rating,
-    Settings, Store,
+    Card, CardQueue, Config, DataPaths, Deck, DeckStats, Id, NewNote, Note,
+    NoteModel, Rating, RevLog, RevLogKind, Settings, Store, ThemeChoice,
+    Timing, UiState, UiView,
 };
 use ranki_storage::ReopeningCollection;
 use ranki_sync::{
@@ -26,8 +32,10 @@ use ranki_sync::{
 use crate::mobile::card::{sides, sides_text};
 use crate::mobile::error::Result;
 use ranki_core::scheduler_for_card;
+use ranki_model::config::parse;
 
 const BROWSE_ROW_LIMIT: usize = 200;
+const FORECAST_DAYS: usize = 7;
 
 /// Full-screen destination shown on a phone.
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
@@ -37,7 +45,34 @@ pub enum Screen {
     Review,
     Add,
     Browse,
+    Statistics,
     Settings,
+}
+
+impl From<UiView> for Screen {
+    fn from(view: UiView) -> Self {
+        match view {
+            UiView::Decks => Self::Decks,
+            UiView::Browse => Self::Browse,
+            UiView::Review => Self::Review,
+            UiView::AddCard => Self::Add,
+            UiView::Settings => Self::Settings,
+            UiView::Statistics => Self::Statistics,
+        }
+    }
+}
+
+impl From<Screen> for UiView {
+    fn from(screen: Screen) -> Self {
+        match screen {
+            Screen::Decks => Self::Decks,
+            Screen::Review => Self::Review,
+            Screen::Add => Self::AddCard,
+            Screen::Browse => Self::Browse,
+            Screen::Statistics => Self::Statistics,
+            Screen::Settings => Self::Settings,
+        }
+    }
 }
 
 /// What the review screen is showing for the current card.
@@ -105,6 +140,42 @@ pub struct BrowseState {
     pub total: usize,
 }
 
+/// Review totals and the due forecast shown on the statistics screen.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Statistics {
+    pub reviews_today: usize,
+    pub millis_today: u64,
+    /// `Again`, `Hard`, `Good`, and `Easy` counts for today.
+    pub ratings_today: [usize; 4],
+    /// Days with at least one review, up to today.
+    pub streak: usize,
+    /// Cards due on each of the next seven days, starting today.
+    pub forecast: Vec<usize>,
+}
+
+impl Statistics {
+    /// Percentage of today's answers that were not Again.
+    #[must_use]
+    pub fn accuracy_percent(&self) -> Option<u8> {
+        if self.reviews_today == 0 {
+            return None;
+        }
+        let again = self.ratings_today.first().copied().unwrap_or_default();
+        let correct = self.reviews_today.saturating_sub(again);
+        let percent = correct
+            .saturating_mul(100)
+            .checked_div(self.reviews_today)?;
+        u8::try_from(percent).ok()
+    }
+}
+
+/// Config files the mobile app shares with the desktop build.
+#[derive(Debug)]
+struct Persistence {
+    dir: PathBuf,
+    config: Config,
+}
+
 /// Synchronous `AnkiWeb` state shown in settings.
 #[expect(
     clippy::struct_excessive_bools,
@@ -150,30 +221,77 @@ pub struct AppState {
     pub add: AddState,
     pub browse: BrowseState,
     pub sync: SyncUiState,
+    pub statistics: Statistics,
     pub toast: Option<Toast>,
+    files: Option<Persistence>,
 }
 
 impl AppState {
     /// Builds the state from an opened collection and resolved settings.
     ///
+    /// File persistence stays off; [`Self::open`] wires the app's config
+    /// directory.
+    ///
     /// # Errors
     ///
     /// Returns an error when the persisted sync state cannot be read.
     pub fn new(store: ReopeningCollection, settings: Settings) -> Result<Self> {
+        Self::build(store, settings, None)
+    }
+
+    /// Builds the state from the app's data paths and config directory.
+    ///
+    /// Reads `config.toml` and `ui-state.toml` from `config_dir`, lets a saved
+    /// theme win over the config file as the desktop app does, and keeps
+    /// writing both files there.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the persisted sync state cannot be read.
+    pub fn open(
+        store: ReopeningCollection,
+        paths: DataPaths,
+        config_dir: &Path,
+    ) -> Result<Self> {
+        let config = read_config(config_dir);
+        let mut settings = Settings::resolve(&config, paths);
+        let ui_state = read_ui_state(config_dir);
+        if let Some(theme) = ui_state.theme {
+            settings.theme = theme;
+        }
+        settings.ui_state = ui_state;
+        Self::build(
+            store,
+            settings,
+            Some(Persistence {
+                dir: config_dir.to_path_buf(),
+                config,
+            }),
+        )
+    }
+
+    fn build(
+        store: ReopeningCollection,
+        settings: Settings,
+        files: Option<Persistence>,
+    ) -> Result<Self> {
         let scheduler = from_settings(&settings);
+        let review_all = settings.ui_state.review_all_decks;
         let deck_query = settings.ui_state.deck_query.clone();
         let selected_deck = settings.ui_state.selected_deck;
         let browse_query = settings.ui_state.browse_query.clone();
         let sync_username = settings.sync.username.clone().unwrap_or_default();
+        let screen =
+            dev_screen().unwrap_or_else(|| settings.ui_state.view.into());
         let mut state = Self {
             store,
             settings,
             scheduler,
-            screen: dev_screen(),
+            screen,
             decks: Vec::new(),
             deck_query,
             selected_deck,
-            review_scope: selected_deck,
+            review_scope: if review_all { None } else { selected_deck },
             review: ReviewState::default(),
             add: AddState::default(),
             browse: BrowseState {
@@ -185,7 +303,9 @@ impl AppState {
                 username: sync_username,
                 ..SyncUiState::default()
             },
+            statistics: Statistics::default(),
             toast: None,
+            files,
         };
         state.refresh()?;
         if state.screen == Screen::Review {
@@ -210,6 +330,9 @@ impl AppState {
         self.load_decks();
         self.load_models();
         self.refresh_browse();
+        if self.screen == Screen::Statistics {
+            self.load_statistics();
+        }
         Ok(())
     }
 
@@ -223,12 +346,15 @@ impl AppState {
             return self.start_review(self.selected_deck);
         }
         self.screen = screen;
-        self.refresh()
+        let refreshed = self.refresh();
+        self.persist_ui_state();
+        refreshed
     }
 
     /// Replaces the decks filter text.
     pub fn set_deck_query(&mut self, value: String) {
         self.deck_query = value;
+        self.persist_ui_state();
     }
 
     /// Starts a review session for one deck, or all decks when `deck` is none.
@@ -276,6 +402,7 @@ impl AppState {
                 )
             };
         }
+        self.persist_ui_state();
         Ok(())
     }
 
@@ -405,6 +532,7 @@ impl AppState {
         self.review.intervals = [0; 4];
         self.screen = Screen::Decks;
         self.load_decks();
+        self.persist_ui_state();
     }
 
     /// Reverses the last persisted grade and restores that card.
@@ -560,6 +688,7 @@ impl AppState {
     pub fn set_browse_query(&mut self, value: String) -> Result<()> {
         self.browse.query = value;
         self.refresh_browse();
+        self.persist_ui_state();
         Ok(())
     }
 
@@ -596,6 +725,7 @@ impl AppState {
                 self.sync.signed_in = true;
                 self.settings.sync.enabled = true;
                 self.settings.sync.username = Some(username);
+                self.persist_sync();
                 self.sync.password.clear();
                 self.finish_sync(&outcome);
                 self.load_sync_state()?;
@@ -667,6 +797,7 @@ impl AppState {
         self.sync.status = String::from("Signed out of AnkiWeb");
         self.settings.sync.enabled = false;
         self.settings.sync.username = None;
+        self.persist_sync();
         self.say("Signed out of AnkiWeb");
         Ok(())
     }
@@ -718,11 +849,82 @@ impl AppState {
         });
     }
 
+    /// Selects the theme and saves it with the rest of the UI state.
+    pub fn set_theme(&mut self, theme: ThemeChoice) {
+        if self.settings.theme == theme {
+            return;
+        }
+        self.settings.theme = theme;
+        self.persist_ui_state();
+    }
+
     fn fail(&mut self, text: impl Into<String>) {
         self.toast = Some(Toast {
             kind: ToastKind::Error,
             text: text.into(),
         });
+    }
+
+    fn ui_state(&self) -> UiState {
+        let mut state = self.settings.ui_state.clone();
+        state.view = self.screen.into();
+        state.theme = Some(self.settings.theme);
+        state.selected_deck = self.selected_deck;
+        state.deck_query.clone_from(&self.deck_query);
+        state.browse_query.clone_from(&self.browse.query);
+        state.review_all_decks = self.review_scope.is_none();
+        state
+    }
+
+    fn persist_ui_state(&mut self) {
+        let Some(dir) = self.files.as_ref().map(|files| files.dir.clone())
+        else {
+            return;
+        };
+        let state = self.ui_state();
+        if state == self.settings.ui_state {
+            return;
+        }
+        let result = write_ui_state(&dir, &state);
+        self.settings.ui_state = state;
+        if let Err(error) = result {
+            self.fail(format!("Could not save UI state: {error}"));
+        }
+    }
+
+    fn persist_sync(&mut self) {
+        let Some(files) = self.files.as_mut() else {
+            return;
+        };
+        files.config.sync.enabled = self.settings.sync.enabled;
+        files
+            .config
+            .sync
+            .username
+            .clone_from(&self.settings.sync.username);
+        let result = write_config(&files.dir, &files.config);
+        if let Err(error) = result {
+            self.fail(format!("Could not save sync settings: {error}"));
+        }
+    }
+
+    fn load_statistics(&mut self) {
+        let now = now_secs();
+        let timing = self.store.timing(now).unwrap_or_else(|_| {
+            let created = self.store.collection_created().unwrap_or_default();
+            Timing::v1(now, created)
+        });
+        match self.store.review_history() {
+            Ok(history) => self.statistics = summarize(&history, &timing),
+            Err(error) => {
+                self.statistics = summarize(&[], &timing);
+                self.fail(format!("Could not load review history: {error}"));
+            }
+        }
+        self.statistics.forecast = self
+            .store
+            .due_forecast(FORECAST_DAYS, now)
+            .unwrap_or_default();
     }
 
     fn load_sync_state(&mut self) -> Result<()> {
@@ -1080,16 +1282,18 @@ impl AppState {
     }
 }
 
-fn dev_screen() -> Screen {
+fn dev_screen() -> Option<Screen> {
     match env::var("RANKI_MOBILE_DEV_VIEW")
         .unwrap_or_default()
         .as_str()
     {
-        "review" => Screen::Review,
-        "add" => Screen::Add,
-        "browse" => Screen::Browse,
-        "settings" => Screen::Settings,
-        _ => Screen::Decks,
+        "review" => Some(Screen::Review),
+        "add" => Some(Screen::Add),
+        "browse" => Some(Screen::Browse),
+        "statistics" => Some(Screen::Statistics),
+        "settings" => Some(Screen::Settings),
+        "decks" => Some(Screen::Decks),
+        _ => None,
     }
 }
 
@@ -1103,6 +1307,85 @@ fn now_secs() -> i64 {
         .ok()
         .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
         .unwrap_or(0)
+}
+
+/// Aggregates today's answers, the studied-day streak, and nothing else.
+pub(crate) fn summarize(history: &[RevLog], timing: &Timing) -> Statistics {
+    let today = i64::from(timing.days_elapsed);
+    let mut studied = HashSet::new();
+    let mut stats = Statistics::default();
+    for log in history {
+        if matches!(log.kind, RevLogKind::Manual | RevLogKind::Rescheduled) {
+            continue;
+        }
+        let seconds = log.id.checked_div(1_000).unwrap_or_default();
+        let day =
+            today.saturating_sub(i64::from(timing.elapsed_days_since(seconds)));
+        if day > today {
+            continue;
+        }
+        studied.insert(day);
+        if day != today {
+            continue;
+        }
+        stats.reviews_today = stats.reviews_today.saturating_add(1);
+        stats.millis_today =
+            stats.millis_today.saturating_add(u64::from(log.time_ms));
+        let rating = usize::from(log.ease.saturating_sub(1).min(3));
+        if let Some(slot) = stats.ratings_today.get_mut(rating) {
+            *slot = slot.saturating_add(1);
+        }
+    }
+    stats.streak = studied.len();
+    stats
+}
+
+fn read_config(dir: &Path) -> Config {
+    let path = dir.join("config.toml");
+    match fs::read_to_string(&path) {
+        Ok(text) => parse(&text),
+        Err(error) if error.kind() == ErrorKind::NotFound => Config::default(),
+        Err(error) => {
+            eprintln!(
+                "ranki mobile: config: cannot read {}: {error}",
+                path.display()
+            );
+            Config::default()
+        }
+    }
+}
+
+fn write_config(dir: &Path, config: &Config) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let text = toml::to_string(config).map_err(io::Error::other)?;
+    fs::write(dir.join("config.toml"), text)
+}
+
+fn read_ui_state(dir: &Path) -> UiState {
+    let path = dir.join("ui-state.toml");
+    match fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text).unwrap_or_else(|error| {
+            eprintln!(
+                "ranki mobile: ui state: cannot read {}: {error}",
+                path.display()
+            );
+            UiState::default()
+        }),
+        Err(error) if error.kind() == ErrorKind::NotFound => UiState::default(),
+        Err(error) => {
+            eprintln!(
+                "ranki mobile: ui state: cannot read {}: {error}",
+                path.display()
+            );
+            UiState::default()
+        }
+    }
+}
+
+fn write_ui_state(dir: &Path, state: &UiState) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let text = toml::to_string(state).map_err(io::Error::other)?;
+    fs::write(dir.join("ui-state.toml"), text)
 }
 
 pub(crate) fn browse_answer(
