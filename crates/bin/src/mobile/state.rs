@@ -15,7 +15,7 @@ use std::io;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ranki_core::{FsrsScheduler, from_settings};
 use ranki_model::{
@@ -36,6 +36,8 @@ use ranki_model::config::parse;
 
 const BROWSE_ROW_LIMIT: usize = 200;
 const FORECAST_DAYS: usize = 7;
+
+const MAX_ANSWER_TIME: Duration = Duration::from_secs(60);
 
 /// Full-screen destination shown on a phone.
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
@@ -104,6 +106,15 @@ pub struct BrowseRow {
     pub meta: String,
 }
 
+/// The last persisted grade, kept so undo can restore its answer time.
+#[derive(Clone, Debug)]
+pub struct LastGrade {
+    pub card: Card,
+    pub log_id: Id,
+    /// Focused time the answer took.
+    pub spent: Duration,
+}
+
 /// State of one review session.
 #[derive(Clone, Debug, Default)]
 pub struct ReviewState {
@@ -114,10 +125,14 @@ pub struct ReviewState {
     pub model: Option<NoteModel>,
     pub phase: ReviewPhase,
     pub answered: usize,
-    /// Snapshot and review-log id of the last persisted grade.
-    pub last: Option<(Card, Id)>,
+    /// The last persisted grade, kept for undo.
+    pub last: Option<LastGrade>,
+    /// Focused time on the current card, used as the answer time.
+    pub focused: Duration,
     pub intervals: [i32; 4],
     pub summary: String,
+    /// Start of the last focus tick.
+    tick: Option<Instant>,
 }
 
 /// State of the add-note form.
@@ -130,6 +145,18 @@ pub struct AddState {
     pub fields: Vec<String>,
     pub tags: String,
     pub preview: String,
+    /// Note being edited, or `None` while adding a new note.
+    pub editing: Option<Id>,
+}
+
+/// Deck create, rename, and remove controls shown on the decks screen.
+#[derive(Clone, Debug, Default)]
+pub struct DeckDraft {
+    pub name: String,
+    /// Deck being renamed, or `None` while creating one.
+    pub renaming: Option<Id>,
+    /// Deck waiting for delete confirmation.
+    pub confirm_remove: Option<Id>,
 }
 
 /// State of the flat browser screen.
@@ -219,6 +246,7 @@ pub struct AppState {
     pub review_scope: Option<Id>,
     pub review: ReviewState,
     pub add: AddState,
+    pub deck_draft: DeckDraft,
     pub browse: BrowseState,
     pub sync: SyncUiState,
     pub statistics: Statistics,
@@ -294,6 +322,7 @@ impl AppState {
             review_scope: if review_all { None } else { selected_deck },
             review: ReviewState::default(),
             add: AddState::default(),
+            deck_draft: DeckDraft::default(),
             browse: BrowseState {
                 query: browse_query,
                 rows: Vec::new(),
@@ -311,6 +340,7 @@ impl AppState {
         if state.screen == Screen::Review {
             state.start_review(state.selected_deck)?;
         }
+        apply_dev_hooks(&mut state);
         Ok(state)
     }
 
@@ -434,10 +464,23 @@ impl AppState {
             before = fresh;
         }
         let now = now_secs();
-        let start = self.store.collection_created().unwrap_or(0);
+        let timing = self.timing(now);
+        let last_review =
+            self.store.last_review_secs(before.id).unwrap_or(None);
         let scheduler =
             scheduler_for_card(&self.scheduler, &self.store, &before);
-        let decision = scheduler.schedule(&before, rating, now, start);
+        let answer_ms =
+            u32::try_from(self.review.focused.as_millis()).unwrap_or(u32::MAX);
+        let Some(decision) = scheduler.schedule_timed(
+            &before,
+            rating,
+            &timing,
+            last_review,
+            answer_ms,
+        ) else {
+            self.fail(format!("Card {} is not due", before.id));
+            return Ok(());
+        };
         let log_id = match self.store.apply_review(&decision) {
             Ok(id) => id,
             Err(error) => {
@@ -447,7 +490,12 @@ impl AppState {
         };
 
         self.review.answered = self.review.answered.saturating_add(1);
-        self.review.last = Some((before, log_id));
+        self.review.last = Some(LastGrade {
+            card: before,
+            log_id,
+            spent: self.review.focused,
+        });
+        self.review.focused = Duration::ZERO;
         if matches!(
             decision.card.queue,
             CardQueue::Learning | CardQueue::DayLearning
@@ -530,6 +578,8 @@ impl AppState {
         self.review.phase = ReviewPhase::Question;
         self.review.summary.clear();
         self.review.intervals = [0; 4];
+        self.review.focused = Duration::ZERO;
+        self.review.tick = None;
         self.screen = Screen::Decks;
         self.load_decks();
         self.persist_ui_state();
@@ -544,10 +594,15 @@ impl AppState {
         if self.screen != Screen::Review {
             return Ok(());
         }
-        let Some((before, log_id)) = self.review.last.take() else {
+        let Some(last) = self.review.last.take() else {
             self.fail(String::from("Nothing to undo"));
             return Ok(());
         };
+        let LastGrade {
+            card: before,
+            log_id,
+            spent,
+        } = last;
         match self.store.undo_review(&before, log_id) {
             Ok(true) => {}
             Ok(false) => {
@@ -555,7 +610,11 @@ impl AppState {
                 return Ok(());
             }
             Err(error) => {
-                self.review.last = Some((before, log_id));
+                self.review.last = Some(LastGrade {
+                    card: before,
+                    log_id,
+                    spent,
+                });
                 self.fail(format!("Could not undo review: {error}"));
                 return Ok(());
             }
@@ -569,6 +628,7 @@ impl AppState {
             self.review.queue.insert(0, current);
         }
         self.review.current = Some(before);
+        self.review.focused = spent;
         self.review.phase = if dev_reveal() {
             ReviewPhase::Answer
         } else {
@@ -600,7 +660,10 @@ impl AppState {
 
     /// Selects the note type used by new notes.
     pub fn set_add_model(&mut self, index: usize) {
-        if index >= self.add.models.len() || index == self.add.model_index {
+        if self.add.editing.is_some()
+            || index >= self.add.models.len()
+            || index == self.add.model_index
+        {
             return;
         }
         let old_fields = self.add.fields.clone();
@@ -629,12 +692,12 @@ impl AppState {
         self.update_preview();
     }
 
-    /// Saves the current add-note draft.
+    /// Saves the draft as a new note, or updates the note being edited.
     ///
     /// # Errors
     ///
     /// Store failures are reported as toasts; this call still succeeds.
-    pub fn add_note(&mut self) -> Result<()> {
+    pub fn save_note(&mut self) -> Result<()> {
         let Some(deck) = self.add.decks.get(self.add.deck_index).cloned()
         else {
             self.fail(String::from("Choose a deck first"));
@@ -661,23 +724,229 @@ impl AppState {
             ));
             return Ok(());
         }
+        if self.add.fields.iter().all(|value| value.trim().is_empty()) {
+            self.fail(String::from("Enter text in at least one field"));
+            return Ok(());
+        }
+        let fields = self.add.fields.clone();
+        if let Some(note_id) = self.add.editing {
+            let mut note = match self.store.note(note_id) {
+                Ok(Some(note)) => note,
+                Ok(None) => {
+                    self.fail(String::from("That note no longer exists"));
+                    return Ok(());
+                }
+                Err(error) => {
+                    self.fail(format!("Could not load note: {error}"));
+                    return Ok(());
+                }
+            };
+            note.model_id = model.id;
+            note.fields = fields;
+            note.tags = tags;
+            match self.store.update_note(&note, deck.id) {
+                Ok(()) => {
+                    self.add.editing = None;
+                    self.reset_draft();
+                    self.set_screen(Screen::Browse)?;
+                    self.say("Note updated");
+                }
+                Err(error) => {
+                    self.fail(format!("Could not update note: {error}"));
+                }
+            }
+            return Ok(());
+        }
         let note = NewNote {
             model_id: model.id,
             deck_id: deck.id,
-            fields: self.add.fields.clone(),
+            fields,
             tags,
         };
         match self.store.add_note(&note) {
             Ok(ids) => {
                 let count = ids.len();
-                self.add.fields.iter_mut().for_each(String::clear);
-                self.add.tags.clear();
+                self.reset_draft();
                 self.refresh()?;
                 self.say(format!("Added {count} cards"));
             }
             Err(error) => self.fail(format!("Could not add note: {error}")),
         }
         Ok(())
+    }
+
+    /// Opens the note behind a browser row in the add form.
+    ///
+    /// # Errors
+    ///
+    /// Store failures are reported as toasts; this call still succeeds.
+    pub fn start_edit(&mut self, card_id: Id) -> Result<()> {
+        let card = match self.store.card(card_id) {
+            Ok(Some(card)) => card,
+            Ok(None) => {
+                self.fail(String::from("That card no longer exists"));
+                return Ok(());
+            }
+            Err(error) => {
+                self.fail(format!("Could not load card: {error}"));
+                return Ok(());
+            }
+        };
+        let note = match self.store.note(card.note_id) {
+            Ok(Some(note)) => note,
+            Ok(None) => {
+                self.fail(String::from("That note no longer exists"));
+                return Ok(());
+            }
+            Err(error) => {
+                self.fail(format!("Could not load note: {error}"));
+                return Ok(());
+            }
+        };
+        let Some(model_index) = self
+            .add
+            .models
+            .iter()
+            .position(|model| model.id == note.model_id)
+        else {
+            self.fail(String::from("This note type is not in the collection"));
+            return Ok(());
+        };
+        if self
+            .add
+            .models
+            .get(model_index)
+            .is_some_and(NoteModel::is_image_occlusion)
+        {
+            self.fail(String::from(
+                "Image occlusion notes cannot be edited here",
+            ));
+            return Ok(());
+        }
+        let Some(deck_index) = self
+            .add
+            .decks
+            .iter()
+            .position(|deck| deck.id == card.deck_id)
+        else {
+            self.fail(String::from("That deck is not in this collection"));
+            return Ok(());
+        };
+        self.add.editing = Some(note.id);
+        self.add.model_index = model_index;
+        self.add.deck_index = deck_index;
+        self.add.fields.clone_from(&note.fields);
+        self.add.tags = note.tags.join(" ");
+        self.update_preview();
+        self.screen = Screen::Add;
+        self.persist_ui_state();
+        Ok(())
+    }
+
+    /// Drops the edit draft and returns to the browser.
+    pub fn cancel_edit(&mut self) {
+        if self.add.editing.take().is_none() {
+            return;
+        }
+        self.reset_draft();
+        self.screen = Screen::Browse;
+        self.persist_ui_state();
+    }
+
+    /// Saves the deck name draft, creating a deck or renaming one.
+    ///
+    /// # Errors
+    ///
+    /// Store failures are reported as toasts; this call still succeeds.
+    pub fn save_deck(&mut self) -> Result<()> {
+        let name = self.deck_draft.name.trim().to_owned();
+        if name.is_empty() {
+            self.fail(String::from("Deck name cannot be empty"));
+            return Ok(());
+        }
+        match self.deck_draft.renaming {
+            Some(id) => match self.store.rename_deck(id, &name) {
+                Ok(_) => {
+                    self.deck_draft.name.clear();
+                    self.deck_draft.renaming = None;
+                    self.refresh()?;
+                    self.say("Deck renamed");
+                }
+                Err(error) => {
+                    self.fail(format!("Could not rename deck: {error}"));
+                }
+            },
+            None => match self.store.create_deck(&name) {
+                Ok(_) => {
+                    self.deck_draft.name.clear();
+                    self.refresh()?;
+                    self.say("Deck created");
+                }
+                Err(error) => {
+                    self.fail(format!("Could not create deck: {error}"));
+                }
+            },
+        }
+        Ok(())
+    }
+
+    /// Fills the deck name field with an existing name for renaming.
+    pub fn start_deck_rename(&mut self, id: Id) {
+        let Some(row) = self.decks.iter().find(|row| row.id == Some(id)) else {
+            return;
+        };
+        self.deck_draft.name.clone_from(&row.name);
+        self.deck_draft.renaming = Some(id);
+        self.deck_draft.confirm_remove = None;
+    }
+
+    /// Clears the deck create and rename draft.
+    pub fn cancel_deck_draft(&mut self) {
+        self.deck_draft.name.clear();
+        self.deck_draft.renaming = None;
+    }
+
+    /// Asks for confirmation before removing a deck.
+    pub const fn request_remove_deck(&mut self, id: Id) {
+        self.deck_draft.confirm_remove = Some(id);
+    }
+
+    /// Removes the confirmed deck with its cards and notes.
+    ///
+    /// # Errors
+    ///
+    /// Store failures are reported as toasts; this call still succeeds.
+    pub fn confirm_remove_deck(&mut self) -> Result<()> {
+        let Some(id) = self.deck_draft.confirm_remove.take() else {
+            return Ok(());
+        };
+        match self.store.remove_deck(id) {
+            Ok(()) => {
+                if self.review_scope == Some(id) {
+                    self.review_scope = None;
+                }
+                self.deck_draft.name.clear();
+                self.deck_draft.renaming = None;
+                self.refresh()?;
+                self.say("Deck removed");
+            }
+            Err(error) => {
+                self.deck_draft.confirm_remove = Some(id);
+                self.fail(format!("Could not remove deck: {error}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Dismisses the deck removal confirmation.
+    pub const fn cancel_remove_deck(&mut self) {
+        self.deck_draft.confirm_remove = None;
+    }
+
+    fn reset_draft(&mut self) {
+        self.add.fields.iter_mut().for_each(String::clear);
+        self.add.tags.clear();
+        self.update_preview();
     }
 
     /// Runs a store search and rebuilds the flat browser list.
@@ -865,6 +1134,26 @@ impl AppState {
         });
     }
 
+    fn timing(&self, now: i64) -> Timing {
+        self.store.timing(now).unwrap_or_else(|_| {
+            let created = self.store.collection_created().unwrap_or_default();
+            Timing::v1(now, created)
+        })
+    }
+
+    /// Credits focused time on the current card to its answer time.
+    pub fn tick_focus(&mut self, focused: bool) {
+        let now = Instant::now();
+        let Some(last) = self.review.tick else {
+            self.review.tick = Some(now);
+            return;
+        };
+        let elapsed = now.saturating_duration_since(last);
+        self.review.tick = Some(now);
+        self.review.focused =
+            focused_delta(elapsed, focused, self.review.focused);
+    }
+
     fn ui_state(&self) -> UiState {
         let mut state = self.settings.ui_state.clone();
         state.view = self.screen.into();
@@ -910,10 +1199,7 @@ impl AppState {
 
     fn load_statistics(&mut self) {
         let now = now_secs();
-        let timing = self.store.timing(now).unwrap_or_else(|_| {
-            let created = self.store.collection_created().unwrap_or_default();
-            Timing::v1(now, created)
-        });
+        let timing = self.timing(now);
         match self.store.review_history() {
             Ok(history) => self.statistics = summarize(&history, &timing),
             Err(error) => {
@@ -1131,9 +1417,11 @@ impl AppState {
             self.review.phase = ReviewPhase::Summary;
         }
         let now = now_secs();
-        let start = self.store.collection_created().unwrap_or(0);
+        let timing = self.timing(now);
+        let last_review = self.store.last_review_secs(card.id).unwrap_or(None);
         let scheduler = scheduler_for_card(&self.scheduler, &self.store, &card);
-        self.review.intervals = scheduler.preview_all(&card, now, start);
+        self.review.intervals =
+            scheduler.preview_all_timed(&card, &timing, last_review);
         self.review.note = note;
         self.review.model = model;
     }
@@ -1279,6 +1567,32 @@ impl AppState {
         } else {
             self.say(self.sync.status.clone());
         }
+    }
+}
+
+/// Answer time credited per tick, capped so idle screens cannot skew it.
+pub(crate) fn focused_delta(
+    elapsed: Duration,
+    focused: bool,
+    total: Duration,
+) -> Duration {
+    if !focused {
+        return total;
+    }
+    total.saturating_add(elapsed).min(MAX_ANSWER_TIME)
+}
+
+/// Opens click-only screens for headless visual checks.
+fn apply_dev_hooks(state: &mut AppState) {
+    if env::var("RANKI_MOBILE_DEV_EDIT").is_ok_and(|value| value == "1")
+        && let Some(card_id) = state.browse.rows.first().map(|row| row.card_id)
+    {
+        let _ = state.start_edit(card_id);
+    }
+    if env::var("RANKI_MOBILE_DEV_CONFIRM_DECK").is_ok_and(|value| value == "1")
+        && let Some(id) = state.decks.first().and_then(|row| row.id)
+    {
+        state.request_remove_deck(id);
     }
 }
 

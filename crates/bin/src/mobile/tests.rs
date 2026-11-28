@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
+use std::time::Duration;
 
 use ranki_model::CardQueue;
 use ranki_model::Config;
@@ -39,7 +40,9 @@ use crate::mobile::state::AppState;
 use crate::mobile::state::ReviewPhase;
 use crate::mobile::state::Screen;
 use crate::mobile::state::Statistics;
+use crate::mobile::state::ToastKind;
 use crate::mobile::state::browse_answer;
+use crate::mobile::state::focused_delta;
 use crate::mobile::state::summarize;
 
 fn note(fields: &[&str], model_id: Id) -> Note {
@@ -435,7 +438,7 @@ fn adding_a_note_makes_it_browsable() {
         .state
         .set_add_field(1, String::from("Second answer"));
 
-    fixture.state.add_note().expect("add note");
+    fixture.state.save_note().expect("add note");
     fixture.state.refresh().expect("refresh after add");
     fixture
         .state
@@ -833,4 +836,232 @@ fn saved_views_round_trip_through_the_ui_state() {
     ] {
         assert_eq!(UiView::from(Screen::from(view)), view);
     }
+}
+
+#[test]
+fn tapping_a_browse_row_edits_the_note_instead_of_adding_one() {
+    let mut fixture = fixture();
+    fixture
+        .state
+        .set_screen(Screen::Browse)
+        .expect("browse screen");
+    let row = fixture
+        .state
+        .browse
+        .rows
+        .first()
+        .cloned()
+        .expect("browse row");
+    assert_eq!(row.front, "Seed question");
+
+    fixture.state.start_edit(row.card_id).expect("start edit");
+    assert!(matches!(fixture.state.screen, Screen::Add));
+    assert!(fixture.state.add.editing.is_some());
+    assert_eq!(
+        fixture.state.add.fields.first().map(String::as_str),
+        Some("Seed question")
+    );
+    assert_eq!(
+        fixture.state.add.fields.get(1).map(String::as_str),
+        Some("Seed answer")
+    );
+    assert_eq!(
+        fixture
+            .state
+            .add
+            .decks
+            .get(fixture.state.add.deck_index)
+            .map(|deck| deck.id),
+        Some(fixture.deck_id)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .add
+            .models
+            .get(fixture.state.add.model_index)
+            .map(|model| model.name.as_str()),
+        Some("Basic")
+    );
+
+    fixture
+        .state
+        .set_add_field(0, String::from("Edited question"));
+    fixture.state.save_note().expect("save note");
+
+    assert!(matches!(fixture.state.screen, Screen::Browse));
+    assert!(fixture.state.add.editing.is_none());
+    assert!(fixture.state.add.fields.iter().all(String::is_empty));
+    assert!(
+        fixture
+            .state
+            .browse
+            .rows
+            .iter()
+            .any(|row| row.front == "Edited question"
+                && row.back == "Seed answer")
+    );
+    assert_eq!(fixture.state.store.find_cards("").expect("cards").len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .store
+            .stats(Some(fixture.deck_id), 0)
+            .expect("deck stats")
+            .total_cards,
+        1
+    );
+    drop(fixture.dir);
+}
+
+#[test]
+fn cancelling_an_edit_returns_to_browse_and_keeps_the_note() {
+    let mut fixture = fixture();
+    fixture
+        .state
+        .set_screen(Screen::Browse)
+        .expect("browse screen");
+    let row = fixture
+        .state
+        .browse
+        .rows
+        .first()
+        .cloned()
+        .expect("browse row");
+
+    fixture.state.start_edit(row.card_id).expect("start edit");
+    fixture.state.set_add_field(0, String::from("Discarded"));
+    fixture.state.cancel_edit();
+
+    assert!(matches!(fixture.state.screen, Screen::Browse));
+    assert!(fixture.state.add.editing.is_none());
+    assert!(fixture.state.add.fields.iter().all(String::is_empty));
+    assert_eq!(fixture.state.add.tags, String::new());
+    assert!(
+        fixture
+            .state
+            .browse
+            .rows
+            .iter()
+            .any(|row| row.front == "Seed question")
+    );
+    assert_eq!(fixture.state.store.find_cards("").expect("cards").len(), 1);
+    drop(fixture.dir);
+}
+
+#[test]
+fn decks_are_created_and_renamed_with_validated_names() {
+    let mut fixture = fixture();
+    fixture.state.deck_draft.name = String::from("  Study Deck  ");
+    fixture.state.save_deck().expect("create deck");
+    let id = fixture
+        .state
+        .decks
+        .iter()
+        .find(|row| row.name == "Study Deck")
+        .and_then(|row| row.id)
+        .expect("created deck id");
+
+    fixture.state.start_deck_rename(id);
+    assert_eq!(fixture.state.deck_draft.name, "Study Deck");
+    fixture.state.deck_draft.name = String::from("Renamed Deck");
+    fixture.state.save_deck().expect("rename deck");
+    assert!(
+        fixture
+            .state
+            .decks
+            .iter()
+            .any(|row| row.id == Some(id) && row.name == "Renamed Deck")
+    );
+
+    fixture.state.deck_draft.name = String::from("   ");
+    fixture.state.save_deck().expect("empty name");
+    assert!(matches!(
+        fixture.state.toast.as_ref().map(|toast| toast.kind),
+        Some(ToastKind::Error)
+    ));
+    assert!(
+        fixture
+            .state
+            .decks
+            .iter()
+            .any(|row| row.id == Some(id) && row.name == "Renamed Deck")
+    );
+    drop(fixture.dir);
+}
+
+#[test]
+fn removing_a_deck_needs_confirmation_and_deletes_its_cards() {
+    let mut fixture = fixture();
+    assert_eq!(fixture.state.store.find_cards("").expect("cards").len(), 1);
+
+    fixture.state.request_remove_deck(fixture.deck_id);
+    assert_eq!(
+        fixture.state.deck_draft.confirm_remove,
+        Some(fixture.deck_id)
+    );
+    assert!(
+        fixture
+            .state
+            .decks
+            .iter()
+            .any(|row| row.id == Some(fixture.deck_id))
+    );
+
+    fixture.state.cancel_remove_deck();
+    assert!(fixture.state.deck_draft.confirm_remove.is_none());
+    assert_eq!(fixture.state.store.find_cards("").expect("cards").len(), 1);
+
+    fixture.state.request_remove_deck(fixture.deck_id);
+    fixture.state.confirm_remove_deck().expect("remove deck");
+    assert!(fixture.state.deck_draft.confirm_remove.is_none());
+    assert!(
+        !fixture
+            .state
+            .decks
+            .iter()
+            .any(|row| row.id == Some(fixture.deck_id))
+    );
+    assert_eq!(fixture.state.store.find_cards("").expect("cards").len(), 0);
+    assert_eq!(fixture.state.browse.rows, Vec::new());
+    drop(fixture.dir);
+}
+
+#[test]
+fn rating_records_the_focused_answer_time_and_undo_restores_it() {
+    let mut fixture = fixture();
+    fixture
+        .state
+        .start_review(Some(fixture.deck_id))
+        .expect("start review");
+    fixture.state.reveal();
+    fixture.state.review.focused = Duration::from_secs(7);
+    fixture.state.rate(Rating::Good).expect("rate card");
+
+    let history = fixture.state.store.review_history().expect("history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].time_ms, 7_000);
+    assert_eq!(fixture.state.review.focused, Duration::ZERO);
+    assert_eq!(
+        fixture.state.review.last.as_ref().map(|last| last.spent),
+        Some(Duration::from_secs(7))
+    );
+
+    fixture.state.undo().expect("undo review");
+    assert_eq!(fixture.state.review.focused, Duration::from_secs(7));
+    drop(fixture.dir);
+}
+
+#[test]
+fn focused_answer_time_freezes_when_the_screen_is_not_focused() {
+    let base = Duration::from_secs(3);
+    assert_eq!(
+        focused_delta(Duration::from_secs(2), true, base),
+        Duration::from_secs(5)
+    );
+    assert_eq!(focused_delta(Duration::from_secs(2), false, base), base);
+    assert_eq!(
+        focused_delta(Duration::from_secs(3_600), true, base),
+        Duration::from_secs(60)
+    );
 }

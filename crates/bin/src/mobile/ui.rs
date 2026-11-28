@@ -12,7 +12,7 @@
 
 use egui::{
     Align, Button, Color32, ComboBox, CornerRadius, FontId, Frame as EguiFrame,
-    Layout, Margin, ProgressBar, RichText, ScrollArea, Stroke, TextEdit,
+    Layout, Margin, ProgressBar, RichText, ScrollArea, Sense, Stroke, TextEdit,
     TextStyle, Ui, vec2,
 };
 use ranki_model::{Card, CardType, Rating, ThemeChoice};
@@ -41,6 +41,10 @@ impl MobileApp {
 impl eframe::App for MobileApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_style(ctx, self.state.settings.theme);
+        let reviewing = self.state.screen == Screen::Review
+            && self.state.review.current.is_some();
+        let focused = reviewing && ctx.input(|input| input.focused);
+        self.state.tick_focus(focused);
         if self.state.review.phase == ReviewPhase::Waiting {
             match self.state.pending_delay_secs() {
                 Some(0) => self.state.poll_pending(),
@@ -307,6 +311,14 @@ fn render_tabs(app: &mut AppState, ui: &mut Ui, p: &Palette) {
 
 fn render_decks(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     title(ui, "Decks", p);
+    if let Some(row) = app
+        .deck_draft
+        .confirm_remove
+        .and_then(|id| app.decks.iter().find(|row| row.id == Some(id)))
+        .cloned()
+    {
+        deck_removal(app, ui, p, &row);
+    }
 
     let mut query = app.deck_query.clone();
     let search = TextEdit::singleline(&mut query)
@@ -331,7 +343,9 @@ fn render_decks(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     if ui.add(study_all).clicked() {
         let _ = app.start_review(None);
     }
-    ui.add_space(16.0);
+    ui.add_space(12.0);
+
+    deck_editor(app, ui, p);
 
     let filter = app.deck_query.trim().to_lowercase();
     let rows: Vec<DeckRow> = app
@@ -392,9 +406,121 @@ fn render_decks(app: &mut AppState, ui: &mut Ui, p: &Palette) {
                 if ui.add(button).clicked() {
                     let _ = app.start_review(row.id);
                 }
+                if let Some(id) = row.id {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let width = (ui.available_width() - 8.0).max(0.0) / 2.0;
+                        let rename = secondary_button(
+                            RichText::new("Rename"),
+                            TAP_HEIGHT,
+                            p,
+                        );
+                        if ui.add_sized([width, TAP_HEIGHT], rename).clicked() {
+                            app.start_deck_rename(id);
+                        }
+                        let remove = secondary_button(
+                            RichText::new("Remove"),
+                            TAP_HEIGHT,
+                            p,
+                        );
+                        if ui.add_sized([width, TAP_HEIGHT], remove).clicked() {
+                            app.request_remove_deck(id);
+                        }
+                    });
+                }
             });
         ui.add_space(10.0);
     }
+}
+
+fn deck_editor(app: &mut AppState, ui: &mut Ui, p: &Palette) {
+    let renaming = app.deck_draft.renaming.is_some();
+    let heading = if renaming { "Rename deck" } else { "New deck" };
+    let action = if renaming { "Save name" } else { "Create deck" };
+    EguiFrame::new()
+        .fill(p.panel)
+        .stroke(Stroke::new(1.0_f32, p.border))
+        .inner_margin(Margin::same(12))
+        .corner_radius(CornerRadius::same(12))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(RichText::new(heading).size(20.0).strong());
+            ui.add_space(8.0);
+            let mut name = app.deck_draft.name.clone();
+            let field = TextEdit::singleline(&mut name)
+                .hint_text("Deck name")
+                .desired_width(f32::MAX)
+                .min_size(vec2(0.0, TAP_HEIGHT));
+            if ui
+                .add_sized([ui.available_width(), TAP_HEIGHT], field)
+                .changed()
+            {
+                app.deck_draft.name = name;
+            }
+            ui.add_space(8.0);
+            let save = touch_button(
+                RichText::new(action),
+                TAP_HEIGHT,
+                p.accent,
+                p.accent_ink,
+            )
+            .min_size(vec2(ui.available_width(), TAP_HEIGHT));
+            if ui.add(save).clicked() {
+                let _ = app.save_deck();
+            }
+            if renaming {
+                ui.add_space(8.0);
+                let cancel = secondary_button(
+                    RichText::new("Cancel rename"),
+                    TAP_HEIGHT,
+                    p,
+                )
+                .min_size(vec2(ui.available_width(), TAP_HEIGHT));
+                if ui.add(cancel).clicked() {
+                    app.cancel_deck_draft();
+                }
+            }
+        });
+    ui.add_space(10.0);
+}
+
+fn deck_removal(app: &mut AppState, ui: &mut Ui, p: &Palette, row: &DeckRow) {
+    EguiFrame::new()
+        .fill(p.panel)
+        .stroke(Stroke::new(1.0_f32, p.danger))
+        .inner_margin(Margin::same(12))
+        .corner_radius(CornerRadius::same(12))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(RichText::new("Remove deck?").size(20.0).strong());
+            ui.label(
+                RichText::new(format!(
+                    "{} and every card in it will be deleted.",
+                    row.name
+                ))
+                .color(p.muted),
+            );
+            ui.add_space(10.0);
+            let remove = touch_button(
+                RichText::new("Remove deck"),
+                TAP_HEIGHT,
+                p.danger,
+                p.accent_ink,
+            )
+            .min_size(vec2(ui.available_width(), TAP_HEIGHT));
+            if ui.add(remove).clicked() {
+                let _ = app.confirm_remove_deck();
+            }
+            ui.add_space(8.0);
+            let keep =
+                secondary_button(RichText::new("Keep deck"), TAP_HEIGHT, p)
+                    .min_size(vec2(ui.available_width(), TAP_HEIGHT));
+            if ui.add(keep).clicked() {
+                app.cancel_remove_deck();
+            }
+        });
+    ui.add_space(12.0);
 }
 
 fn metric(ui: &mut Ui, label: &str, value: String, p: &Palette) {
@@ -651,7 +777,32 @@ const fn ceil_div(value: i32, divisor: i32) -> i32 {
 }
 
 fn render_add(app: &mut AppState, ui: &mut Ui, p: &Palette) {
-    title(ui, "Add note", p);
+    let editing = app.add.editing.is_some();
+    title(ui, if editing { "Edit note" } else { "Add note" }, p);
+    if editing {
+        EguiFrame::new()
+            .fill(p.panel_alt)
+            .stroke(Stroke::new(1.0_f32, p.border))
+            .inner_margin(Margin::same(12))
+            .corner_radius(CornerRadius::same(12))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(
+                    RichText::new("Editing an existing note").color(p.muted),
+                );
+                ui.add_space(8.0);
+                let cancel = secondary_button(
+                    RichText::new("Cancel edit"),
+                    TAP_HEIGHT,
+                    p,
+                )
+                .min_size(vec2(ui.available_width(), TAP_HEIGHT));
+                if ui.add(cancel).clicked() {
+                    app.cancel_edit();
+                }
+            });
+        ui.add_space(12.0);
+    }
 
     let deck_names: Vec<String> =
         app.add.decks.iter().map(|deck| deck.name.clone()).collect();
@@ -683,19 +834,21 @@ fn render_add(app: &mut AppState, ui: &mut Ui, p: &Palette) {
         .collect();
     let mut model_index = app.add.model_index;
     ui.label(RichText::new("Note type").color(p.muted));
-    ComboBox::from_id_salt("mobile-add-note-type")
-        .selected_text(
-            model_names
-                .get(model_index)
-                .cloned()
-                .unwrap_or_else(|| String::from("Choose a note type")),
-        )
-        .width(ui.available_width())
-        .show_ui(ui, |ui| {
-            for (index, name) in model_names.iter().enumerate() {
-                ui.selectable_value(&mut model_index, index, name.clone());
-            }
-        });
+    ui.add_enabled_ui(!editing, |ui| {
+        ComboBox::from_id_salt("mobile-add-note-type")
+            .selected_text(
+                model_names
+                    .get(model_index)
+                    .cloned()
+                    .unwrap_or_else(|| String::from("Choose a note type")),
+            )
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for (index, name) in model_names.iter().enumerate() {
+                    ui.selectable_value(&mut model_index, index, name.clone());
+                }
+            });
+    });
     if model_index != app.add.model_index {
         app.set_add_model(model_index);
     }
@@ -751,7 +904,7 @@ fn render_add(app: &mut AppState, ui: &mut Ui, p: &Palette) {
     ui.add_space(12.0);
 
     let save = touch_button(
-        RichText::new("Save note"),
+        RichText::new(if editing { "Save changes" } else { "Save note" }),
         TAP_HEIGHT,
         p.accent,
         p.accent_ink,
@@ -760,7 +913,7 @@ fn render_add(app: &mut AppState, ui: &mut Ui, p: &Palette) {
         .add_sized([ui.available_width(), TAP_HEIGHT], save)
         .clicked()
     {
-        let _ = app.add_note();
+        let _ = app.save_note();
     }
 }
 
@@ -802,8 +955,9 @@ fn render_browse(app: &mut AppState, ui: &mut Ui, p: &Palette) {
         };
         ui.label(RichText::new(empty).color(p.muted));
     }
+    let mut open = None;
     for row in &app.browse.rows {
-        EguiFrame::new()
+        let card = EguiFrame::new()
             .fill(p.panel)
             .stroke(Stroke::new(1.0_f32, p.border))
             .inner_margin(Margin::same(12))
@@ -819,8 +973,26 @@ fn render_browse(app: &mut AppState, ui: &mut Ui, p: &Palette) {
                         .size(13.0)
                         .color(p.muted),
                 );
-            });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Tap to edit").size(13.0).color(p.accent),
+                );
+            })
+            .response;
+        if ui
+            .interact(
+                card.rect,
+                ui.id().with(("browse-row", row.card_id)),
+                Sense::click(),
+            )
+            .clicked()
+        {
+            open = Some(row.card_id);
+        }
         ui.add_space(8.0);
+    }
+    if let Some(card_id) = open {
+        let _ = app.start_edit(card_id);
     }
 }
 
