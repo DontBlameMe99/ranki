@@ -1,6 +1,6 @@
 //! Shared review-history statistics.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{Id, RevLog, RevLogKind};
 
@@ -15,15 +15,14 @@ pub fn review_streak(
     day_of: impl Fn(i64) -> i64,
     today: i64,
 ) -> usize {
-    let mut reviewed = HashMap::<i64, usize>::new();
+    let mut reviewed = HashSet::<i64>::new();
     for log in history {
         if matches!(log.kind, RevLogKind::Manual | RevLogKind::Rescheduled) {
             continue;
         }
         let day = day_of(log.id.checked_div(1_000).unwrap_or_default());
         if day <= today {
-            let count = reviewed.entry(day).or_default();
-            *count = count.saturating_add(1);
+            reviewed.insert(day);
         }
     }
     streak_days(&reviewed, &due_ranges(history, &day_of, today), today)
@@ -71,11 +70,11 @@ fn due_ranges(
 }
 
 fn streak_days(
-    reviewed: &HashMap<i64, usize>,
+    reviewed: &HashSet<i64>,
     due: &[(i64, i64)],
     today: i64,
 ) -> usize {
-    let Some(oldest) = reviewed.keys().copied().min() else {
+    let Some(oldest) = reviewed.iter().copied().min() else {
         return 0;
     };
     let is_due = |day: i64| {
@@ -88,7 +87,7 @@ fn streak_days(
     let mut streak = 0_usize;
     let mut day = today;
     loop {
-        if reviewed.contains_key(&day) {
+        if reviewed.contains(&day) {
             streak = streak.saturating_add(1);
         } else if day != today && is_due(day) {
             break;
@@ -99,4 +98,61 @@ fn streak_days(
         day = day.saturating_sub(1);
     }
     streak
+}
+
+#[cfg(test)]
+mod tests {
+    use super::review_streak;
+    use crate::{Rating, RevLog, RevLogKind};
+
+    const START: i64 = 1_700_000_000;
+    const SECONDS_PER_DAY: i64 = 86_400;
+
+    fn log(day: i64, interval: i32) -> RevLog {
+        RevLog {
+            id: START
+                .saturating_add(day.saturating_mul(SECONDS_PER_DAY))
+                .saturating_add(1)
+                .saturating_mul(1_000),
+            card_id: 1,
+            usn: 0,
+            ease: Rating::Good.code(),
+            interval,
+            last_interval: 0,
+            factor: 2_500,
+            time_ms: 100,
+            kind: RevLogKind::Review,
+        }
+    }
+
+    fn streak(logs: &[RevLog], today: i64) -> usize {
+        review_streak(
+            logs,
+            |seconds| {
+                seconds
+                    .checked_sub(START)
+                    .and_then(|elapsed| elapsed.checked_div(SECONDS_PER_DAY))
+                    .unwrap_or_default()
+            },
+            today,
+        )
+    }
+
+    #[test]
+    fn idle_days_do_not_break_the_streak() {
+        let logs = [log(0, 3), log(2, 1), log(3, 1)];
+        assert_eq!(streak(&logs, 3), 3);
+    }
+
+    #[test]
+    fn skipped_due_days_break_the_streak() {
+        let logs = [log(0, 1), log(3, 1)];
+        assert_eq!(streak(&logs, 3), 1);
+    }
+
+    #[test]
+    fn unanswered_due_days_after_the_last_review_break_it() {
+        let logs = [log(0, 2)];
+        assert_eq!(streak(&logs, 5), 0);
+    }
 }
