@@ -855,6 +855,12 @@ fn tapping_a_browse_row_edits_the_note_instead_of_adding_one() {
     assert_eq!(row.front, "Seed question");
 
     fixture.state.start_edit(row.card_id).expect("start edit");
+    fixture.state.start_edit(row.card_id).expect("replace edit");
+    assert!(matches!(
+        fixture.state.toast.as_ref().map(|toast| toast.kind),
+        Some(ToastKind::Error)
+    ));
+    assert!(matches!(fixture.state.screen, Screen::Add));
     assert!(matches!(fixture.state.screen, Screen::Add));
     assert!(fixture.state.add.editing.is_some());
     assert_eq!(

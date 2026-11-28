@@ -61,9 +61,26 @@ impl eframe::App for MobileApp {
         render(&mut self.state, ctx);
         let ime_focus = ctx.memory(egui::Memory::focused);
         if ime_focus != self.last_ime_focus {
-            if ime_focus.is_some() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(true));
+            match (self.last_ime_focus, ime_focus) {
+                (Some(_), Some(_)) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(
+                        false,
+                    ));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(
+                        true,
+                    ));
+                }
+                (Some(_), None) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(
+                        false,
+                    ));
+                }
+                (None, Some(_)) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(
+                        true,
+                    ));
+                }
+                (None, None) => {}
             }
             self.last_ime_focus = ime_focus;
         }
@@ -1081,11 +1098,7 @@ fn render_statistics(app: &AppState, ui: &mut Ui, p: &Palette) {
 }
 
 fn streak_label(streak: usize) -> String {
-    format!(
-        "Days studied: {} day{}",
-        streak,
-        if streak == 1 { "" } else { "s" }
-    )
+    format!("Days studied: {streak}")
 }
 
 fn forecast_label(offset: usize) -> String {

@@ -785,6 +785,10 @@ impl AppState {
     ///
     /// Store failures are reported as toasts; this call still succeeds.
     pub fn start_edit(&mut self, card_id: Id) -> Result<()> {
+        if self.add.editing.is_some() {
+            self.fail("Finish or cancel the current edit first");
+            return Ok(());
+        }
         let card = match self.store.card(card_id) {
             Ok(Some(card)) => card,
             Ok(None) => {
