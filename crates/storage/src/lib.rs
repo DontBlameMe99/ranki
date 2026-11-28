@@ -116,6 +116,10 @@ struct TimingConfig {
 
 fn timing_config_from_conf(conf: &str) -> TimingConfig {
     let object: Json = serde_json::from_str(conf).unwrap_or(Json::Null);
+    timing_config_from_json(&object)
+}
+
+fn timing_config_from_json(object: &Json) -> TimingConfig {
     let creation_offset = object
         .get("creationOffset")
         .and_then(Json::as_i64)
@@ -135,6 +139,41 @@ fn timing_config_from_conf(conf: &str) -> TimingConfig {
     }
 }
 
+fn timing_config(conn: &Connection) -> Result<TimingConfig, StoreError> {
+    if records::table_exists(conn, "config")? {
+        let value = |key: &str| -> Result<Option<Json>, StoreError> {
+            let stored: Option<SqlValue> = conn
+                .query_row(
+                    "SELECT val FROM config WHERE key = ?1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(backend)?;
+            Ok(match stored {
+                Some(SqlValue::Blob(bytes)) => {
+                    serde_json::from_slice(&bytes).ok()
+                }
+                Some(SqlValue::Text(text)) => serde_json::from_str(&text).ok(),
+                Some(SqlValue::Integer(number)) => Some(Json::from(number)),
+                _ => None,
+            })
+        };
+        return Ok(TimingConfig {
+            creation_offset: value("creationOffset")?
+                .and_then(|json| json.as_i64())
+                .and_then(|number| i32::try_from(number).ok()),
+            rollover: value("rollover")?
+                .and_then(|json| json.as_u64())
+                .and_then(|number| u8::try_from(number).ok()),
+            scheduler_v1: value("schedVer")?
+                .and_then(|json| json.as_i64())
+                .is_none_or(|version| version < 2),
+        });
+    }
+    Ok(timing_config_from_conf(&conf_text(conn)?))
+}
+
 #[expect(
     clippy::wildcard_enum_match_arm,
     reason = "SQLite may store conf as text or blob"
@@ -150,6 +189,17 @@ fn conf_text(conn: &Connection) -> Result<String, StoreError> {
     })
 }
 
+/// True when a legacy collection still declares the original scheduler.
+fn legacy_scheduler_v1(conn: &Connection) -> Result<bool, StoreError> {
+    let raw = conf_text(conn)?;
+    let object: Json = serde_json::from_str(&raw).unwrap_or(Json::Null);
+    Ok(object.is_object()
+        && object
+            .get("schedVer")
+            .and_then(Json::as_i64)
+            .is_none_or(|version| version < 2))
+}
+
 /// Upgrades the stored scheduler state from Anki's original scheduler.
 ///
 /// Returns `true` when rows were changed. The connection must be writable;
@@ -158,19 +208,9 @@ fn conf_text(conn: &Connection) -> Result<String, StoreError> {
 /// # Errors
 /// Returns an error when the collection cannot be read or written.
 pub fn upgrade_scheduler_v2(conn: &mut Connection) -> Result<bool, StoreError> {
-    let version: Option<i64> = conn
-        .query_row(
-            "SELECT json_extract(conf, '$.schedVer') FROM col WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .unwrap_or(None);
-    if version.is_some_and(|stored| stored >= 2) {
-        return Ok(false);
-    }
     let transaction = conn.transaction().map_err(backend)?;
-    if !anki::scheduler_v1_conf(&conf_text(&transaction)?)
+    if records::table_exists(&transaction, "config")?
+        || !legacy_scheduler_v1(&transaction)?
         || !records::table_exists(&transaction, "cards")?
         || !records::table_exists(&transaction, "revlog")?
         || !column_exists(&transaction, "revlog", "ease")?
@@ -429,8 +469,7 @@ params![stamp.modified, stamp.scm, json],
         let config = if let Some(config) = self.timing_config.get() {
             *config
         } else {
-            let config =
-                timing_config_from_conf(&crate::conf_text(&self.conn)?);
+            let config = timing_config(&self.conn)?;
             let _ = self.timing_config.set(config);
             config
         };

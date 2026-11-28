@@ -57,24 +57,6 @@ pub fn local_minutes_west(now_secs: i64) -> Result<i32, StoreError> {
         .div_euclid(60))
 }
 
-fn conf_value(
-    conf: &str,
-) -> Option<serde_json::Map<String, serde_json::Value>> {
-    serde_json::from_str::<serde_json::Value>(conf)
-        .ok()
-        .and_then(|value| value.as_object().cloned())
-}
-
-/// True when the collection metadata still declares the original scheduler.
-pub fn scheduler_v1_conf(conf: &str) -> bool {
-    conf_value(conf).is_some_and(|object| {
-        object
-            .get("schedVer")
-            .and_then(serde_json::Value::as_i64)
-            .is_none_or(|version| version < 2)
-    })
-}
-
 pub fn next_id() -> Result<Id, StoreError> {
     Ok(ranki_model::next_id(now_ms()?))
 }
