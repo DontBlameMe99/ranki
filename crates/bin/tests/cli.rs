@@ -3,6 +3,7 @@
 #![expect(clippy::unwrap_used, reason = "test assertions")]
 
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -336,4 +337,61 @@ fn deck_remove_refuses_to_delete_the_default_deck() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(app.run(&["decks"]).contains("Default"));
+}
+
+/// Every file under `root`, by relative path, with its bytes.
+/// Every file under `root`, by relative path, with its bytes.
+fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files = Vec::new();
+    walk(root, root, &mut files);
+    files.sort();
+    files
+}
+
+fn walk(root: &Path, dir: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            walk(root, &path, files);
+            continue;
+        }
+        files.push((
+            path.strip_prefix(root).unwrap().to_path_buf(),
+            fs::read(&path).unwrap(),
+        ));
+    }
+}
+
+#[test]
+fn ranki_leaves_a_local_anki_profile_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let anki = home.join(".local/share/Anki2");
+    fs::create_dir_all(anki.join("User 1/collection.media")).unwrap();
+    fs::create_dir_all(anki.join("addons21")).unwrap();
+    fs::write(anki.join("prefs21.db"), b"real Anki prefs").unwrap();
+    fs::write(anki.join("User 1/collection.anki2"), b"real Anki data").unwrap();
+    fs::write(anki.join("User 1/collection.media/pic.png"), b"real media")
+        .unwrap();
+    let before = snapshot(&anki);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ranki"))
+        .env("HOME", &home)
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("RANKI_DATA_DIR")
+        .env_remove("RANKI_CONFIG_DIR")
+        .env_remove("RANKI_COLLECTION")
+        .args(["decks"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(home.join(".local/share/ranki/collection.anki2").is_file());
+    assert!(!home.join(".local/share/ranki/ranki-sync.json").exists());
+    assert_eq!(snapshot(&anki), before);
 }

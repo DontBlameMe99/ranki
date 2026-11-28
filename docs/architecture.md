@@ -1,7 +1,8 @@
 # Ranki architecture
 
-Ranki is a Rust reimplementation of Anki. It reads and writes Anki collections
-directly, so a collection created here opens in Anki and vice versa.
+Ranki is a Rust reimplementation of Anki. It uses Anki's SQLite collection schema, so
+an exported package opens in Anki and an Anki package imports into Ranki's own
+collection.
 
 ## Crates
 
@@ -25,7 +26,8 @@ directly, so a collection created here opens in Anki and vice versa.
 `collection.media/`, and `ranki-sync.json` under one app data directory. Desktop
 builds resolve that directory from `RANKI_DATA_DIR`, `XDG_DATA_HOME/ranki`, or
 `~/.local/share/ranki`. CLI, GUI, sync, AnkiConnect, and MCP all use these paths.
-Users do not point Ranki at an Anki profile; package import and export move data
+Ranki does not discover or open a local Anki profile. The only other source of
+collection data is AnkiWeb, when sync is enabled. Package import and export move data
 between apps.
 
 That directory is the portability seam. A mobile entry point supplies the

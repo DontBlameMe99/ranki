@@ -120,10 +120,15 @@ custom location. Desktop builds otherwise use `XDG_DATA_HOME/ranki` or
 The data directory is the storage seam for mobile ports: a platform supplies its
 own app data and config directories and the files inside stay the same.
 
-The `--collection` and `--media-dir` flags, `RANKI_COLLECTION`, and path keys in
-`[general]` no longer select storage. An existing `[general]` section is ignored with a
-warning. Ranki does not open an Anki profile; use `.apkg` or `.colpkg` packages to move
-data between apps. A missing collection is created by commands that need it.
+`RANKI_DATA_DIR` is the only way to choose where Ranki stores data. There is no
+collection path flag, no `RANKI_COLLECTION`, and no path key in `config.toml`. An
+existing `[general]` section is ignored with a warning, and `--collection` or
+`--media-dir` fail as unknown flags. Ranki does not look up or open an Anki profile on
+its own: it never touches `~/.local/share/Anki2` unless you point `RANKI_DATA_DIR` at it
+yourself. Its collection is filled by your own
+use, by AnkiWeb when sync is enabled, and by packages you import. Use `.apkg` or
+`.colpkg` packages to move data between apps. A missing collection is created by
+commands that need it.
 
 ## Commands
 

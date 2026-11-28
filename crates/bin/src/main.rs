@@ -109,13 +109,6 @@ impl Display for ModelRef {
     reason = "mutually exclusive sync flags map directly onto CLI switches"
 )]
 struct Cli {
-    #[arg(
-        long = "collection",
-        global = true,
-        hide = true,
-        value_name = "PATH"
-    )]
-    bench_collection: Option<PathBuf>,
     #[arg(long, global = true, conflicts_with = "no_sync")]
     sync: bool,
     #[arg(long, global = true, conflicts_with = "sync")]
@@ -276,31 +269,17 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> CliResult<()> {
     let mut config = config::load();
     let mut transport = sync::lazy_http_transport(&config);
-    let data_dir = if let Some(collection) = cli.bench_collection.as_deref() {
-        if env::var_os("RANKI_BIN").is_none() {
-            return Err(CliError::Message(
-                "--collection is reserved for the benchmark harness".into(),
-            ));
-        }
-        collection
-            .parent()
-            .ok_or_else(|| {
-                CliError::Message("collection has no parent".into())
-            })?
-            .to_path_buf()
-    } else {
-        config::data_dir_path(
-            env::var_os("RANKI_DATA_DIR").as_deref(),
-            env::var_os("XDG_DATA_HOME").as_deref(),
-            env::var_os("HOME").as_deref(),
+    let data_dir = config::data_dir_path(
+        env::var_os("RANKI_DATA_DIR").as_deref(),
+        env::var_os("XDG_DATA_HOME").as_deref(),
+        env::var_os("HOME").as_deref(),
+    )
+    .ok_or_else(|| {
+        CliError::Message(
+            "cannot resolve Ranki's data directory; set RANKI_DATA_DIR or HOME"
+                .into(),
         )
-        .ok_or_else(|| {
-            CliError::Message(
-                "cannot resolve Ranki's data directory; set RANKI_DATA_DIR or HOME"
-                    .into(),
-            )
-        })?
-    };
+    })?;
     run_with_sync(
         cli,
         &mut config,
@@ -1212,11 +1191,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_path_flags_are_not_public() {
-        let cli = parse(&["ranki", "--collection", "/tmp/demo.anki2", "decks"]);
-        assert_eq!(
-            cli.bench_collection.as_deref(),
-            Some(Path::new("/tmp/demo.anki2"))
+    fn storage_path_flags_do_not_exist() {
+        assert!(
+            Cli::try_parse_from([
+                "ranki",
+                "--collection",
+                "/tmp/demo.anki2",
+                "decks"
+            ])
+            .is_err()
         );
         assert!(
             Cli::try_parse_from(["ranki", "mcp", "--media-dir", "/tmp/media"])
