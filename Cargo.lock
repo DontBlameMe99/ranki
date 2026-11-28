@@ -5390,6 +5390,7 @@ dependencies = [
  "ranki-model",
  "ranki-storage",
  "ranki-ui",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
@@ -5436,6 +5437,7 @@ name = "ranki-storage"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "rand 0.10.1",
  "ranki-core",
  "ranki-model",
  "rusqlite",

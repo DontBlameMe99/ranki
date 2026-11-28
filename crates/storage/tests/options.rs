@@ -224,11 +224,18 @@ fn schema11_presets_and_decks_decode_non_default_values() {
     assert_eq!(study.description, "Full deck");
     assert_eq!(study.preset_id, 2);
     assert_eq!(study.overrides.extend_new, 2);
-    assert_eq!(study.overrides.new_today.day, 4);
-    assert_eq!(study.overrides.new_today.today, 5);
+    assert_eq!(study.overrides.new_today.day, 5);
+    assert_eq!(
+        study.overrides.new_today.today, 0,
+        "day 4 count is stale at day 6"
+    );
+    assert_eq!(study.overrides.new_today.limit, Some(4));
     assert_eq!(study.overrides.new_limit, Some(15));
     assert_eq!(study.overrides.review_limit, Some(60));
-    assert_eq!(study.common.new_studied, 5);
+    assert_eq!(
+        study.common.new_studied, 0,
+        "an earlier-day count is not current"
+    );
     assert_eq!(study.common.last_day_studied, 6);
     assert!(study.markdown_description);
     assert!((study.desired_retention(&preset) - 0.83).abs() < 0.001);
@@ -604,8 +611,11 @@ fn schema11_deck_write_keeps_day_amount_pair_order() {
         .expect("study");
     assert_eq!(deck.common.last_day_studied, 12);
     assert_eq!(deck.common.new_studied, 3);
-    assert_eq!(deck.overrides.new_today.day, 12);
-    assert_eq!(deck.overrides.new_today.today, 2);
+    assert_eq!(deck.overrides.new_today.day, 2);
+    assert_eq!(
+        deck.overrides.new_today.today, 3,
+        "count survives an expired limit"
+    );
     assert_eq!(deck.overrides.new_today.limit, Some(7));
     deck.description = "Edited".into();
     store.write_deck(&deck).expect("write");
@@ -618,4 +628,118 @@ fn schema11_deck_write_keeps_day_amount_pair_order() {
     assert_eq!(value["2"]["revToday"], json!([12, 4]));
     assert_eq!(value["2"]["newLimitToday"], json!([7, 2]));
     assert_eq!(value["2"]["md"], true);
+}
+
+#[test]
+fn schema18_option_writes_bump_collection_mod() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("collection.anki2");
+    let conn = schema18(&path);
+    conn.execute(
+        "INSERT INTO deck_config VALUES (1, 'Preset', 0, 0, ?1)",
+        params![Vec::<u8>::new()],
+    )
+    .expect("preset row");
+    conn.execute(
+        "INSERT INTO decks VALUES (1, 'Default', 0, 0, ?1, ?2)",
+        params![Vec::<u8>::new(), nested(1, &varint(1, 1))],
+    )
+    .expect("deck row");
+    drop(conn);
+
+    let store = Collection::open(&path).expect("open");
+    let mod_now = || -> i64 {
+        let conn = open(&path);
+        conn.query_row("SELECT mod FROM col WHERE id = 1", [], |row| row.get(0))
+            .expect("mod")
+    };
+    let before = mod_now();
+    let mut preset = store.presets().expect("presets")[0].clone();
+    preset.new_per_day = 12;
+    store.write_preset(&preset).expect("write preset");
+    let after_preset = mod_now();
+    assert!(after_preset > before, "schema-18 preset write bumps mod");
+
+    let mut deck = store.effective_decks().expect("decks")[0].clone();
+    deck.overrides.new_limit = Some(9);
+    store.write_deck(&deck).expect("write deck");
+    assert!(mod_now() > after_preset, "schema-18 deck write bumps mod");
+}
+
+#[test]
+fn schema11_null_today_override_is_unset() {
+    let (_directory, path) = fixture();
+    {
+        let conn = open(&path);
+        let decks = json!({
+            "1": {"id": 1, "name": "Default", "conf": 1, "newToday": [0, 0], "revToday": [0, 0], "newLimitToday": null}
+        });
+        conn.execute(
+            "UPDATE col SET decks = ?1 WHERE id = 1",
+            params![decks.to_string()],
+        )
+        .expect("decks");
+    }
+    let store = Collection::open(&path).expect("open");
+    let deck = store.effective_decks().expect("decks")[0].clone();
+    assert_eq!(deck.overrides.new_today.limit, None);
+    assert_eq!(deck.overrides.new_today.day, 0);
+    assert_eq!(deck.overrides.new_today.today, 0);
+}
+
+#[test]
+fn schema18_present_day_limit_defaults_omitted_fields_to_zero() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("collection.anki2");
+    let conn = schema18(&path);
+    conn.execute(
+        "INSERT INTO deck_config VALUES (1, 'Preset', 0, 0, ?1)",
+        params![Vec::<u8>::new()],
+    )
+    .expect("preset row");
+    let mut normal = varint(1, 1);
+    normal.extend(nested(9, &varint(2, 5)));
+    let mut common = varint(3, 5);
+    common.extend(varint(4, 2));
+    conn.execute(
+        "INSERT INTO decks VALUES (1, 'Default', 0, 0, ?1, ?2)",
+        params![common, nested(1, &normal)],
+    )
+    .expect("deck row");
+    drop(conn);
+
+    let store = Collection::open(&path).expect("open");
+    let deck = store.effective_decks().expect("decks")[0].clone();
+    assert_eq!(
+        deck.overrides.new_today.limit,
+        Some(0),
+        "omitted limit is zero"
+    );
+    assert_eq!(deck.overrides.new_today.day, 5);
+    assert_eq!(deck.overrides.new_today.today, 2, "count comes from common");
+}
+
+#[test]
+fn schema11_combines_days_across_all_four_counters() {
+    let (_directory, path) = fixture();
+    {
+        let conn = open(&path);
+        let decks = json!({
+            "1": {"id": 1, "name": "Default", "conf": 1,
+                  "newToday": [1, 1], "revToday": [1, 1],
+                  "lrnToday": [2, 3], "timeToday": [2, 9]}
+        });
+        conn.execute(
+            "UPDATE col SET decks = ?1 WHERE id = 1",
+            params![decks.to_string()],
+        )
+        .expect("decks");
+    }
+    let store = Collection::open(&path).expect("open");
+    let deck = store.effective_decks().expect("decks")[0].clone();
+    assert_eq!(deck.common.last_day_studied, 2);
+    assert_eq!(deck.common.new_studied, 0);
+    assert_eq!(deck.common.review_studied, 0);
+    assert_eq!(deck.common.learning_studied, 3);
+    assert_eq!(deck.common.milliseconds_studied, 9);
 }

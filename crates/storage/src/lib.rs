@@ -24,6 +24,7 @@
 mod anki;
 mod entities;
 mod options;
+mod queue;
 mod records;
 mod reopening;
 mod schema;
@@ -32,6 +33,7 @@ mod tags;
 
 use std::cell::Cell;
 use std::cell::OnceCell;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Display;
@@ -65,6 +67,8 @@ pub use records::models_to_json;
 
 use ranki_model::AddNoteOptions;
 use ranki_model::Card;
+use ranki_model::CardQueue;
+use ranki_model::CardType;
 use ranki_model::DEFAULT_DECK_ID;
 use ranki_model::Deck;
 use ranki_model::DeckStats;
@@ -95,7 +99,9 @@ pub use schema::schema11_default_deck_config;
 use serde_json::Map;
 use serde_json::Value as Json;
 use serde_json::json;
-pub const SEARCH_SYNTAX: &str = "deck:, tag:, note:, is:new/learn/review/suspended/buried, plain field text, * wildcard";
+pub const SEARCH_SYNTAX: &str = "deck:, tag:, note:, is:new/learn/review/due/suspended/buried, plain field text, * wildcard";
+const HOME_DECK_SQL: &str = "CASE WHEN c.odid != 0 THEN c.odid ELSE c.did END";
+const TRUE_DUE_SQL: &str = "CASE WHEN c.odid != 0 THEN c.odue ELSE c.due END";
 
 /// An Anki collection backed by a SQLite file.
 pub struct Collection {
@@ -105,6 +111,7 @@ pub struct Collection {
     timing_config: OnceCell<TimingConfig>,
     timing_now: Cell<Option<(i64, Timing)>>,
     due_index: OnceCell<()>,
+    options_cache: RefCell<Option<OptionsCache>>,
 }
 
 #[derive(Clone, Copy)]
@@ -113,6 +120,14 @@ struct TimingConfig {
     rollover: Option<u8>,
     scheduler_v1: bool,
 }
+
+struct OptionsCache {
+    modified: i64,
+    decks: Vec<EffectiveDeck>,
+    presets: Vec<DeckPreset>,
+}
+
+type QueueOptions = (Vec<EffectiveDeck>, Vec<DeckPreset>);
 
 fn timing_config_from_conf(conf: &str) -> TimingConfig {
     let object: Json = serde_json::from_str(conf).unwrap_or(Json::Null);
@@ -178,7 +193,7 @@ fn timing_config(conn: &Connection) -> Result<TimingConfig, StoreError> {
     clippy::wildcard_enum_match_arm,
     reason = "SQLite may store conf as text or blob"
 )]
-fn conf_text(conn: &Connection) -> Result<String, StoreError> {
+pub(crate) fn conf_text(conn: &Connection) -> Result<String, StoreError> {
     let value: SqlValue = conn
         .query_row("SELECT conf FROM col WHERE id = 1", [], |row| row.get(0))
         .map_err(backend)?;
@@ -346,6 +361,7 @@ impl Collection {
             timing_config: OnceCell::new(),
             timing_now: Cell::new(None),
             due_index: OnceCell::new(),
+            options_cache: RefCell::new(None),
         })
     }
 
@@ -376,6 +392,37 @@ impl Collection {
     /// Returns an error when collection metadata cannot be read.
     pub fn effective_decks(&self) -> Result<Vec<EffectiveDeck>, StoreError> {
         options::effective_decks(&self.conn)
+    }
+
+    /// Reads the deck and preset state used by the queue builder.
+    ///
+    /// The cache follows `col.mod`, so local writes and external commits both
+    /// invalidate it.
+    pub(crate) fn queue_options(&self) -> Result<QueueOptions, StoreError> {
+        let modified: i64 = self
+            .conn
+            .query_row("SELECT mod FROM col WHERE id = 1", [], |row| row.get(0))
+            .map_err(backend)?;
+        if self
+            .options_cache
+            .borrow()
+            .as_ref()
+            .is_some_and(|cache| cache.modified == modified)
+        {
+            let borrowed = self.options_cache.borrow();
+            let Some(cached) = borrowed.as_ref() else {
+                return Err(invalid("options cache disappeared"));
+            };
+            return Ok((cached.decks.clone(), cached.presets.clone()));
+        }
+        let decks = options::effective_decks(&self.conn)?;
+        let presets = options::presets(&self.conn).unwrap_or_default();
+        let _ = self.options_cache.borrow_mut().replace(OptionsCache {
+            modified,
+            decks: decks.clone(),
+            presets: presets.clone(),
+        });
+        Ok((decks, presets))
     }
 
     /// Writes one preset back to the active storage layout.
@@ -491,6 +538,15 @@ params![stamp.modified, stamp.scm, json],
         Ok(timing)
     }
 
+    /// Returns Anki's learn-ahead window in seconds, from `collapseTime`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the collection config cannot be read.
+    pub fn learn_ahead_secs(&self) -> Result<i64, StoreError> {
+        queue::learn_ahead_secs(&self.conn)
+    }
+
     /// Runs the scheduler-v1 upgrade on this collection.
     ///
     /// # Errors
@@ -564,10 +620,11 @@ params![stamp.modified, stamp.scm, json],
         &mut self,
         decisions: &[ReviewDecision],
     ) -> Result<(), StoreError> {
+        let today = self.timing(anki::now_secs()?)?.days_elapsed;
         let transaction = self.conn.transaction().map_err(backend)?;
         let usn = update_col(&transaction, false)?;
         for decision in decisions {
-            write_review(&transaction, usn, decision)?;
+            write_review(&transaction, usn, decision, today)?;
         }
         transaction.commit().map_err(backend)?;
         Ok(())
@@ -604,7 +661,6 @@ params![stamp.modified, stamp.scm, json],
     ) -> Result<DeckFilter, StoreError> {
         let Some(id) = deck_id else {
             return Ok(DeckFilter {
-                clause: String::new(),
                 params: Vec::new(),
                 missing: false,
             });
@@ -612,20 +668,18 @@ params![stamp.modified, stamp.scm, json],
         let ids = self.deck_subtree(id)?;
         if ids.is_empty() {
             return Ok(DeckFilter {
-                clause: String::new(),
                 params: Vec::new(),
                 missing: true,
             });
         }
         Ok(DeckFilter {
-            clause: format!("c.did IN ({})", vec!["?"; ids.len()].join(", ")),
             params: ids.into_iter().map(SqlValue::Integer).collect(),
             missing: false,
         })
     }
 
-    /// Builds the WHERE clause and parameters for a search query.
-    fn search_query(
+    /// Builds a search query with the current day and learn-ahead cutoff.
+    fn search_query_timed(
         &self,
         query: &str,
     ) -> Result<search::SearchQuery, StoreError> {
@@ -640,7 +694,17 @@ params![stamp.modified, stamp.scm, json],
         } else {
             Vec::new()
         };
-        search::build(&tokens, &decks, &models)
+        let (today, learn_cutoff) = if search::needs_timing(&tokens) {
+            let now = anki::now_secs()?;
+            let timing = self.timing(now)?;
+            (
+                i64::from(timing.days_elapsed),
+                now.saturating_add(queue::learn_ahead_secs(&self.conn)?),
+            )
+        } else {
+            (0, 0)
+        };
+        search::build(&tokens, &decks, &models, today, learn_cutoff)
     }
 
     fn ensure_due_index(&self) -> Result<(), StoreError> {
@@ -650,7 +714,8 @@ params![stamp.modified, stamp.scm, json],
         self.conn
             .execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_ranki_cards_queue_due ON cards (queue, due, id); \
-                 CREATE INDEX IF NOT EXISTS idx_ranki_cards_queue_ord ON cards (queue, ord, due)"
+                 CREATE INDEX IF NOT EXISTS idx_ranki_cards_queue_ord ON cards (queue, ord, due); \
+                 CREATE INDEX IF NOT EXISTS idx_ranki_cards_new_gather ON cards (queue, did, due, ord)"
             )
             .map_err(backend)?;
         let _ = self.due_index.set(());
@@ -863,7 +928,7 @@ impl Store for Collection {
     }
 
     fn find_cards(&self, query: &str) -> Result<Vec<Id>, StoreError> {
-        let search = self.search_query(query)?;
+        let search = self.search_query_timed(query)?;
         let sql = format!(
             "SELECT c.id FROM cards c JOIN notes n ON n.id = c.nid WHERE {} ORDER BY c.id",
             search.clause
@@ -885,7 +950,7 @@ impl Store for Collection {
         &self,
         query: &str,
     ) -> Result<Vec<ranki_model::BrowseCard>, StoreError> {
-        let search = self.search_query(query)?;
+        let search = self.search_query_timed(query)?;
         let sql = format!(
             "SELECT c.id, c.did, n.sfld FROM cards c JOIN notes n ON n.id = c.nid \
              WHERE {} ORDER BY c.id",
@@ -910,10 +975,6 @@ impl Store for Collection {
         Ok(cards)
     }
 
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "bounded queue queries stay together in one read path"
-    )]
     fn due_cards(
         &self,
         deck_id: Option<Id>,
@@ -921,91 +982,13 @@ impl Store for Collection {
         now_secs: i64,
     ) -> Result<Vec<Card>, StoreError> {
         self.ensure_due_index()?;
-        let limit_value =
-            i64::try_from(limit).map_err(|_| invalid("limit too large"))?;
-        if limit_value == 0 {
-            return Ok(Vec::new());
-        }
-        let filter = self.deck_filter(deck_id)?;
-        if filter.missing {
-            return Ok(Vec::new());
-        }
-        let today = i64::from(self.timing(now_secs)?.days_elapsed);
-        let deck_clause = if filter.clause.is_empty() {
-            String::new()
-        } else {
-            format!("AND {}", filter.clause)
-        };
-        let probe_deck = if filter.params.is_empty() {
-            String::new()
-        } else {
-            format!("AND c.did IN ({})", placeholders(4, filter.params.len()))
-        };
-        let probe_sql = format!(
-            "SELECT EXISTS(SELECT 1 FROM cards c WHERE c.queue = 1 AND c.due <= ?1 {probe_deck}), \
-                    EXISTS(SELECT 1 FROM cards c WHERE c.queue = 3 AND c.due <= ?2 {probe_deck}), \
-                    EXISTS(SELECT 1 FROM cards c WHERE c.queue = 2 AND c.due <= ?3 {probe_deck})"
-        );
-        let mut probe_parameters = vec![
-            SqlValue::Integer(now_secs),
-            SqlValue::Integer(today),
-            SqlValue::Integer(today),
-        ];
-        probe_parameters.extend(filter.params.iter().cloned());
-        let (learning_now, learning_day, review) = self
-            .conn
-            .prepare_cached(&probe_sql)
-            .map_err(backend)?
-            .query_row(params_from_iter(probe_parameters), |row| {
-                Ok((
-                    row.get::<_, bool>(0)?,
-                    row.get::<_, bool>(1)?,
-                    row.get::<_, bool>(2)?,
-                ))
-            })
-            .map_err(backend)?;
-        let mut cards = Vec::with_capacity(limit);
-        // Anki's default deck options gather intraday learning, then reviews,
-        // then interday learning, then new cards. Within reviews and interday
-        // learning it orders by due day, then by `fnvhash(id, mod)`. New cards
-        // follow template order, then position.
-        // Anki's default deck options gather intraday learning, then reviews,
-        // then interday learning, then new cards. Within reviews and interday
-        // learning it orders by due day, then by `fnvhash(id, mod)`. New cards
-        // follow template order, then position.
-        for (queue, due, present, order) in [
-            (1, Some(now_secs), learning_now, "c.due, c.id"),
-            (2, Some(today), review, "c.due, fnvhash(c.id, c.mod)"),
-            (3, Some(today), learning_day, "c.due, fnvhash(c.id, c.mod)"),
-            (0, None, true, "c.ord, c.due, c.id"),
-        ] {
-            if !present {
-                continue;
-            }
-            // A new card's `due` is its position, so it has no time window.
-            let due_clause = if due.is_some() { "AND c.due <= ?" } else { "" };
-            let sql = format!(
-                "SELECT c.id, c.nid, c.did, c.ord, c.mod, c.usn, c.type, c.queue, c.due, c.ivl, \
-                 c.factor, c.reps, c.lapses, c.left, c.odue, c.odid, c.flags, c.data FROM cards c \
-                 WHERE c.queue = ? {due_clause} {deck_clause} ORDER BY {order} LIMIT ?"
-            );
-            let mut parameters = vec![SqlValue::Integer(queue)];
-            parameters.extend(due.map(SqlValue::Integer));
-            parameters.extend(filter.params.iter().cloned());
-            parameters.push(SqlValue::Integer(limit_value));
-            let mut statement = self.conn.prepare(&sql).map_err(backend)?;
-            let rows = statement
-                .query_map(params_from_iter(parameters), records::card_from_row)
-                .map_err(backend)?;
-            for row in rows {
-                cards.push(row.map_err(backend)?);
-            }
-            if cards.len() >= limit {
-                break;
-            }
-        }
-        cards.truncate(limit);
-        Ok(cards)
+        let timing = self.timing(now_secs)?;
+        let real_today = self.timing(anki::now_secs()?)?.days_elapsed;
+        let (decks, presets) = self.queue_options()?;
+        queue::gather_due_cards(
+            &self.conn, deck_id, limit, now_secs, timing, real_today, &decks,
+            &presets,
+        )
     }
 
     fn card(&self, id: Id) -> Result<Option<Card>, StoreError> {
@@ -1104,6 +1087,18 @@ impl Store for Collection {
         let usn = update_col(&transaction, false)?;
         let tags = tags::canonify(&note.tags, &transaction, usn)?;
         let next_position = next_position(&transaction)?;
+        let random_insert = options::effective_decks(&transaction)
+            .ok()
+            .into_iter()
+            .flatten()
+            .find(|deck| deck.id == note.deck_id)
+            .and_then(|deck| {
+                options::presets(&transaction)
+                    .ok()?
+                    .into_iter()
+                    .find(|preset| preset.id == deck.preset_id)
+            })
+            .is_some_and(|preset| preset.new_card_insert_order == 1);
         transaction
             .execute(
                 "INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data) \
@@ -1125,8 +1120,11 @@ impl Store for Collection {
         let mut cards: Vec<Id> = Vec::with_capacity(ordinals.len());
         for (offset, ordinal) in ordinals.into_iter().enumerate() {
             let card_id = fresh_id(&transaction, "cards")?;
-            let due = next_position
-                .saturating_add(i64::try_from(offset).unwrap_or_default());
+            let due = queue::new_card_position(
+                next_position,
+                i64::try_from(offset).unwrap_or_default(),
+                random_insert,
+            );
             transaction
                 .execute(
                     "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, \
@@ -1273,6 +1271,7 @@ impl Store for Collection {
         &mut self,
         decision: &ReviewDecision,
     ) -> Result<Id, StoreError> {
+        let today = self.timing(anki::now_secs()?)?.days_elapsed;
         let transaction = self.conn.transaction().map_err(backend)?;
         let current: Option<(i64, i32)> = transaction
             .query_row(
@@ -1287,7 +1286,7 @@ impl Store for Collection {
             return Err(invalid("card changed since it was loaded"));
         }
         let usn = update_col(&transaction, false)?;
-        let log_id = write_review(&transaction, usn, decision)?;
+        let log_id = write_review(&transaction, usn, decision, today)?;
         transaction.commit().map_err(backend)?;
         Ok(log_id)
     }
@@ -1342,25 +1341,31 @@ impl Store for Collection {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "undo restores the card, buried siblings and counters in one transaction"
+    )]
     fn undo_review(
         &mut self,
         before: &Card,
         revlog_id: Id,
     ) -> Result<bool, StoreError> {
-        let transaction = self.conn.transaction().map_err(backend)?;
-        let logged = transaction
+        let today = self.timing(anki::now_secs()?)?.days_elapsed;
+        let answer_millis: Option<i64> = self
+            .conn
             .query_row(
-                "SELECT 1 FROM revlog WHERE id = ?1 AND cid = ?2 AND id = \
+                "SELECT id FROM revlog WHERE id = ?1 AND cid = ?2 AND id = \
                  (SELECT MAX(id) FROM revlog WHERE cid = ?2)",
                 params![revlog_id, before.id],
-                |_| Ok(()),
+                |row| row.get(0),
             )
             .optional()
-            .map_err(backend)?
-            .is_some();
-        if !logged {
+            .map_err(backend)?;
+        let Some(millis) = answer_millis else {
             return Ok(false);
-        }
+        };
+        let answer_day = self.timing(millis.div_euclid(1_000))?.days_elapsed;
+        let transaction = self.conn.transaction().map_err(backend)?;
         let usn = update_col(&transaction, false)?;
         transaction
             .execute(
@@ -1396,6 +1401,63 @@ impl Store for Collection {
         if updated == 0 {
             return Err(StoreError::NotFound(format!("card {}", before.id)));
         }
+        let mut statement = transaction
+            .prepare(
+                "SELECT id, type, due FROM cards WHERE nid = ?1 AND queue = -2 AND id != ?2 AND mod = ?3",
+            )
+            .map_err(backend)?;
+        let rows = statement
+            .query_map(
+                params![before.note_id, before.id, millis.div_euclid(1_000)],
+                |row| {
+                    Ok((
+                        row.get::<_, Id>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .map_err(backend)?;
+        let mut siblings = Vec::new();
+        for row in rows {
+            let (id, card_type, due) = row.map_err(backend)?;
+            siblings.push((
+                id,
+                queue::restore_queue(CardType::from_code(card_type), due),
+            ));
+        }
+        drop(statement);
+        for (id, queue) in siblings {
+            transaction
+                .execute(
+                    "UPDATE cards SET queue = ?1 WHERE id = ?2",
+                    params![queue, id],
+                )
+                .map_err(backend)?;
+        }
+        let home = if before.original_deck_id == 0 {
+            before.deck_id
+        } else {
+            before.original_deck_id
+        };
+        let (new_delta, review_delta) = match before.queue {
+            CardQueue::New => (-1_i64, 0_i64),
+            CardQueue::Review | CardQueue::DayLearning => (0, -1),
+            CardQueue::Learning
+            | CardQueue::Suspended
+            | CardQueue::Buried
+            | CardQueue::ManuallyBuried
+            | CardQueue::Preview => (0, 0),
+        };
+        if answer_day == today {
+            adjust_deck_counts(
+                &transaction,
+                home,
+                today,
+                new_delta,
+                review_delta,
+            )?;
+        }
         transaction.commit().map_err(backend)?;
         Ok(true)
     }
@@ -1410,25 +1472,27 @@ impl Store for Collection {
             return Ok(DeckStats::default());
         }
         let today = i64::from(self.timing(now_secs)?.days_elapsed);
+        let learn_cutoff =
+            now_secs.saturating_add(queue::learn_ahead_secs(&self.conn)?);
         let (deck_and, deck_where) = if filter.params.is_empty() {
             (String::new(), String::new())
         } else {
             let list = placeholders(3, filter.params.len());
             (
-                format!("AND c.did IN ({list})"),
-                format!("WHERE c.did IN ({list})"),
+                format!("AND {HOME_DECK_SQL} IN ({list})"),
+                format!("WHERE {HOME_DECK_SQL} IN ({list})"),
             )
         };
         let sql = format!(
             "SELECT \
              (SELECT COUNT(*) FROM cards c WHERE c.queue = 0 {deck_and}), \
-             (SELECT COUNT(*) FROM cards c WHERE ((c.queue = 1 AND c.due <= ?1) OR \
-              (c.queue = 3 AND c.due <= ?2)) {deck_and}), \
-             (SELECT COUNT(*) FROM cards c WHERE c.queue = 2 AND c.due <= ?2 {deck_and}), \
+             (SELECT COUNT(*) FROM cards c WHERE ((c.queue = 1 AND {TRUE_DUE_SQL} <= ?1) OR \
+              (c.queue = 3 AND {TRUE_DUE_SQL} <= ?2)) {deck_and}), \
+             (SELECT COUNT(*) FROM cards c WHERE c.queue = 2 AND {TRUE_DUE_SQL} <= ?2 {deck_and}), \
              (SELECT COUNT(*) FROM cards c {deck_where})"
         );
         let mut parameters =
-            vec![SqlValue::Integer(now_secs), SqlValue::Integer(today)];
+            vec![SqlValue::Integer(learn_cutoff), SqlValue::Integer(today)];
         parameters.extend(filter.params);
         let mut statement = self.conn.prepare_cached(&sql).map_err(backend)?;
         let counts: (i64, i64, i64, i64) = statement
@@ -1461,13 +1525,16 @@ impl Store for Collection {
         let horizon = today
             .checked_add(last)
             .ok_or_else(|| invalid("forecast overflow"))?;
-        let end_today_secs = timing.next_day_at;
-        let sql = "SELECT CASE WHEN c.queue = 1 OR c.due < ?1 THEN ?1 ELSE c.due END AS due_day, \
-                   COUNT(*) FROM cards c WHERE (c.queue = 1 AND c.due <= ?2) \
-                   OR (c.queue IN (2, 3) AND c.due <= ?3) GROUP BY due_day";
-        let mut statement = self.conn.prepare(sql).map_err(backend)?;
+        let learn_cutoff =
+            now_secs.saturating_add(queue::learn_ahead_secs(&self.conn)?);
+        let sql = format!(
+            "SELECT CASE WHEN c.queue IN (1, 4) OR {TRUE_DUE_SQL} < ?1 THEN ?1 ELSE {TRUE_DUE_SQL} END AS due_day, \
+             COUNT(*) FROM cards c WHERE (c.queue IN (1, 4) AND {TRUE_DUE_SQL} <= ?2) \
+             OR (c.queue IN (2, 3) AND {TRUE_DUE_SQL} <= ?3) GROUP BY due_day"
+        );
+        let mut statement = self.conn.prepare(&sql).map_err(backend)?;
         let rows = statement
-            .query_map(params![today, end_today_secs, horizon], |row| {
+            .query_map(params![today, learn_cutoff, horizon], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
             })
             .map_err(backend)?;
@@ -1483,7 +1550,9 @@ impl Store for Collection {
     fn deck_stats(&self, now_secs: i64) -> Result<DeckTotals, StoreError> {
         let decks = self.deck_list()?;
         let today = i64::from(self.timing(now_secs)?.days_elapsed);
-        let counts = deck_card_counts(&self.conn, now_secs, today)?;
+        let learn_cutoff =
+            now_secs.saturating_add(queue::learn_ahead_secs(&self.conn)?);
+        let counts = deck_card_counts(&self.conn, today, learn_cutoff)?;
         let ids_by_name = decks
             .iter()
             .map(|deck| (deck.name.as_str(), deck.id))
@@ -1563,6 +1632,10 @@ impl Store for Collection {
 
     fn timing(&self, now_secs: i64) -> Result<Timing, StoreError> {
         Self::timing(self, now_secs)
+    }
+
+    fn learn_ahead_secs(&self) -> Result<i64, StoreError> {
+        Self::learn_ahead_secs(self)
     }
 
     fn collection_modified(&self) -> Result<i64, StoreError> {
@@ -1762,7 +1835,7 @@ fn register_functions(conn: &Connection) -> Result<(), StoreError> {
 }
 
 /// FNV-1a over both values, compared as Anki's signed `i64`.
-fn fnv_hash(first: i64, second: i64) -> i64 {
+pub(crate) fn fnv_hash(first: i64, second: i64) -> i64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut hash = OFFSET;
@@ -1874,7 +1947,6 @@ pub(crate) fn invalid(message: impl Into<String>) -> StoreError {
 }
 
 struct DeckFilter {
-    clause: String,
     params: Vec<SqlValue>,
     missing: bool,
 }
@@ -2068,19 +2140,19 @@ fn deck_list_from(conn: &Connection) -> Result<Vec<Deck>, StoreError> {
 /// Counts cards due at `now_secs` per deck id in one grouped query.
 fn deck_card_counts(
     conn: &Connection,
-    now_secs: i64,
     today: i64,
+    learn_cutoff: i64,
 ) -> Result<HashMap<Id, DeckStats>, StoreError> {
     let mut statement = conn
-        .prepare(
-            "SELECT c.did, SUM(CASE WHEN c.queue = 0 THEN 1 ELSE 0 END), \
-             SUM(CASE WHEN (c.queue = 1 AND c.due <= ?1) OR (c.queue = 3 AND c.due <= ?2) THEN 1 ELSE 0 END), \
-             SUM(CASE WHEN c.queue = 2 AND c.due <= ?2 THEN 1 ELSE 0 END), COUNT(*) FROM cards c GROUP BY \
-             c.did",
-        )
+        .prepare(&format!(
+            "SELECT {HOME_DECK_SQL}, SUM(CASE WHEN c.queue = 0 THEN 1 ELSE 0 END), \
+             SUM(CASE WHEN (c.queue = 1 AND {TRUE_DUE_SQL} <= ?1) OR (c.queue = 3 AND {TRUE_DUE_SQL} <= ?2) THEN 1 ELSE 0 END), \
+             SUM(CASE WHEN c.queue = 2 AND {TRUE_DUE_SQL} <= ?2 THEN 1 ELSE 0 END), COUNT(*) FROM cards c GROUP BY \
+             {HOME_DECK_SQL}",
+        ))
         .map_err(backend)?;
     let rows = statement
-        .query_map(params![now_secs, today], |row| {
+        .query_map(params![learn_cutoff, today], |row| {
             Ok((
                 row.get::<_, Id>(0)?,
                 (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?),
@@ -2512,13 +2584,169 @@ fn read_stamps(conn: &Connection) -> Result<Stamps, StoreError> {
     .map_err(backend)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "counter updates need the deck, day and both signed deltas"
+)]
+/// Adds a signed delta to a deck's today counters, and to each parent deck.
+fn adjust_deck_counts(
+    conn: &Connection,
+    deck_id: Id,
+    today: u32,
+    new_delta: i64,
+    review_delta: i64,
+) -> Result<(), StoreError> {
+    let mut decks = options::effective_decks(conn)?;
+    let schema_modified = read_stamps(conn)?.scm;
+    let Some(root) = decks.iter().find(|deck| deck.id == deck_id).cloned()
+    else {
+        return Ok(());
+    };
+    let mut affected = vec![root.id];
+    let mut parent = root.name.rsplit_once("::").map(|entry| entry.0);
+    while let Some(name) = parent {
+        let Some(id) = decks
+            .iter()
+            .find(|deck| deck.name == name)
+            .map(|deck| deck.id)
+        else {
+            break;
+        };
+        affected.push(id);
+        parent = decks
+            .iter()
+            .find(|deck| deck.id == id)
+            .and_then(|deck| deck.name.rsplit_once("::"))
+            .map(|entry| entry.0);
+    }
+    for deck in &mut decks {
+        if !affected.contains(&deck.id) {
+            continue;
+        }
+        if deck.common.last_day_studied != today {
+            deck.common.new_studied = 0;
+            deck.common.review_studied = 0;
+            deck.common.learning_studied = 0;
+            deck.common.milliseconds_studied = 0;
+            deck.common.last_day_studied = today;
+            deck.overrides.new_today.today = 0;
+            deck.overrides.review_today.today = 0;
+        }
+        let new_count = i64::from(deck.common.new_studied)
+            .saturating_add(new_delta)
+            .clamp(0, i64::from(i32::MAX));
+        let review_count = i64::from(deck.common.review_studied)
+            .saturating_add(review_delta)
+            .clamp(0, i64::from(i32::MAX));
+        deck.common.new_studied = i32::try_from(new_count).unwrap_or(i32::MAX);
+        deck.common.review_studied =
+            i32::try_from(review_count).unwrap_or(i32::MAX);
+        deck.overrides.new_today.today = u32::try_from(new_count).unwrap_or(0);
+        deck.overrides.review_today.today =
+            u32::try_from(review_count).unwrap_or(0);
+        options::write_deck(conn, deck)?;
+    }
+    conn.execute("UPDATE col SET scm = ?1 WHERE id = 1", [schema_modified])
+        .map_err(backend)?;
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "burial needs the connection, decision, source queue and stamp"
+)]
+fn bury_siblings_after_answer(
+    conn: &Connection,
+    decision: &ReviewDecision,
+    from_queue: CardQueue,
+    usn: i32,
+) -> Result<(), StoreError> {
+    let home = if decision.card.original_deck_id == 0 {
+        decision.card.deck_id
+    } else {
+        decision.card.original_deck_id
+    };
+    let home_preset = options::effective_decks(conn)?
+        .into_iter()
+        .find(|deck| deck.id == home)
+        .map(|deck| deck.preset_id);
+    let Some(preset_id) = home_preset else {
+        return Ok(());
+    };
+    let Some(preset) = options::presets(conn)?
+        .into_iter()
+        .find(|preset| preset.id == preset_id)
+    else {
+        return Ok(());
+    };
+    let order = match from_queue {
+        CardQueue::Learning | CardQueue::Preview => 0,
+        CardQueue::DayLearning => 1,
+        CardQueue::Review => 2,
+        CardQueue::New => 3,
+        CardQueue::Suspended
+        | CardQueue::Buried
+        | CardQueue::ManuallyBuried => {
+            return Ok(());
+        }
+    };
+    let mut queues = Vec::new();
+    if preset.bury_new {
+        queues.push((0_i64, 0_i64));
+    }
+    if preset.bury_reviews && order <= 2 {
+        queues.push((2, 2));
+    }
+    if preset.bury_interday_learning && order <= 1 {
+        queues.push((1, 3));
+        queues.push((3, 3));
+    }
+    for (card_type, queue) in queues {
+        conn.execute(
+            "UPDATE cards SET queue = -2, mod = ?5, usn = ?6 WHERE nid = ?1 AND id != ?2 AND type = ?3 AND queue = ?4",
+            params![
+                decision.card.note_id,
+                decision.card.id,
+                card_type,
+                queue,
+                decision.card.modified,
+                usn
+            ],
+            )
+        .map_err(backend)?;
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a review write needs the transaction, stamp, decision and day"
+)]
 /// Writes one scheduled card and its review log entry inside `transaction`.
 fn write_review(
     transaction: &Transaction<'_>,
     usn: i32,
     decision: &ReviewDecision,
+    today: u32,
 ) -> Result<Id, StoreError> {
     let card = &decision.card;
+    let previous: Option<(i64, i64, i64)> = transaction
+        .query_row(
+            "SELECT queue, did, odid FROM cards WHERE id = ?1",
+            [card.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(backend)?;
+    let (from_queue, home) = previous.map_or(
+        (CardQueue::New, card.deck_id),
+        |(queue, did, odid)| {
+            (
+                CardQueue::from_code(queue),
+                if odid == 0 { did } else { odid },
+            )
+        },
+    );
     let updated = transaction
         .execute(
             "UPDATE cards SET did = ?1, mod = ?2, usn = ?3, type = ?4, queue = ?5, due = ?6, \
@@ -2566,6 +2794,17 @@ fn write_review(
             ],
         )
         .map_err(backend)?;
+    let (new_delta, review_delta) = match from_queue {
+        CardQueue::New => (1_i64, 0_i64),
+        CardQueue::Review | CardQueue::DayLearning => (0, 1),
+        CardQueue::Learning
+        | CardQueue::Suspended
+        | CardQueue::Buried
+        | CardQueue::ManuallyBuried
+        | CardQueue::Preview => (0, 0),
+    };
+    adjust_deck_counts(transaction, home, today, new_delta, review_delta)?;
+    bury_siblings_after_answer(transaction, decision, from_queue, usn)?;
     Ok(log_id)
 }
 
@@ -2627,7 +2866,7 @@ fn set_next_position(
 }
 
 /// Parses `col.conf`, treating an empty blob as an empty object.
-fn parse_conf(conf: &str) -> Result<Json, StoreError> {
+pub(crate) fn parse_conf(conf: &str) -> Result<Json, StoreError> {
     if conf.trim().is_empty() {
         return Ok(Json::Object(serde_json::Map::new()));
     }
