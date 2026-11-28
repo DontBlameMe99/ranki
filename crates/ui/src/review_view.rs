@@ -420,17 +420,59 @@ impl Root {
                 card_width,
                 phase,
             );
-            let stage_media = question.is_some_and(|card| {
-                !card.media.is_empty() || !card.masks.is_empty()
-            });
-            let content_height =
-                stage_content_height(stage_height, image_height, stage_media);
+            let content_height = stage_content_height(stage_height);
             let center = div()
                 .id("review-stage-scroll")
                 .flex_1()
                 .min_h(px(0.))
                 .track_scroll(&self.review_stage_scroll)
                 .overflow_scroll();
+            let occlusion_image = self.review.occlusion_image.as_ref();
+            let masked = question
+                .filter(|card| !card.masks.is_empty())
+                .and(occlusion_image.as_ref());
+            let stage_media = if let Some(card) = question {
+                if let Some(image) = masked {
+                    let mut media = div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(SPACE_GROUP))
+                        .child(card_view::occlusion_media(
+                            &self.options.paths.media_dir,
+                            &image.name,
+                            &card.masks,
+                            colors,
+                            phase == Phase::Answer,
+                            image_height,
+                            self.review.occlusion_image_size,
+                        ));
+                    let rest = card
+                        .media
+                        .iter()
+                        .filter(|media| Some(*media) != occlusion_image)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if let Some(rest) = card_view::media_column(
+                        &rest,
+                        &self.options.paths.media_dir,
+                        colors,
+                        image_height,
+                    ) {
+                        media = media.child(rest);
+                    }
+                    Some(media)
+                } else {
+                    card_view::media_column(
+                        &card.media,
+                        &self.options.paths.media_dir,
+                        colors,
+                        image_height,
+                    )
+                }
+            } else {
+                None
+            };
             let mut content = div()
                 .min_h(px(content_height))
                 .flex()
@@ -438,6 +480,7 @@ impl Root {
                 .items_center()
                 .justify_center()
                 .gap(px(SPACE_GROUP))
+                .children(stage_media)
                 .children((phase == Phase::Question).then(|| {
                     div()
                         .text_size(px(11.))
@@ -498,61 +541,7 @@ impl Root {
                     quick,
                 ));
             }
-            let occlusion_image = self.review.occlusion_image.as_ref();
-            let masked = question
-                .filter(|card| !card.masks.is_empty())
-                .and(occlusion_image.as_ref());
-            let stage_media = if let Some(card) = question {
-                if let Some(image) = masked {
-                    let mut media = div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap(px(SPACE_GROUP))
-                        .child(card_view::occlusion_media(
-                            &self.options.paths.media_dir,
-                            &image.name,
-                            &card.masks,
-                            colors,
-                            phase == Phase::Answer,
-                            image_height,
-                            self.review.occlusion_image_size,
-                        ));
-                    let rest = card
-                        .media
-                        .iter()
-                        .filter(|media| Some(*media) != occlusion_image)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if let Some(rest) = card_view::media_column(
-                        &rest,
-                        &self.options.paths.media_dir,
-                        colors,
-                        image_height,
-                    ) {
-                        media = media.child(rest);
-                    }
-                    Some(media)
-                } else {
-                    card_view::media_column(
-                        &card.media,
-                        &self.options.paths.media_dir,
-                        colors,
-                        image_height,
-                    )
-                }
-            } else {
-                None
-            };
-            match stage_media {
-                Some(media) if masked.is_some() => {
-                    stage = stage.child(media).child(center.child(content));
-                }
-                Some(media) => {
-                    stage = stage.child(center.child(content)).child(media);
-                }
-                None => stage = stage.child(center.child(content)),
-            }
+            stage = stage.child(center.child(content));
             let stage = gpui::image_cache(self.images.clone()).child(stage);
             let key = current
                 .as_ref()
@@ -645,17 +634,9 @@ impl Root {
     }
 }
 
-/// Height available to the scrolling text block above a stage media column.
-const fn stage_content_height(
-    stage_height: f32,
-    image_height: f32,
-    stage_media: bool,
-) -> f32 {
-    (stage_height
-        - 2.0 * STAGE_PADDING
-        - 56.0
-        - if stage_media { image_height } else { 0.0 })
-    .max(0.0)
+/// Height available to the scrolling stage body inside the stage padding.
+const fn stage_content_height(stage_height: f32) -> f32 {
+    (stage_height - 2.0 * STAGE_PADDING - 56.0).max(0.0)
 }
 fn card_text_width_limit(
     card: &card_view::RenderedCard,
@@ -1142,14 +1123,12 @@ mod tests {
     }
 
     #[test]
-    fn stage_media_leaves_room_for_the_text_block() {
-        let plain = super::stage_content_height(440.0, 180.0, false);
-        let with_media = super::stage_content_height(440.0, 180.0, true);
-        assert_eq!(plain - with_media, 180.0);
+    fn stage_body_keeps_the_stage_padding() {
         assert_eq!(
-            with_media,
-            440.0 - 2.0 * super::STAGE_PADDING - 56.0 - 180.0
+            super::stage_content_height(440.0),
+            440.0 - 2.0 * super::STAGE_PADDING - 56.0
         );
+        assert_eq!(super::stage_content_height(80.0), 0.0);
     }
 
     #[test]
