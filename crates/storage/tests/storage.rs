@@ -2553,6 +2553,24 @@ fn scheduler_v2_without_rollover_uses_ankis_four_am_default() {
 }
 
 #[test]
+fn a_fresh_collection_uses_ankis_default_day_boundary() {
+    let (_directory, path) = fixture();
+    let store = Collection::open(&path).expect("open");
+    let now = now_secs();
+    let created = store.collection_created().expect("created");
+    let timing = Store::timing(&store, now).expect("timing");
+    let expected = ranki_model::Timing::new(
+        now,
+        created,
+        Some(ranki_storage::local_minutes_west(created).expect("offset")),
+        ranki_storage::local_minutes_west(now).expect("offset"),
+        Some(4),
+    );
+    assert_eq!(timing.days_elapsed, expected.days_elapsed);
+    assert_eq!(timing.next_day_at, expected.next_day_at);
+}
+
+#[test]
 fn schema18_config_table_supplies_due_counts() {
     let (_directory, path) = fixture();
     let now = chrono::Local

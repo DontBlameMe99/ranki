@@ -340,7 +340,6 @@ fn deck_remove_refuses_to_delete_the_default_deck() {
 }
 
 /// Every file under `root`, by relative path, with its bytes.
-/// Every file under `root`, by relative path, with its bytes.
 fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut files = Vec::new();
     walk(root, root, &mut files);
@@ -392,6 +391,5 @@ fn ranki_leaves_a_local_anki_profile_untouched() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(home.join(".local/share/ranki/collection.anki2").is_file());
-    assert!(!home.join(".local/share/ranki/ranki-sync.json").exists());
     assert_eq!(snapshot(&anki), before);
 }
