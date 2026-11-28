@@ -358,9 +358,14 @@ struct ConnectServer {
 }
 
 impl ConnectServer {
-    fn start(binary: &Path, collection: &Path) -> BenchResult<Self> {
+    fn start(
+        binary: &Path,
+        collection: &Path,
+        data_dir: &Path,
+    ) -> BenchResult<Self> {
         let port = free_port()?;
         let child = Command::new(binary)
+            .env("RANKI_DATA_DIR", data_dir)
             .args(["--collection"])
             .arg(collection)
             .args(["connect", "--port", &port.to_string()])
@@ -408,8 +413,13 @@ struct McpSession {
 }
 
 impl McpSession {
-    fn start(binary: &Path, collection: &Path) -> BenchResult<Self> {
+    fn start(
+        binary: &Path,
+        collection: &Path,
+        data_dir: &Path,
+    ) -> BenchResult<Self> {
         let spawned = Command::new(binary)
+            .env("RANKI_DATA_DIR", data_dir)
             .args(["--collection"])
             .arg(collection)
             .arg("mcp")
@@ -786,6 +796,7 @@ pub fn run() -> BenchResult<Report> {
     let collection_arg = collection
         .to_str()
         .ok_or_else(|| message("collection path is not valid UTF-8"))?;
+    let data_dir = fixture.directory.path();
     recorder.measure(
         "process/cli/decks",
         "start ranki and list decks within 500 ms",
@@ -795,6 +806,7 @@ pub fn run() -> BenchResult<Report> {
         2,
         || {
             let output = Command::new(&binary)
+                .env("RANKI_DATA_DIR", data_dir)
                 .args(["--collection", collection_arg, "decks"])
                 .output()?;
             if !output.status.success()
@@ -814,6 +826,7 @@ pub fn run() -> BenchResult<Report> {
         2,
         || {
             let output = Command::new(&binary)
+                .env("RANKI_DATA_DIR", data_dir)
                 .args(["--collection", collection_arg, "search", "unique42"])
                 .output()?;
             if !output.status.success() {
@@ -831,12 +844,12 @@ pub fn run() -> BenchResult<Report> {
         1,
         1,
         || {
-            let server = ConnectServer::start(&binary, collection)?;
+            let server = ConnectServer::start(&binary, collection, data_dir)?;
             drop(server);
             Ok(())
         },
     )?;
-    let connect = ConnectServer::start(&binary, collection)?;
+    let connect = ConnectServer::start(&binary, collection, data_dir)?;
     recorder.measure(
         "connect/roundtrip/version",
         "answer an AnkiConnect version request within 100 ms",
@@ -872,12 +885,12 @@ pub fn run() -> BenchResult<Report> {
         1,
         1,
         || {
-            let session = McpSession::start(&binary, collection)?;
+            let session = McpSession::start(&binary, collection, data_dir)?;
             drop(session);
             Ok(())
         },
     )?;
-    let mut mcp = McpSession::start(&binary, collection)?;
+    let mut mcp = McpSession::start(&binary, collection, data_dir)?;
     recorder.measure(
         "mcp/roundtrip/tools-list",
         "answer an MCP tools/list request within 100 ms",

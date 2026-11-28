@@ -109,6 +109,9 @@ impl Display for ModelRef {
     reason = "mutually exclusive sync flags map directly onto CLI switches"
 )]
 struct Cli {
+    /// The benchmark harness is shared with older commits that require this
+    /// flag, so it parses here. It must name the collection inside the data
+    /// directory and never selects storage.
     #[arg(
         long = "collection",
         global = true,
@@ -276,37 +279,27 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> CliResult<()> {
     let mut config = config::load();
     let mut transport = sync::lazy_http_transport(&config);
-    let data_dir = if let Some(collection) = cli.bench_collection.as_deref() {
-        if env::var_os("RANKI_BIN").is_none() {
-            return Err(CliError::Message(
-                "--collection is reserved for the benchmark harness".into(),
-            ));
-        }
-        collection
-            .parent()
-            .ok_or_else(|| {
-                CliError::Message("collection has no parent".into())
-            })?
-            .to_path_buf()
-    } else {
-        config::data_dir_path(
-            env::var_os("RANKI_DATA_DIR").as_deref(),
-            env::var_os("XDG_DATA_HOME").as_deref(),
-            env::var_os("HOME").as_deref(),
-        )
-        .ok_or_else(|| {
-            CliError::Message(
-                "cannot resolve Ranki's data directory; set RANKI_DATA_DIR or HOME"
-                    .into(),
-            )
-        })?
-    };
-    run_with_sync(
-        cli,
-        &mut config,
-        &mut transport,
-        ranki_model::DataPaths::new(data_dir),
+    let data_dir = config::data_dir_path(
+        env::var_os("RANKI_DATA_DIR").as_deref(),
+        env::var_os("XDG_DATA_HOME").as_deref(),
+        env::var_os("HOME").as_deref(),
     )
+    .ok_or_else(|| {
+        CliError::Message(
+            "cannot resolve Ranki's data directory; set RANKI_DATA_DIR or HOME"
+                .into(),
+        )
+    })?;
+    let paths = ranki_model::DataPaths::new(data_dir);
+    if let Some(requested) = cli.bench_collection.as_deref()
+        && requested != paths.collection
+    {
+        return Err(CliError::Message(format!(
+            "--collection is reserved for the benchmark harness and must be {}",
+            paths.collection.display()
+        )));
+    }
+    run_with_sync(cli, &mut config, &mut transport, paths)
 }
 
 /// CLI entry point with an injectable sync transport. Tests never reach HTTP.
@@ -1227,11 +1220,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_path_flags_are_not_public() {
-        let cli = parse(&["ranki", "--collection", "/tmp/demo.anki2", "decks"]);
-        assert_eq!(
-            cli.bench_collection.as_deref(),
-            Some(Path::new("/tmp/demo.anki2"))
+    fn only_the_benchmark_collection_flag_parses() {
+        assert!(
+            Cli::try_parse_from([
+                "ranki",
+                "--collection",
+                "/tmp/demo.anki2",
+                "decks"
+            ])
+            .is_ok()
         );
         assert!(
             Cli::try_parse_from(["ranki", "mcp", "--media-dir", "/tmp/media"])

@@ -95,7 +95,9 @@ impl Default for DataPaths {
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub paths: DataPaths,
-    /// Legacy benchmark fields. Production code uses `paths`.
+    /// Legacy benchmark fields. The benchmark harness is shared with older
+    /// commits, so these stay for the performance workflow. Production code
+    /// uses `paths`.
     pub collection: PathBuf,
     pub media_dir: PathBuf,
     pub theme: ThemeChoice,
