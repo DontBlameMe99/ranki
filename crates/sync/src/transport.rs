@@ -181,6 +181,14 @@ pub trait SyncTransport: Send {
     ///
     /// Returns a transport error on a network or HTTP failure.
     fn media_download(&mut self, body: &[u8]) -> Result<SyncResponse>;
+
+    /// Create an independent transport for a parallel media download worker.
+    ///
+    /// Returning `None` keeps media downloads sequential.
+    fn media_download_worker(&self) -> Option<Box<dyn SyncTransport>> {
+        None
+    }
+
     /// Replace the endpoint after a server redirect.
     ///
     /// # Errors
@@ -224,6 +232,10 @@ impl<T: SyncTransport + ?Sized> SyncTransport for Box<T> {
         (**self).media_download(body)
     }
 
+    fn media_download_worker(&self) -> Option<Box<dyn SyncTransport>> {
+        (**self).media_download_worker()
+    }
+
     fn set_endpoint(&mut self, endpoint: &str) -> Result<()> {
         (**self).set_endpoint(endpoint)
     }
@@ -238,6 +250,7 @@ impl<T: SyncTransport + ?Sized> SyncTransport for Box<T> {
 }
 
 /// Blocking `AnkiWeb` v11 transport.
+#[derive(Clone)]
 pub struct HttpTransport {
     agent: Agent,
     endpoint: String,
@@ -373,6 +386,10 @@ impl SyncTransport for HttpTransport {
 
     fn media_download(&mut self, body: &[u8]) -> Result<SyncResponse> {
         self.request(SyncMethod::MediaDownload, body)
+    }
+
+    fn media_download_worker(&self) -> Option<Box<dyn SyncTransport>> {
+        Some(Box::new(self.clone()))
     }
 
     fn set_endpoint(&mut self, endpoint: &str) -> Result<()> {

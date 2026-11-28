@@ -1,8 +1,8 @@
 use crate::{
     Credentials, MockResponse, MockTransport, ORIGINAL_SIZE_HEADER,
     RemoteStatus, RetryPolicy, SYNC_PLATFORM, SyncClient, SyncError,
-    SyncMethod, SyncOutcome, SyncResponse, SyncState, client_version,
-    meta_client_version, wire,
+    SyncMethod, SyncOutcome, SyncResponse, SyncState, SyncTransport,
+    client_version, meta_client_version, wire,
 };
 use ranki_model::DeckSteps;
 use ranki_model::Store;
@@ -15,11 +15,16 @@ use std::io::{Cursor, Write};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 use zip::write::FileOptions;
 
 type TestResult<T = ()> = crate::Result<T>;
+
+/// Files the parallel media transport serves, enough for three ZIP batches.
+const MEDIA_FILES: i32 = 60;
 type CollectionValues = (i64, i64, u32);
 type MetaValues = (i64, i64, bool, i64);
 
@@ -1157,5 +1162,156 @@ fn redirect_updates_endpoint() -> TestResult {
         SyncError::State("missing redirected request".to_owned())
     })?;
     assert_eq!(second.endpoint, "https://sync.ankiweb.net/");
+    Ok(())
+}
+
+/// Transport that answers media downloads from a shared queue of batches.
+#[derive(Clone, Default)]
+struct ParallelMedia {
+    state: Arc<Mutex<ParallelState>>,
+}
+
+#[derive(Default)]
+struct ParallelState {
+    downloaded: Vec<String>,
+    active: usize,
+    peak: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct DownloadFiles {
+    files: Vec<String>,
+}
+
+impl ParallelMedia {
+    fn lock(&self) -> TestResult<MutexGuard<'_, ParallelState>> {
+        self.state.lock().map_err(|error| {
+            SyncError::State(format!("media state poisoned: {error}"))
+        })
+    }
+
+    fn enter(&self) -> TestResult<()> {
+        let mut state = self.lock()?;
+        state.active = state.active.saturating_add(1);
+        state.peak = state.peak.max(state.active);
+        Ok(())
+    }
+
+    fn leave(&self, files: &[String]) -> TestResult<()> {
+        let mut state = self.lock()?;
+        state.active = state.active.saturating_sub(1);
+        state.downloaded.extend(files.iter().cloned());
+        Ok(())
+    }
+}
+
+fn media_zip_many(entries: &[(String, Vec<u8>)]) -> TestResult<Vec<u8>> {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options: FileOptions<'_, '_, ()> = FileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored);
+    let mut map = HashMap::new();
+    for (index, (name, bytes)) in entries.iter().enumerate() {
+        let stored = index.to_string();
+        map.insert(stored.clone(), name.clone());
+        zip.start_file(stored, options)
+            .map_err(|error| SyncError::Decode(error.to_string()))?;
+        zip.write_all(bytes)?;
+    }
+    let meta = serde_json::to_vec(&map)?;
+    zip.start_file("_meta", options)
+        .map_err(|error| SyncError::Decode(error.to_string()))?;
+    zip.write_all(&meta)?;
+    let cursor = zip
+        .finish()
+        .map_err(|error| SyncError::Decode(error.to_string()))?;
+    Ok(cursor.into_inner())
+}
+
+impl SyncTransport for ParallelMedia {
+    fn host_key(&mut self, _body: &[u8]) -> crate::Result<SyncResponse> {
+        Err(SyncError::Network("unexpected login".to_owned()))
+    }
+
+    fn meta(&mut self, _body: &[u8]) -> crate::Result<SyncResponse> {
+        Err(SyncError::Network("unexpected meta".to_owned()))
+    }
+
+    fn upload(&mut self, _body: &[u8]) -> crate::Result<SyncResponse> {
+        Err(SyncError::Network("unexpected upload".to_owned()))
+    }
+
+    fn download(&mut self, _body: &[u8]) -> crate::Result<SyncResponse> {
+        Err(SyncError::Network("unexpected download".to_owned()))
+    }
+
+    fn media_begin(&mut self, _body: &[u8]) -> crate::Result<SyncResponse> {
+        media_begin(MEDIA_FILES).map(SyncResponse::from)
+    }
+
+    fn media_changes(&mut self, _body: &[u8]) -> crate::Result<SyncResponse> {
+        let data = (1..=MEDIA_FILES)
+            .map(|index| {
+                json!([
+                    format!("file-{index}.png"),
+                    index,
+                    format!("sha-{index}")
+                ])
+            })
+            .collect::<Vec<_>>();
+        MockResponse::ok_json(&json!({ "data": data, "err": "" }))
+            .map(SyncResponse::from)
+    }
+
+    fn media_download(&mut self, body: &[u8]) -> crate::Result<SyncResponse> {
+        let response = SyncResponse {
+            body: body.to_vec(),
+            ..SyncResponse::default()
+        };
+        let request: DownloadFiles =
+            serde_json::from_slice(&wire::decode(&response)?)?;
+        self.enter()?;
+        thread::sleep(Duration::from_millis(20));
+        let entries = request
+            .files
+            .iter()
+            .map(|name| (name.clone(), name.as_bytes().to_vec()))
+            .collect::<Vec<_>>();
+        self.leave(&request.files)?;
+        MockResponse::ok_bytes(media_zip_many(&entries)?)
+            .map(SyncResponse::from)
+    }
+
+    fn media_download_worker(&self) -> Option<Box<dyn SyncTransport>> {
+        Some(Box::new(self.clone()))
+    }
+
+    fn set_endpoint(&mut self, _endpoint: &str) -> crate::Result<()> {
+        Ok(())
+    }
+
+    fn set_host_key(&mut self, _key: &str) {}
+}
+
+#[test]
+fn media_downloads_run_in_parallel_batches() -> TestResult {
+    let directory = TempDir::new()?;
+    let collection = directory.path().join("collection.anki2");
+    let media = directory.path().join("media");
+    let state_path = directory.path().join("sync.json");
+    make_collection(&collection, (100, 100, 1))?;
+    write_state(&state_path, &seeded_state(&fixture_key(&directory)))?;
+    let transport = ParallelMedia::default();
+    let mut client =
+        SyncClient::new(transport.clone(), &collection, &media, &state_path)?;
+
+    client.sync_media()?;
+
+    let expected = usize::try_from(MEDIA_FILES)
+        .map_err(|error| SyncError::State(error.to_string()))?;
+    assert_eq!(fs::read_dir(&media)?.count(), expected);
+    assert_eq!(fs::read(media.join("file-30.png"))?, b"file-30.png");
+    let state = transport.lock()?;
+    assert_eq!(state.downloaded.len(), expected);
+    assert!(state.peak > 1, "peak concurrency was {}", state.peak);
     Ok(())
 }
