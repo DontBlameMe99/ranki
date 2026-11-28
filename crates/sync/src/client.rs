@@ -13,12 +13,16 @@ use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{SyncSender, sync_channel};
+use std::thread;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::Builder;
 
 const CLOCK_SKEW_SECONDS: i64 = 300;
 const MAX_REDIRECTS: u8 = 3;
+const MEDIA_DOWNLOAD_WORKERS: usize = 8;
 
 /// Checkpoint attempts before an upload gives up on folding the log in.
 const CHECKPOINT_TRIES: u8 = 3;
@@ -329,7 +333,9 @@ impl<T: SyncTransport> SyncClient<T> {
     /// never holds up the collection itself. The full manifest is fetched
     /// whenever media changes or the local folder is empty, so files from
     /// another account or a removed local copy are restored. Files already
-    /// present with the server's hash are left untouched.
+    /// present with the server's hash are left untouched. Batches, which
+    /// `AnkiWeb` caps at 25 files, download in parallel when the transport can
+    /// clone itself.
     ///
     /// # Errors
     ///
@@ -355,24 +361,91 @@ impl<T: SyncTransport> SyncClient<T> {
         fs::create_dir_all(&self.media_dir)?;
 
         let missing = self.missing_media(server_usn)?;
-        let total = missing.len();
-        self.report_media(MediaProgress { done: 0, total });
-        let mut done = 0_usize;
-        for names in missing.chunks(media::DOWNLOAD_BATCH) {
-            let request = media::DownloadRequest {
-                files: names.to_vec(),
-            };
-            let body = wire::frame_json(&request)?;
-            let response = self.send(SyncMethod::MediaDownload, &body)?;
-            let zip = wire::decode(&response)?;
-            media::extract_files(&self.media_dir, &zip)?;
-            done = done.saturating_add(names.len());
-            self.report_media(MediaProgress { done, total });
+        let plan = DownloadPlan::new(&missing)?;
+        self.report_media(MediaProgress {
+            done: 0,
+            total: plan.total,
+        });
+        let workers = (0..MEDIA_DOWNLOAD_WORKERS)
+            .filter_map(|_| self.transport.media_download_worker())
+            .collect::<Vec<_>>();
+        if workers.len() > 1 && plan.bodies.len() > 1 {
+            self.download_media_parallel(&plan, workers)?;
+        } else {
+            self.download_media_sequential(&plan)?;
         }
         self.state.last_media_usn = server_usn;
         self.state.media_refill_needed = false;
         self.state.save(&self.state_path)?;
         Ok(())
+    }
+
+    fn download_media_sequential(&mut self, plan: &DownloadPlan) -> Result<()> {
+        let mut done = 0_usize;
+        for body in &plan.bodies {
+            let response = self.send(SyncMethod::MediaDownload, body)?;
+            let written = self.extract(&response)?;
+            done = done.saturating_add(written);
+            self.report_media(MediaProgress {
+                done,
+                total: plan.total,
+            });
+        }
+        Ok(())
+    }
+
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "worker setup and result handling stay next to the scope"
+    )]
+    fn download_media_parallel(
+        &mut self,
+        plan: &DownloadPlan,
+        workers: Vec<Box<dyn SyncTransport>>,
+    ) -> Result<()> {
+        let shared = DownloadShared {
+            bodies: &plan.bodies,
+            next: AtomicUsize::new(0),
+            failed: AtomicBool::new(false),
+            endpoint: self.state.endpoint.clone(),
+        };
+        let mut done = 0_usize;
+        let mut redirected = None;
+        thread::scope(|scope| -> Result<()> {
+            let (sender, receiver) = sync_channel(workers.len());
+            let shared = &shared;
+            for transport in workers {
+                let worker_sender = sender.clone();
+                scope.spawn(move || {
+                    download_worker(transport, shared, &worker_sender);
+                });
+            }
+            drop(sender);
+            for result in receiver {
+                let (response, endpoint) = result?;
+                let written = self.extract(&response)?;
+                done = done.saturating_add(written);
+                self.report_media(MediaProgress {
+                    done,
+                    total: plan.total,
+                });
+                if redirected.is_none() && endpoint != self.state.endpoint {
+                    redirected = Some(endpoint);
+                }
+            }
+            Ok(())
+        })?;
+
+        if let Some(endpoint) = redirected {
+            self.state.endpoint = endpoint;
+            self.state.save(&self.state_path)?;
+        }
+        Ok(())
+    }
+
+    fn extract(&self, response: &SyncResponse) -> Result<usize> {
+        let zip = wire::decode(response)?;
+        media::extract_files(&self.media_dir, &zip)
     }
 
     fn media_server_usn(&mut self) -> Result<i32> {
@@ -586,74 +659,21 @@ impl<T: SyncTransport> SyncClient<T> {
         self.state.save(&self.state_path)
     }
 
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "request loop keeps redirect and retry state local"
-    )]
     fn send(
         &mut self,
         method: SyncMethod,
         body: &[u8],
     ) -> Result<SyncResponse> {
-        let mut redirects = 0_u8;
-        loop {
-            let response = self.attempt(method, body)?;
-            if response.status != 308 {
-                ensure_success(&response, method)?;
-                return Ok(response);
-            }
-            self.follow_redirect(&response)?;
-            redirects = redirects.saturating_add(1);
-            if redirects > MAX_REDIRECTS {
-                return Err(SyncError::TooManyRedirects);
-            }
+        let request = Request { method, body };
+        let (response, redirected) = send_transport(
+            &mut self.transport,
+            &mut self.state.endpoint,
+            request,
+        )?;
+        if redirected {
+            self.state.save(&self.state_path)?;
         }
-    }
-
-    fn follow_redirect(&mut self, response: &SyncResponse) -> Result<()> {
-        let location = response.header("location").ok_or_else(|| {
-            SyncError::Network("redirect response has no location".to_owned())
-        })?;
-        let endpoint = normalize_endpoint(location)?;
-        self.transport.set_endpoint(&endpoint)?;
-        self.state.endpoint = endpoint;
-        self.state.save(&self.state_path)
-    }
-
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "retry loop keeps attempt state local"
-    )]
-    fn attempt(
-        &mut self,
-        method: SyncMethod,
-        body: &[u8],
-    ) -> Result<SyncResponse> {
-        let policy = self.transport.retry_policy();
-        let mut attempt = 0_u8;
-        loop {
-            let result = match method {
-                SyncMethod::HostKey => self.transport.host_key(body),
-                SyncMethod::Meta => self.transport.meta(body),
-                SyncMethod::Upload => self.transport.upload(body),
-                SyncMethod::Download => self.transport.download(body),
-                SyncMethod::MediaBegin => self.transport.media_begin(body),
-                SyncMethod::MediaChanges => self.transport.media_changes(body),
-                SyncMethod::MediaDownload => {
-                    self.transport.media_download(body)
-                }
-            };
-            let retry = is_retryable_result(&result, method)
-                && attempt < policy.retries;
-            if !retry {
-                return result;
-            }
-            let delay = policy
-                .backoff
-                .saturating_mul(u32::from(attempt).saturating_add(1));
-            sleep(delay);
-            attempt = attempt.saturating_add(1);
-        }
+        Ok(response)
     }
 
     fn prepare_collection(&self) -> Result<(LocalInfo, Vec<u8>)> {
@@ -757,6 +777,138 @@ struct LocalInfo {
     mod_time: i64,
     scm: i64,
     cards: u64,
+}
+
+/// One framed request, ready to send.
+#[derive(Clone, Copy)]
+struct Request<'a> {
+    method: SyncMethod,
+    body: &'a [u8],
+}
+
+fn send_transport<T: SyncTransport + ?Sized>(
+    transport: &mut T,
+    endpoint: &mut String,
+    request: Request<'_>,
+) -> Result<(SyncResponse, bool)> {
+    let starting_endpoint = endpoint.clone();
+    let mut redirects = 0_u8;
+    loop {
+        let response = attempt_transport(transport, request)?;
+        if response.status != 308 {
+            ensure_success(&response, request.method)?;
+            return Ok((response, *endpoint != starting_endpoint));
+        }
+        follow_redirect(transport, endpoint, &response)?;
+        redirects = redirects.saturating_add(1);
+        if redirects > MAX_REDIRECTS {
+            return Err(SyncError::TooManyRedirects);
+        }
+    }
+}
+
+fn follow_redirect<T: SyncTransport + ?Sized>(
+    transport: &mut T,
+    endpoint: &mut String,
+    response: &SyncResponse,
+) -> Result<()> {
+    let location = response.header("location").ok_or_else(|| {
+        SyncError::Network("redirect response has no location".to_owned())
+    })?;
+    let redirected_endpoint = normalize_endpoint(location)?;
+    transport.set_endpoint(&redirected_endpoint)?;
+    *endpoint = redirected_endpoint;
+    Ok(())
+}
+
+fn attempt_transport<T: SyncTransport + ?Sized>(
+    transport: &mut T,
+    request: Request<'_>,
+) -> Result<SyncResponse> {
+    let policy = transport.retry_policy();
+    let mut attempt = 0_u8;
+    let Request { method, body } = request;
+    loop {
+        let result = match method {
+            SyncMethod::HostKey => transport.host_key(body),
+            SyncMethod::Meta => transport.meta(body),
+            SyncMethod::Upload => transport.upload(body),
+            SyncMethod::Download => transport.download(body),
+            SyncMethod::MediaBegin => transport.media_begin(body),
+            SyncMethod::MediaChanges => transport.media_changes(body),
+            SyncMethod::MediaDownload => transport.media_download(body),
+        };
+        let retry =
+            is_retryable_result(&result, method) && attempt < policy.retries;
+        if !retry {
+            return result;
+        }
+        let delay = policy
+            .backoff
+            .saturating_mul(u32::from(attempt).saturating_add(1));
+        sleep(delay);
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+/// Media batches and their framed requests for one refresh.
+struct DownloadPlan {
+    bodies: Vec<Vec<u8>>,
+    total: usize,
+}
+
+impl DownloadPlan {
+    fn new(missing: &[String]) -> Result<Self> {
+        let total = missing.len();
+        let bodies = missing
+            .chunks(media::DOWNLOAD_BATCH)
+            .map(|files| {
+                wire::frame_json(&media::DownloadRequest {
+                    files: files.to_vec(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { bodies, total })
+    }
+}
+
+/// State shared by the media download workers.
+struct DownloadShared<'a> {
+    bodies: &'a [Vec<u8>],
+    next: AtomicUsize,
+    failed: AtomicBool,
+    endpoint: String,
+}
+
+type DownloadResult = Result<(SyncResponse, String)>;
+
+fn download_worker(
+    mut transport: Box<dyn SyncTransport>,
+    shared: &DownloadShared<'_>,
+    sender: &SyncSender<DownloadResult>,
+) {
+    let mut endpoint = shared.endpoint.clone();
+    while !shared.failed.load(Ordering::Relaxed) {
+        let index = shared.next.fetch_add(1, Ordering::Relaxed);
+        let Some(body) = shared.bodies.get(index) else {
+            break;
+        };
+        let request = Request {
+            method: SyncMethod::MediaDownload,
+            body,
+        };
+        let sent = match send_transport(&mut *transport, &mut endpoint, request)
+        {
+            Ok((response, _)) => sender.send(Ok((response, endpoint.clone()))),
+            Err(error) => {
+                shared.failed.store(true, Ordering::Relaxed);
+                sender.send(Err(error))
+            }
+        };
+        if sent.is_err() {
+            break;
+        }
+    }
 }
 
 fn conflict(reason: &str) -> SyncOutcome {

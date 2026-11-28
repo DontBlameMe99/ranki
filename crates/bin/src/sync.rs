@@ -130,6 +130,14 @@ impl<T: SyncTransport> SyncTransport for LazyTransport<T> {
         self.transport().media_download(body)
     }
 
+    fn media_download_worker(
+        &self,
+    ) -> Option<Box<dyn ranki_sync::SyncTransport>> {
+        self.transport
+            .as_ref()
+            .and_then(SyncTransport::media_download_worker)
+    }
+
     fn set_endpoint(&mut self, endpoint: &str) -> ranki_sync::Result<()> {
         self.transport().set_endpoint(endpoint)
     }
@@ -260,6 +268,12 @@ impl SyncTransport for TransportRef<'_> {
         body: &[u8],
     ) -> ranki_sync::Result<SyncResponse> {
         self.0.media_download(body)
+    }
+
+    fn media_download_worker(
+        &self,
+    ) -> Option<Box<dyn ranki_sync::SyncTransport>> {
+        self.0.media_download_worker()
     }
 
     fn set_endpoint(&mut self, endpoint: &str) -> ranki_sync::Result<()> {
