@@ -104,7 +104,7 @@ pub fn open_or_create(
     crt: Option<i64>,
 ) -> Result<Connection, FormatError> {
     ensure_parent(path)?;
-    let connection = Connection::open(path).map_err(db_error(format!(
+    let mut connection = Connection::open(path).map_err(db_error(format!(
         "cannot open collection {}",
         path.display()
     )))?;
@@ -112,14 +112,26 @@ pub fn open_or_create(
         FormatError::with_source("cannot register collection collations", error)
     })?;
     connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .map_err(db_error("cannot configure collection journal"))?;
+    connection
+        .pragma_update(None, "synchronous", "NORMAL")
+        .map_err(db_error("cannot configure collection synchronization"))?;
+    let transaction = connection
+        .transaction()
+        .map_err(db_error("cannot initialize collection schema"))?;
+    transaction
         .execute_batch(SCHEMA)
         .map_err(db_error("cannot initialize collection schema"))?;
-    let count: i64 = connection
+    let count: i64 = transaction
         .query_row("SELECT COUNT(*) FROM col", [], |row| row.get(0))
         .map_err(db_error("cannot read collection metadata"))?;
     if count == 0 {
-        insert_default_col(&connection, crt)?;
+        insert_default_col(&transaction, crt)?;
     }
+    transaction
+        .commit()
+        .map_err(db_error("cannot commit collection schema"))?;
     Ok(connection)
 }
 

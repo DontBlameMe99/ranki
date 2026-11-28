@@ -58,6 +58,9 @@ pub struct Note {
     pub data: String,
 }
 
+/// One card and the note that owns it.
+pub type CardWithNote = (Card, Note);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CardType {
     New,
@@ -791,6 +794,34 @@ pub trait Store {
     /// # Errors
     /// Returns [`StoreError`] if the collection cannot be read.
     fn note(&self, id: Id) -> Result<Option<Note>, StoreError>;
+    /// Loads cards and their notes in one store call.
+    ///
+    /// Missing cards or notes are skipped. Stores may override this to avoid
+    /// reopening or requerying the collection for every id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the collection cannot be read.
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "batch loading skips missing cards and notes in one loop"
+    )]
+    fn cards_with_notes(
+        &self,
+        ids: &[Id],
+    ) -> Result<Vec<CardWithNote>, StoreError> {
+        let mut loaded = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(card) = self.card(*id)? else {
+                continue;
+            };
+            let Some(note) = self.note(card.note_id)? else {
+                continue;
+            };
+            loaded.push((card, note));
+        }
+        Ok(loaded)
+    }
 
     /// Adds a note and its generated cards.
     ///
@@ -903,6 +934,20 @@ pub trait Store {
             "review_history is not supported by this store".to_owned(),
         ))
     }
+    /// Counts review logs newer than `cutoff_ms`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the collection cannot be read.
+    fn review_count_since(&self, cutoff_ms: i64) -> Result<u32, StoreError> {
+        let count = self
+            .review_history()?
+            .iter()
+            .filter(|log| log.id > cutoff_ms)
+            .count();
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
     /// Counts scheduled cards for each of the next `days` Anki days.
     ///
     /// The first entry is today. It includes overdue cards and learning cards

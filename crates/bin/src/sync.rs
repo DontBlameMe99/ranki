@@ -771,10 +771,7 @@ mod tests {
             .iter()
             .map(|request| request.method)
             .collect();
-        assert_eq!(
-            methods,
-            [SyncMethod::Meta, SyncMethod::Download, SyncMethod::Meta,]
-        );
+        assert_eq!(methods, [SyncMethod::Meta, SyncMethod::Download]);
     }
 
     #[test]

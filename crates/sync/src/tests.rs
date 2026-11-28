@@ -340,6 +340,11 @@ fn full_download_replaces_collection_and_keeps_media() -> TestResult {
     assert_eq!(cards, 1);
     assert_eq!(fs::read(media.join("image.png"))?, b"image");
     assert!(collection.with_extension("ranki-sync.bak").exists());
+    assert_eq!(client.transport().request_count(), 1);
+    assert_eq!(
+        client.transport().requests()[0].method,
+        SyncMethod::Download
+    );
     assert_eq!(client.state().last_mod, Some(900));
     assert_eq!(client.state().last_local_mod, Some(900));
 
@@ -744,7 +749,6 @@ fn full_download_restores_remote_media() -> TestResult {
         methods,
         [
             SyncMethod::Download,
-            SyncMethod::Meta,
             SyncMethod::MediaBegin,
             SyncMethod::MediaChanges,
             SyncMethod::MediaDownload,

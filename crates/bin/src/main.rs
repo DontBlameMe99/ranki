@@ -322,10 +322,12 @@ fn run_with_sync(
     let manual_sync = matches!(cli.command, Some(Command::Sync { .. }));
     let (auth, auto_sync) = sync::startup_credentials(&settings, manual_sync);
 
-    if auto_sync
-        && sync_once_and_warn(transport, &settings, auth.as_ref(), true)
-            .is_some()
-    {
+    let startup_sync = if auto_sync {
+        sync_once_and_warn(transport, &settings, auth.as_ref(), true)
+    } else {
+        None
+    };
+    if startup_sync.is_some() {
         maybe_optimize(config, &settings);
     }
 
@@ -422,7 +424,10 @@ fn run_with_sync(
         } else {
             (None, false)
         };
-    if shutdown_sync {
+    let startup_settled = startup_sync.as_ref().is_some_and(|outcome| {
+        !matches!(outcome, SyncOutcome::RetryLater { .. })
+    });
+    if shutdown_sync && startup_settled {
         let _ = sync_once_and_warn(
             transport,
             &final_settings,
@@ -460,6 +465,9 @@ fn sync_once_and_warn(
 }
 
 fn maybe_optimize(config: &mut config::Config, settings: &config::Settings) {
+    if !config.scheduler.auto_optimize {
+        return;
+    }
     let Ok(now) = now_secs() else {
         return;
     };
@@ -1062,6 +1070,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+    use std::time::Duration;
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
 
@@ -1139,6 +1148,47 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![SyncMethod::Meta, SyncMethod::Meta]
         );
+    }
+    #[test]
+    fn failed_startup_sync_does_not_retry_at_shutdown() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = ranki_model::DataPaths::new(directory.path());
+        assert!(crate::open_or_create(&paths.collection).is_ok());
+        let mut config = ranki_model::Config::default();
+        config.sync.enabled = true;
+        config.scheduler.auto_optimize = false;
+        fs::write(
+            &paths.sync_state,
+            serde_json::json!({
+                "version": 1,
+                "endpoint": ranki_sync::DEFAULT_ENDPOINT,
+                "host_key": "stored-hkey",
+                "last_mod": null,
+                "last_scm": 1_700_000_000_000_i64,
+                "last_usn": 0,
+                "last_media_usn": 0,
+                "last_success": null,
+                "failures": 0
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut transport = MockTransport::new()
+            .with_failure(SyncMethod::Meta, ranki_sync::SyncError::Timeout)
+            .with_retry_policy(ranki_sync::RetryPolicy {
+                retries: 2,
+                backoff: Duration::ZERO,
+            });
+
+        run_with_sync(
+            parse(&["ranki", "decks"]),
+            &mut config,
+            &mut transport,
+            paths,
+        )
+        .unwrap();
+
+        assert_eq!(transport.request_count(), 3);
     }
 
     #[test]

@@ -1146,6 +1146,8 @@ impl Root {
                 error: None,
                 generation: 0,
                 loading: false,
+                query: None,
+                modified: None,
                 viewport: None,
             },
             create_field,
@@ -1962,6 +1964,7 @@ impl Root {
         self.refresh_statistics(cx);
         self.collection_modified =
             self.store.collection_modified().unwrap_or(0);
+        self.refresh_statistics(cx);
         self.external_change = false;
         if let Some(id) = selected_id {
             self.selected = self.decks.iter().position(|deck| deck.id == id);
@@ -2034,10 +2037,18 @@ impl Root {
     }
 
     /// Rebuilds the collection-wide review summary from the store's log.
+    ///
+    /// A reload with the same collection stamp and day boundary keeps the
+    /// summary it already has.
     fn refresh_statistics(&mut self, cx: &mut Context<Self>) {
-        self.statistics_generation = self.statistics_generation.wrapping_add(1);
         let timing = self.timing(Self::now());
         let modified = self.store.collection_modified().unwrap_or(0);
+        if modified == self.statistics_modified
+            && timing.next_day_at == self.statistics_next_day_at
+        {
+            return;
+        }
+        self.statistics_generation = self.statistics_generation.wrapping_add(1);
         match self.store.review_history() {
             Ok(history) => {
                 self.statistics = build_statistics_timed(&history, &timing);
@@ -3081,15 +3092,15 @@ impl Root {
         if self.view != View::Review {
             return;
         }
+        if self.review.phase != Phase::Answer {
+            self.reveal(cx);
+            return;
+        }
         let Some(current) = self.review.current.clone() else {
             return;
         };
         let card =
             refreshed_card(&current, |id| self.store.card(id).ok().flatten());
-        if self.review.phase != Phase::Answer {
-            self.reveal(cx);
-            return;
-        }
         let now = Instant::now();
         if self
             .review
@@ -3293,8 +3304,8 @@ impl Root {
                         }
                         self.browse.selected = None;
                         self.refresh_stats();
-                        self.refresh_browse(cx);
                         self.record_local_write();
+                        self.refresh_browse(cx);
                         self.refresh_known_tags();
                         self.show_toast(ToastKind::Success, "Card removed", cx);
                     }
@@ -3596,8 +3607,8 @@ impl Root {
                     self.add.errors.clear();
                     self.reset_fields(cx);
                     self.refresh_stats();
-                    self.refresh_browse(cx);
                     self.record_local_write();
+                    self.refresh_browse(cx);
                     self.refresh_known_tags();
                     self.view = View::Browse;
                     self.show_toast(ToastKind::Success, "Card updated", cx);

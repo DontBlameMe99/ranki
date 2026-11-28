@@ -257,14 +257,13 @@ fn referenced_media(
     drop(statement);
     fields.extend(model_text(connection, &model_ids)?);
 
+    let references = fields.join("\u{1f}");
     Ok(files
         .into_iter()
         .filter(|file| {
             let encoded = media::percent_encode(&file.name);
-            fields.iter().any(|field| {
-                contains_reference(field, &file.name)
-                    || contains_reference(field, &encoded)
-            })
+            contains_reference(&references, &file.name)
+                || contains_reference(&references, &encoded)
         })
         .collect())
 }

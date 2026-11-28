@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::str;
 
 use rusqlite::Connection;
-use rusqlite::MAIN_DB;
-use rusqlite::backup::Progress;
+use rusqlite::backup::Backup;
+use rusqlite::backup::StepResult;
 use serde::Serialize;
 use serde_json::Value;
 use tempfile::Builder;
@@ -444,17 +444,43 @@ pub fn snapshot_collection(collection: &Path) -> Result<Vec<u8>, FormatError> {
         .suffix(".anki2")
         .tempfile_in(parent)
         .map_err(io_error("cannot create collection snapshot"))?;
-    source
-        .backup(MAIN_DB, snapshot.path(), None::<fn(Progress)>)
-        .map_err(db_error("cannot snapshot collection"))?;
-    drop(source);
-    let snapshot_db = Connection::open(snapshot.path())
+    let mut snapshot_db = Connection::open(snapshot.path())
         .map_err(db_error("cannot open collection snapshot"))?;
+    snapshot_db
+        .pragma_update(None, "journal_mode", "MEMORY")
+        .map_err(db_error("cannot configure collection snapshot"))?;
+    snapshot_db
+        .pragma_update(None, "synchronous", "OFF")
+        .map_err(db_error("cannot configure collection snapshot"))?;
+    {
+        let backup = Backup::new(&source, &mut snapshot_db)
+            .map_err(db_error("cannot snapshot collection"))?;
+        let mut result = backup
+            .step(100)
+            .map_err(db_error("cannot snapshot collection"))?;
+        while result == StepResult::More {
+            result = backup
+                .step(100)
+                .map_err(db_error("cannot snapshot collection"))?;
+        }
+        if result != StepResult::Done {
+            return Err(FormatError::new("collection snapshot is busy"));
+        }
+    }
+    drop(source);
     ranki_storage::register_collations(&snapshot_db).map_err(|error| {
         FormatError::with_source("cannot register collection collations", error)
     })?;
-    normalize_pending_usns(&snapshot_db)?;
-    normalize_col_metadata(&snapshot_db)?;
+    {
+        let transaction = snapshot_db
+            .transaction()
+            .map_err(db_error("cannot normalize collection snapshot"))?;
+        normalize_pending_usns(&transaction)?;
+        normalize_col_metadata(&transaction)?;
+        transaction
+            .commit()
+            .map_err(db_error("cannot commit collection snapshot"))?;
+    }
     drop(snapshot_db);
     fs::read(snapshot.path())
         .map_err(io_error("cannot read collection snapshot"))

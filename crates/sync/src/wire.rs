@@ -7,6 +7,9 @@ use zstd::stream;
 /// `AnkiWeb` rejects uploads at or above 300 MiB.
 pub const MAX_COLLECTION_BYTES: u64 = 300 * 1024 * 1024;
 pub const SYNC_VERSION: u8 = 11;
+/// Bytes reserved up front for a decoded payload, so a lying size header
+/// cannot force a large allocation.
+const DECODE_RESERVE_BYTES: u64 = 8 * 1024 * 1024;
 
 pub fn frame(bytes: &[u8]) -> Result<Vec<u8>> {
     stream::encode_all(bytes, 1)
@@ -32,7 +35,8 @@ pub fn decode(response: &SyncResponse) -> Result<Vec<u8>> {
     let budget = limit.saturating_add(1);
     let decoder = stream::read::Decoder::new(response.body.as_slice())
         .map_err(|error| SyncError::Decode(error.to_string()))?;
-    let mut output = Vec::new();
+    let reserved = declared.unwrap_or(0).min(DECODE_RESERVE_BYTES);
+    let mut output = Vec::with_capacity(usize::try_from(reserved).unwrap_or(0));
     decoder
         .take(budget)
         .read_to_end(&mut output)
