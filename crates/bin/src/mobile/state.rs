@@ -7,7 +7,6 @@
 )]
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::env;
 use std::fs;
@@ -174,7 +173,7 @@ pub struct Statistics {
     pub millis_today: u64,
     /// `Again`, `Hard`, `Good`, and `Easy` counts for today.
     pub ratings_today: [usize; 4],
-    /// Days with at least one review, up to today.
+    /// Current review streak, using the shared due-day rules.
     pub streak: usize,
     /// Cards due on each of the next seven days, starting today.
     pub forecast: Vec<usize>,
@@ -1631,22 +1630,20 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Aggregates today's answers, the studied-day streak, and nothing else.
 pub(crate) fn summarize(history: &[RevLog], timing: &Timing) -> Statistics {
     let today = i64::from(timing.days_elapsed);
-    let mut studied = HashSet::new();
+    let day_of = |seconds| {
+        today.saturating_sub(i64::from(timing.elapsed_days_since(seconds)))
+    };
     let mut stats = Statistics::default();
     for log in history {
         if matches!(log.kind, RevLogKind::Manual | RevLogKind::Rescheduled) {
             continue;
         }
-        let seconds = log.id.checked_div(1_000).unwrap_or_default();
-        let day =
-            today.saturating_sub(i64::from(timing.elapsed_days_since(seconds)));
+        let day = day_of(log.id.checked_div(1_000).unwrap_or_default());
         if day > today {
             continue;
         }
-        studied.insert(day);
         if day != today {
             continue;
         }
@@ -1658,7 +1655,7 @@ pub(crate) fn summarize(history: &[RevLog], timing: &Timing) -> Statistics {
             *slot = slot.saturating_add(1);
         }
     }
-    stats.streak = studied.len();
+    stats.streak = ranki_model::review_streak(history, day_of, today);
     stats
 }
 

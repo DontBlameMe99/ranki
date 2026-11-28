@@ -686,6 +686,13 @@ fn log(day: i64, rating: Rating, millis: u32) -> RevLog {
     }
 }
 
+fn with_interval(entry: &RevLog, interval: i32) -> RevLog {
+    RevLog {
+        interval,
+        ..entry.clone()
+    }
+}
+
 #[test]
 fn statistics_start_empty() {
     let timing = Timing::v1(START, START);
@@ -717,6 +724,41 @@ fn statistics_count_today_time_accuracy_and_streak() {
     assert_eq!(stats.accuracy_percent(), Some(100));
     assert_eq!(stats.streak, 3);
     assert_eq!(stats.forecast, Vec::<usize>::new());
+}
+
+#[test]
+fn statistics_skip_idle_days_but_break_on_unanswered_due_days() {
+    let skipped = Timing::v1(
+        START.saturating_add(SECONDS_PER_DAY.saturating_mul(3)),
+        START,
+    );
+    let stats = summarize(
+        &[log(0, Rating::Good, 100), log(3, Rating::Good, 100)],
+        &skipped,
+    );
+    assert_eq!(stats.streak, 1);
+
+    let unanswered = Timing::v1(
+        START.saturating_add(SECONDS_PER_DAY.saturating_mul(5)),
+        START,
+    );
+    let stats =
+        summarize(&[with_interval(&log(0, Rating::Good, 100), 2)], &unanswered);
+    assert_eq!(stats.streak, 0);
+
+    let idle = Timing::v1(
+        START.saturating_add(SECONDS_PER_DAY.saturating_mul(3)),
+        START,
+    );
+    let stats = summarize(
+        &[
+            with_interval(&log(0, Rating::Good, 100), 3),
+            log(2, Rating::Good, 100),
+            log(3, Rating::Good, 100),
+        ],
+        &idle,
+    );
+    assert_eq!(stats.streak, 3);
 }
 
 #[test]

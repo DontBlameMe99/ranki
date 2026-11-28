@@ -1098,7 +1098,7 @@ fn render_statistics(app: &AppState, ui: &mut Ui, p: &Palette) {
 }
 
 fn streak_label(streak: usize) -> String {
-    format!("Days studied: {streak}")
+    format!("Streak: {streak} day{}", if streak == 1 { "" } else { "s" })
 }
 
 fn forecast_label(offset: usize) -> String {
