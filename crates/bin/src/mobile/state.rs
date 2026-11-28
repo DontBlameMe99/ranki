@@ -711,6 +711,10 @@ impl AppState {
         self.update_preview();
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "creating and editing a note share one draft path"
+    )]
     /// Saves the draft as a new note, or updates the note being edited.
     ///
     /// # Errors
